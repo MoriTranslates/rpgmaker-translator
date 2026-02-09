@@ -8,6 +8,16 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
 
 # Translation state files
 *_translation_autosave.json
