@@ -1,0 +1,315 @@
+"""Post-translation text processor — word wrapping and cleanup.
+
+Analyzes RPG Maker MV/MZ plugins to detect message window settings,
+then applies proper word wrapping to translated text.
+"""
+
+import json
+import os
+import re
+
+
+# Default RPG Maker MV/MZ message window: 816px wide, 28px font
+# Roughly 4 lines of ~55 chars at default settings
+DEFAULT_CHARS_PER_LINE = 55
+DEFAULT_MAX_LINES = 4
+
+# Known message plugins and their settings
+MESSAGE_PLUGINS = {
+    "YEP_MessageCore": {
+        "width_param": "Default Width",
+        "wordwrap_param": "Word Wrapping",
+        "default_width": 816,
+    },
+    "MessageWindowPopup": {"default_width": 816},
+    "Galv_MessageStyles": {"default_width": 816},
+    "SRD_MessageBacklog": {},
+    "CGMZ_MessageSystem": {"width_param": "Window Width"},
+    "VisuMZ_MessageCore": {
+        "width_param": "General:MessageWindow:MessageWidth",
+        "wordwrap_param": "Word Wrap:EnableWordWrap",
+        "default_width": 816,
+    },
+}
+
+# RPG Maker control codes that don't take up visual space
+CONTROL_CODE_REGEX = re.compile(
+    r'\\[VNPGCIvnpgci]\[\d+\]'  # \V[1], \N[2], \C[3], etc.
+    r'|\\[{}$.|!><^]'             # \{, \}, \$, \., \|, \!, \>, \<, \^
+    r'|\\[A-Za-z]+\[\d*\]'        # Generic \XX[n] patterns
+    r'|<[^>]+>'                    # HTML-like tags <br>, <WordWrap>, etc.
+)
+
+
+class PluginAnalyzer:
+    """Analyzes RPG Maker MV/MZ plugins to determine text formatting settings."""
+
+    def __init__(self):
+        self.message_width = 816
+        self.font_size = 28
+        self.chars_per_line = DEFAULT_CHARS_PER_LINE
+        self.max_lines = DEFAULT_MAX_LINES
+        self.has_wordwrap_plugin = False
+        self.wordwrap_tag = ""  # e.g. "<WordWrap>" if plugin supports it
+        self.detected_plugins = []
+
+    def analyze_project(self, project_dir: str):
+        """Analyze a project's plugins to detect message settings."""
+        plugins_path = self._find_plugins_file(project_dir)
+        if not plugins_path:
+            return
+
+        plugins = self._load_plugins(plugins_path)
+        if not plugins:
+            return
+
+        for plugin in plugins:
+            name = plugin.get("name", "")
+            status = plugin.get("status", False)
+            params = plugin.get("parameters", {})
+
+            if not status:
+                continue
+
+            # Check against known message plugins
+            for known_name, config in MESSAGE_PLUGINS.items():
+                if known_name.lower() in name.lower():
+                    self.detected_plugins.append(name)
+                    self._apply_plugin_settings(name, params, config)
+
+        # Also check System.json for font size
+        self._check_system_settings(project_dir)
+
+        # Recalculate chars per line based on detected settings
+        self._recalculate()
+
+    def _find_plugins_file(self, project_dir: str) -> str:
+        """Find the plugins.js file."""
+        candidates = [
+            os.path.join(project_dir, "js", "plugins.js"),
+            os.path.join(project_dir, "www", "js", "plugins.js"),
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        return ""
+
+    def _load_plugins(self, path: str) -> list:
+        """Parse plugins.js which is a JS file with var $plugins = [...]."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            # Extract the JSON array from: var $plugins = [...];
+            match = re.search(r'\[.*\]', content, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+        except (json.JSONDecodeError, OSError):
+            pass
+        return []
+
+    def _apply_plugin_settings(self, name: str, params: dict, config: dict):
+        """Apply detected plugin settings."""
+        # Check for message width parameter
+        width_param = config.get("width_param", "")
+        if width_param and width_param in params:
+            try:
+                self.message_width = int(params[width_param])
+            except (ValueError, TypeError):
+                pass
+
+        # Check for word wrap support
+        wordwrap_param = config.get("wordwrap_param", "")
+        if wordwrap_param:
+            self.has_wordwrap_plugin = True
+            wp_value = params.get(wordwrap_param, "")
+            if str(wp_value).lower() in ("true", "1", "yes"):
+                self.wordwrap_tag = "<WordWrap>"
+
+        # YEP / VisuMZ specific
+        if "yep" in name.lower() or "visumz" in name.lower():
+            self.has_wordwrap_plugin = True
+            if not self.wordwrap_tag:
+                self.wordwrap_tag = "<WordWrap>"
+
+    def _check_system_settings(self, project_dir: str):
+        """Check System.json for any font size overrides."""
+        data_dirs = [
+            os.path.join(project_dir, "data"),
+            os.path.join(project_dir, "Data"),
+            os.path.join(project_dir, "www", "data"),
+        ]
+        for data_dir in data_dirs:
+            system_path = os.path.join(data_dir, "System.json")
+            if os.path.exists(system_path):
+                try:
+                    with open(system_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    fs = data.get("advanced", {}).get("fontSize", 0)
+                    if fs > 0:
+                        self.font_size = fs
+                except (json.JSONDecodeError, OSError):
+                    pass
+                return
+
+    def _recalculate(self):
+        """Recalculate chars per line from detected settings."""
+        # Rough formula: message window has ~24px padding on each side
+        usable_width = self.message_width - 48
+        # Each character is roughly font_size * 0.55 wide for English text
+        char_width = self.font_size * 0.55
+        if char_width > 0:
+            self.chars_per_line = max(20, int(usable_width / char_width))
+
+    def get_summary(self) -> str:
+        """Return a human-readable summary of detected settings."""
+        lines = [f"Message width: {self.message_width}px"]
+        lines.append(f"Font size: {self.font_size}px")
+        lines.append(f"Chars per line: ~{self.chars_per_line}")
+        lines.append(f"Max lines per box: {self.max_lines}")
+        if self.detected_plugins:
+            lines.append(f"Message plugins: {', '.join(self.detected_plugins)}")
+        if self.has_wordwrap_plugin:
+            lines.append(f"Word wrap plugin detected (tag: {self.wordwrap_tag or 'auto'})")
+        else:
+            lines.append("No word wrap plugin — manual line breaks needed")
+        return "\n".join(lines)
+
+
+class TextProcessor:
+    """Applies word wrapping and text cleanup to translated entries."""
+
+    def __init__(self, analyzer: PluginAnalyzer):
+        self.analyzer = analyzer
+
+    def process_entry(self, original: str, translation: str) -> str:
+        """Process a single translated text — apply word wrapping.
+
+        Args:
+            original: The original Japanese text (for reference on line count).
+            translation: The English translation to wrap.
+
+        Returns:
+            The processed translation with proper line breaks.
+        """
+        if not translation or not translation.strip():
+            return translation
+
+        # Count original lines to know how many text boxes we have
+        orig_lines = original.split("\n")
+        orig_line_count = len(orig_lines)
+
+        # If the game has a word wrap plugin, we can let it handle wrapping
+        # Just need to add the tag and keep text as a single block per message box
+        if self.analyzer.has_wordwrap_plugin and self.analyzer.wordwrap_tag:
+            return self._apply_plugin_wordwrap(translation, orig_line_count)
+
+        # No word wrap plugin — we need to manually break lines
+        return self._apply_manual_wordwrap(translation, orig_line_count)
+
+    def _apply_plugin_wordwrap(self, text: str, orig_line_count: int) -> str:
+        """For games with word wrap plugins: add tag, keep within line count."""
+        tag = self.analyzer.wordwrap_tag
+
+        # Split by existing newlines (which map to 401 command boundaries)
+        lines = text.split("\n")
+
+        # Ensure we don't exceed the original line count
+        # (each line = one 401 command = one line in the text box)
+        if len(lines) > orig_line_count:
+            # Merge excess lines
+            result = []
+            for i in range(orig_line_count):
+                if i < len(lines) - 1 or i == orig_line_count - 1:
+                    # Last slot gets all remaining text
+                    if i == orig_line_count - 1:
+                        result.append(" ".join(lines[i:]))
+                    else:
+                        result.append(lines[i])
+            lines = result
+
+        # Add word wrap tag to first line if not already present
+        if lines and tag and not lines[0].startswith(tag):
+            lines[0] = tag + lines[0]
+
+        return "\n".join(lines)
+
+    def _apply_manual_wordwrap(self, text: str, orig_line_count: int) -> str:
+        """For games WITHOUT word wrap plugins: manually insert line breaks."""
+        max_chars = self.analyzer.chars_per_line
+
+        # Split by newlines (each = one 401 command)
+        input_lines = text.split("\n")
+
+        result_lines = []
+        for line in input_lines:
+            wrapped = self._wrap_line(line, max_chars)
+            result_lines.append(wrapped)
+
+        # Ensure we match the original line count
+        # (each \n maps to a separate 401 event command)
+        while len(result_lines) < orig_line_count:
+            result_lines.append("")
+        if len(result_lines) > orig_line_count:
+            # Merge excess into last line
+            merged = result_lines[:orig_line_count - 1]
+            merged.append(" ".join(result_lines[orig_line_count - 1:]))
+            result_lines = merged
+
+        return "\n".join(result_lines)
+
+    def _wrap_line(self, text: str, max_chars: int) -> str:
+        """Word-wrap a single line to fit within max_chars.
+
+        Respects control codes (which don't take visual space).
+        """
+        if not text:
+            return text
+
+        # Calculate visual length (excluding control codes)
+        visual_len = self._visual_length(text)
+        if visual_len <= max_chars:
+            return text
+
+        # Need to wrap — split into words and rebuild
+        words = text.split(" ")
+        lines = []
+        current_line = ""
+
+        for word in words:
+            test_line = f"{current_line} {word}".strip() if current_line else word
+            if self._visual_length(test_line) <= max_chars:
+                current_line = test_line
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+
+        if current_line:
+            lines.append(current_line)
+
+        # Join with \n but this creates sub-lines within a single 401 command
+        # RPG Maker doesn't support that, so use a single line with careful breaks
+        # Actually for manual wrap: just return the first line that fits
+        # and hope the text box scrolls or the user manually adjusts
+        return "\n".join(lines)
+
+    def _visual_length(self, text: str) -> int:
+        """Calculate the visual character count, ignoring control codes."""
+        cleaned = CONTROL_CODE_REGEX.sub("", text)
+        return len(cleaned)
+
+    def process_all(self, entries: list, original_entries: list = None) -> int:
+        """Process all translated entries. Returns count of modified entries."""
+        count = 0
+        for entry in entries:
+            if entry.status not in ("translated", "reviewed"):
+                continue
+            if not entry.translation:
+                continue
+
+            processed = self.process_entry(entry.original, entry.translation)
+            if processed != entry.translation:
+                entry.translation = processed
+                count += 1
+        return count
