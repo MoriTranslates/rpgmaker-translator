@@ -109,6 +109,7 @@ class RPGMakerMVParser:
         entries.extend(self._parse_system(data_dir))
         entries.extend(self._parse_common_events(data_dir))
         entries.extend(self._parse_maps(data_dir))
+        entries.extend(self._parse_plugins(project_dir))
         return entries
 
     def get_game_title(self, project_dir: str) -> str:
@@ -245,6 +246,9 @@ class RPGMakerMVParser:
 
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+
+        # Export plugin translations (plugins.js is outside data/)
+        self._save_plugins(project_dir, entries)
 
     @staticmethod
     def _backup_data_dir(data_dir: str):
@@ -765,3 +769,223 @@ class RPGMakerMVParser:
                 if event and isinstance(event, dict):
                     if process_commands(event.get("list", [])):
                         return
+
+    # ── plugins.js extraction & export ─────────────────────────────
+
+    @staticmethod
+    def _find_plugins_file(project_dir: str) -> Optional[str]:
+        """Locate js/plugins.js in the project."""
+        candidates = [
+            os.path.join(project_dir, "js", "plugins.js"),
+            os.path.join(project_dir, "www", "js", "plugins.js"),
+        ]
+        for path in candidates:
+            if os.path.isfile(path):
+                return path
+        return None
+
+    @staticmethod
+    def _load_plugins_js(path: str) -> list:
+        """Parse plugins.js into a Python list of plugin dicts."""
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        m = re.search(r'\[.*\]', content, re.DOTALL)
+        if not m:
+            return []
+        return json.loads(m.group(0))
+
+    @staticmethod
+    def _write_plugins_js(path: str, plugins: list):
+        """Write plugin list back to plugins.js format."""
+        json_str = json.dumps(plugins, ensure_ascii=False, indent=2)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"var $plugins =\n{json_str};\n")
+
+    @staticmethod
+    def _backup_plugins_file(path: str):
+        """Copy plugins.js → plugins_original.js if no backup exists."""
+        backup = os.path.join(os.path.dirname(path),
+                              os.path.basename(path).replace("plugins.", "plugins_original."))
+        if not os.path.exists(backup):
+            shutil.copy2(path, backup)
+
+    def _parse_plugins(self, project_dir: str) -> list:
+        """Extract translatable strings from plugin parameters in plugins.js."""
+        plugins_path = self._find_plugins_file(project_dir)
+        if not plugins_path:
+            return []
+        try:
+            plugins = self._load_plugins_js(plugins_path)
+        except (json.JSONDecodeError, OSError):
+            return []
+
+        entries = []
+        for plugin in plugins:
+            if not isinstance(plugin, dict):
+                continue
+            if not plugin.get("status", False):
+                continue  # skip disabled plugins
+            name = plugin.get("name", "")
+            params = plugin.get("parameters", {})
+            if not isinstance(params, dict):
+                continue
+            for key, value in params.items():
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                id_prefix = f"plugins.js/{name}/{key}"
+                self._scan_plugin_param(value, id_prefix, entries)
+        return entries
+
+    def _scan_plugin_param(self, value: str, id_prefix: str, entries: list):
+        """Scan a single plugin parameter value for translatable text.
+
+        Handles plain strings, JSON-encoded arrays, and JSON-encoded objects.
+        """
+        # Try parsing as JSON first (arrays/objects encoded as strings)
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(stripped)
+                self._scan_parsed_value(parsed, id_prefix, entries)
+                return
+            except (json.JSONDecodeError, ValueError):
+                pass  # Not valid JSON — treat as plain string
+
+        # Plain string — check if it has Japanese
+        if _has_japanese(value):
+            entries.append(TranslationEntry(
+                id=id_prefix,
+                file="plugins.js",
+                field="plugin_param",
+                original=value,
+            ))
+
+    def _scan_parsed_value(self, obj, id_prefix: str, entries: list):
+        """Recursively scan parsed JSON for translatable strings."""
+        if isinstance(obj, str):
+            # Could be nested JSON string
+            stripped = obj.strip()
+            if stripped.startswith(("{", "[")):
+                try:
+                    inner = json.loads(stripped)
+                    self._scan_parsed_value(inner, id_prefix, entries)
+                    return
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            if _has_japanese(obj):
+                entries.append(TranslationEntry(
+                    id=id_prefix,
+                    file="plugins.js",
+                    field="plugin_param",
+                    original=obj,
+                ))
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                self._scan_parsed_value(item, f"{id_prefix}/[{i}]", entries)
+        elif isinstance(obj, dict):
+            for k, v in obj.items():
+                self._scan_parsed_value(v, f"{id_prefix}/{k}", entries)
+
+    def _save_plugins(self, project_dir: str, entries: list):
+        """Write translated plugin parameter values back into plugins.js."""
+        # Filter to only plugin entries with translations
+        plugin_entries = [
+            e for e in entries
+            if e.file == "plugins.js"
+            and e.translation
+            and e.status in ("translated", "reviewed")
+        ]
+        if not plugin_entries:
+            return
+
+        plugins_path = self._find_plugins_file(project_dir)
+        if not plugins_path:
+            return
+        try:
+            plugins = self._load_plugins_js(plugins_path)
+        except (json.JSONDecodeError, OSError):
+            return
+
+        # Backup before first modification
+        self._backup_plugins_file(plugins_path)
+
+        # Build lookup: plugin_name → {param_key → plugin_dict}
+        plugin_by_name = {}
+        for p in plugins:
+            if isinstance(p, dict) and p.get("name"):
+                plugin_by_name[p["name"]] = p
+
+        for entry in plugin_entries:
+            # Parse ID: plugins.js/PluginName/ParamKey[/nested/path...]
+            parts = entry.id.split("/")
+            if len(parts) < 3:
+                continue
+            plugin_name = parts[1]
+            param_key = parts[2]
+            nested_path = parts[3:]  # may be empty
+
+            plugin = plugin_by_name.get(plugin_name)
+            if not plugin:
+                continue
+            params = plugin.get("parameters", {})
+            if param_key not in params:
+                continue
+
+            if not nested_path:
+                # Simple string replacement
+                params[param_key] = entry.translation
+            else:
+                # Nested: parse JSON, navigate path, replace, re-serialize
+                try:
+                    parsed = json.loads(params[param_key])
+                    self._set_nested_value(parsed, nested_path, entry.original,
+                                           entry.translation)
+                    params[param_key] = json.dumps(parsed, ensure_ascii=False)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+        self._write_plugins_js(plugins_path, plugins)
+
+    def _set_nested_value(self, obj, path: list, original: str, translation: str):
+        """Navigate a parsed JSON structure by path segments and replace a value.
+
+        Path segments: "[0]" for array indices, "key" for object keys.
+        """
+        for i, segment in enumerate(path):
+            is_last = (i == len(path) - 1)
+
+            if segment.startswith("[") and segment.endswith("]"):
+                # Array index
+                idx = int(segment[1:-1])
+                if not isinstance(obj, list) or idx >= len(obj):
+                    return
+                if is_last:
+                    if isinstance(obj[idx], str) and obj[idx] == original:
+                        obj[idx] = translation
+                    return
+                else:
+                    val = obj[idx]
+                    if isinstance(val, str):
+                        try:
+                            val = json.loads(val)
+                            obj[idx] = val  # in-place parse
+                        except (json.JSONDecodeError, ValueError):
+                            return
+                    obj = val
+            else:
+                # Object key
+                if not isinstance(obj, dict) or segment not in obj:
+                    return
+                if is_last:
+                    if obj[segment] == original:
+                        obj[segment] = translation
+                    return
+                else:
+                    val = obj[segment]
+                    if isinstance(val, str):
+                        try:
+                            val = json.loads(val)
+                            obj[segment] = val
+                        except (json.JSONDecodeError, ValueError):
+                            return
+                    obj = val

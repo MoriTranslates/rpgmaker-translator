@@ -178,6 +178,7 @@ class OllamaClient:
         "displayName": "map location name",
         "note": "developer note",
         "plugin_command": "plugin command text",
+        "plugin_param": "plugin configuration text",
     }
 
     def translate(self, text: str, context: str = "",

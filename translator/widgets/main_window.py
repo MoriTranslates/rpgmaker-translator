@@ -835,11 +835,24 @@ class MainWindow(QMainWindow):
                 os.rename(temp_dir, data_dir)
                 raise
             shutil.rmtree(temp_dir)
-            QMessageBox.information(
-                self, "Restore Complete",
-                "Original Japanese files have been restored.\n"
-                "The backup in data_original/ is still available."
-            )
+
+            # Also restore plugins.js if backup exists
+            plugins_restored = False
+            plugins_path = self.parser._find_plugins_file(self.project.project_path)
+            if plugins_path:
+                backup_path = os.path.join(
+                    os.path.dirname(plugins_path),
+                    os.path.basename(plugins_path).replace("plugins.", "plugins_original.")
+                )
+                if os.path.isfile(backup_path):
+                    shutil.copy2(backup_path, plugins_path)
+                    plugins_restored = True
+
+            msg = "Original Japanese files have been restored.\n"
+            if plugins_restored:
+                msg += "plugins.js has also been restored from backup.\n"
+            msg += "The backups are still available."
+            QMessageBox.information(self, "Restore Complete", msg)
         except Exception as e:
             QMessageBox.critical(self, "Restore Failed", str(e))
 

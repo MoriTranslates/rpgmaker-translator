@@ -14,6 +14,7 @@ FILE_CATEGORIES = {
     ],
     "System": ["System.json"],
     "Common Events": ["CommonEvents.json"],
+    "Plugins": ["plugins.js"],
 }
 
 
