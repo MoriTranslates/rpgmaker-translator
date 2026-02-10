@@ -19,6 +19,11 @@ CODE_SHOW_TEXT = 401          # Show Text continuation — parameters[0] is text
 CODE_SHOW_CHOICES = 102       # Show Choices — parameters[0] is list of strings
 CODE_SCROLL_TEXT_HEADER = 105 # Scroll Text setup — not translatable
 CODE_SCROLL_TEXT = 405        # Scroll Text line — parameters[0] is text
+CODE_CHANGE_NAME = 320        # Change Actor Name — params[0]=actorId, params[1]=name
+CODE_CHANGE_NICKNAME = 324    # Change Actor Nickname — params[0]=actorId, params[1]=nickname
+CODE_CHANGE_PROFILE = 325     # Change Actor Profile — params[0]=actorId, params[1]=profile
+CODE_PLUGIN_COMMAND_MV = 356  # Plugin Command (MV) — params[0]=command string
+CODE_PLUGIN_COMMAND_MZ = 357  # Plugin Command (MZ) — params vary by plugin
 
 # Database files and their translatable fields
 DATABASE_FILES = {
@@ -523,6 +528,49 @@ class RPGMakerMVParser:
                     recent_ctx.append(full_text)
                 continue
 
+            # Change Actor Name / Nickname / Profile (320, 324, 325)
+            if code in (CODE_CHANGE_NAME, CODE_CHANGE_NICKNAME, CODE_CHANGE_PROFILE):
+                text = params[1] if len(params) > 1 else ""
+                field_map = {
+                    CODE_CHANGE_NAME: "name",
+                    CODE_CHANGE_NICKNAME: "nickname",
+                    CODE_CHANGE_PROFILE: "profile",
+                }
+                fld = field_map[code]
+                if isinstance(text, str) and _is_translatable(text):
+                    dialog_counter += 1
+                    entries.append(TranslationEntry(
+                        id=f"{filename}/{prefix}/change_{fld}_{dialog_counter}",
+                        file=filename,
+                        field=fld,
+                        original=text,
+                    ))
+
+            # Plugin Command MV (356) — single string parameter
+            if code == CODE_PLUGIN_COMMAND_MV and params:
+                text = params[0] if isinstance(params[0], str) else ""
+                if _is_translatable(text):
+                    dialog_counter += 1
+                    entries.append(TranslationEntry(
+                        id=f"{filename}/{prefix}/plugin_mv_{dialog_counter}",
+                        file=filename,
+                        field="plugin_command",
+                        original=text,
+                    ))
+
+            # Plugin Command MZ (357) — params[3+] may contain translatable text
+            if code == CODE_PLUGIN_COMMAND_MZ and len(params) >= 4:
+                for pi in range(3, len(params)):
+                    text = params[pi] if isinstance(params[pi], str) else ""
+                    if _is_translatable(text):
+                        dialog_counter += 1
+                        entries.append(TranslationEntry(
+                            id=f"{filename}/{prefix}/plugin_mz_{dialog_counter}_p{pi}",
+                            file=filename,
+                            field="plugin_command",
+                            original=text,
+                        ))
+
             i += 1
 
         return entries
@@ -569,6 +617,23 @@ class RPGMakerMVParser:
         # Event dialogue — need to find and replace in command lists
         elif entry.field in ("dialog", "scroll_text", "choice"):
             self._apply_event_translation(data, entry)
+
+        # Change Name/Nickname/Profile (320/324/325) — single parameter replacement
+        elif entry.field in ("name", "nickname", "profile") and "/change_" in entry.id:
+            code_map = {"name": CODE_CHANGE_NAME, "nickname": CODE_CHANGE_NICKNAME, "profile": CODE_CHANGE_PROFILE}
+            self._replace_single_param(data, code_map[entry.field], 1, entry.original, entry.translation)
+
+        # Plugin Command MV (356)
+        elif entry.field == "plugin_command" and "/plugin_mv_" in entry.id:
+            self._replace_single_param(data, CODE_PLUGIN_COMMAND_MV, 0, entry.original, entry.translation)
+
+        # Plugin Command MZ (357)
+        elif entry.field == "plugin_command" and "/plugin_mz_" in entry.id:
+            # Extract param index from entry ID: plugin_mz_N_pX
+            parts_id = entry.id.split("/")
+            last_part = parts_id[-1]  # e.g. "plugin_mz_5_p3"
+            pi = int(last_part.rsplit("_p", 1)[-1]) if "_p" in last_part else 3
+            self._replace_single_param(data, CODE_PLUGIN_COMMAND_MZ, pi, entry.original, entry.translation)
 
     def _apply_event_translation(self, data, entry: TranslationEntry):
         """Apply event dialogue/choice translation back into map or common event data."""
@@ -666,6 +731,35 @@ class RPGMakerMVParser:
                     if page and isinstance(page, dict):
                         if process_commands(page.get("list", [])):
                             return
+        elif isinstance(data, list):
+            for event in data:
+                if event and isinstance(event, dict):
+                    if process_commands(event.get("list", [])):
+                        return
+
+    def _replace_single_param(self, data, code: int, param_idx: int,
+                              original: str, translation: str):
+        """Replace a single parameter value in event commands matching the given code."""
+        def process_commands(cmd_list):
+            for cmd in cmd_list:
+                if not isinstance(cmd, dict) or cmd.get("code") != code:
+                    continue
+                params = cmd.get("parameters", [])
+                if len(params) > param_idx and params[param_idx] == original:
+                    params[param_idx] = translation
+                    return True
+            return False
+
+        if isinstance(data, dict):
+            for event in (data.get("events") or []):
+                if not event or not isinstance(event, dict):
+                    continue
+                for page in (event.get("pages") or []):
+                    if page and isinstance(page, dict):
+                        if process_commands(page.get("list", [])):
+                            return
+            if "list" in data:
+                process_commands(data.get("list", []))
         elif isinstance(data, list):
             for event in data:
                 if event and isinstance(event, dict):
