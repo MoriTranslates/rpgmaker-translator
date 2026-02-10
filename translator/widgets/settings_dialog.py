@@ -5,12 +5,13 @@ from PyQt6.QtWidgets import (
     QLineEdit, QComboBox, QPlainTextEdit, QPushButton,
     QLabel, QGroupBox, QMessageBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QTabWidget, QWidget, QSpinBox,
-    QCheckBox,
+    QCheckBox, QMenu,
 )
 from PyQt6.QtCore import Qt
 
 from ..ollama_client import OllamaClient, SYSTEM_PROMPT
 from ..rpgmaker_mv import RPGMakerMVParser
+from ..default_glossary import CATEGORIES as DEFAULT_GLOSSARY_CATEGORIES
 
 
 class SettingsDialog(QDialog):
@@ -129,7 +130,22 @@ class SettingsDialog(QDialog):
         remove_btn.clicked.connect(self._remove_glossary_rows)
         glossary_btn_row.addWidget(remove_btn)
 
+        clear_btn = QPushButton("Clear All")
+        clear_btn.clicked.connect(self._clear_glossary)
+        glossary_btn_row.addWidget(clear_btn)
+
         glossary_btn_row.addStretch()
+
+        # Load Defaults dropdown — lets users pick preset categories
+        defaults_btn = QPushButton("Load Defaults \u25bc")
+        defaults_menu = QMenu(self)
+        defaults_menu.addAction("All Categories", self._load_all_defaults)
+        defaults_menu.addSeparator()
+        for cat_name in DEFAULT_GLOSSARY_CATEGORIES:
+            defaults_menu.addAction(cat_name, lambda c=cat_name: self._load_default_category(c))
+        defaults_btn.setMenu(defaults_menu)
+        glossary_btn_row.addWidget(defaults_btn)
+
         glossary_layout.addLayout(glossary_btn_row)
 
         tabs.addTab(glossary_tab, "Glossary")
@@ -185,6 +201,48 @@ class SettingsDialog(QDialog):
         rows = sorted(set(idx.row() for idx in self.glossary_table.selectedIndexes()), reverse=True)
         for row in rows:
             self.glossary_table.removeRow(row)
+
+    def _clear_glossary(self):
+        """Clear all glossary rows."""
+        self.glossary_table.setRowCount(0)
+        self._add_glossary_row()
+
+    def _load_default_category(self, category: str):
+        """Merge a default glossary category into the table without overwriting existing entries."""
+        entries = DEFAULT_GLOSSARY_CATEGORIES.get(category, {})
+        self._merge_glossary_entries(entries)
+
+    def _load_all_defaults(self):
+        """Merge all default glossary categories into the table."""
+        from ..default_glossary import get_all_defaults
+        self._merge_glossary_entries(get_all_defaults())
+
+    def _merge_glossary_entries(self, entries: dict):
+        """Add entries to the glossary table, skipping any JP terms already present."""
+        existing = self._get_glossary()
+        added = 0
+        for jp, en in entries.items():
+            if jp in existing:
+                continue
+            row = self.glossary_table.rowCount()
+            # Replace the trailing empty row if it exists
+            if row > 0:
+                last_jp = self.glossary_table.item(row - 1, 0)
+                last_en = self.glossary_table.item(row - 1, 1)
+                if last_jp and not last_jp.text().strip() and last_en and not last_en.text().strip():
+                    row -= 1
+                    self.glossary_table.setItem(row, 0, QTableWidgetItem(jp))
+                    self.glossary_table.setItem(row, 1, QTableWidgetItem(en))
+                    added += 1
+                    continue
+            self.glossary_table.insertRow(row)
+            self.glossary_table.setItem(row, 0, QTableWidgetItem(jp))
+            self.glossary_table.setItem(row, 1, QTableWidgetItem(en))
+            added += 1
+        QMessageBox.information(
+            self, "Defaults Loaded",
+            f"Added {added} new entries ({len(entries) - added} already existed)."
+        )
 
     def _get_glossary(self) -> dict:
         """Read glossary from table into a dict."""

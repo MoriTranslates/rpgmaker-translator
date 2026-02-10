@@ -330,6 +330,21 @@ class MainWindow(QMainWindow):
         if not translated_title and raw_title and not has_jp_title:
             translated_title = raw_title
 
+        # Auto-glossary: add translated actor names so the LLM uses them
+        # consistently when those names appear in dialogue
+        for aid, tl in actor_translations.items():
+            for field in ("name", "nickname"):
+                en = tl.get(field, "")
+                if not en:
+                    continue
+                # Find the original JP text for this actor field
+                actor = next((a for a in actors_raw if a["id"] == aid), None)
+                if not actor:
+                    continue
+                jp = actor.get(field, "")
+                if jp and en != jp and jp not in self.client.glossary:
+                    self.client.glossary[jp] = en
+
         # Show gender assignment dialog with translated names
         if actors_raw:
             dlg = ActorGenderDialog(actors_raw, self, translations=actor_translations)
@@ -344,6 +359,24 @@ class MainWindow(QMainWindow):
             self.project.actor_genders = genders
         else:
             self.client.actor_context = ""
+
+        # Offer to load default glossary terms for new projects
+        if not self.client.glossary:
+            from ..default_glossary import get_all_defaults
+            reply = QMessageBox.question(
+                self, "Load Default Glossary?",
+                "Would you like to load common term translations?\n\n"
+                "This adds ~100 preset Japanese\u2192English mappings for body parts,\n"
+                "RPG terms, expressions, etc. so the LLM translates them consistently.\n\n"
+                "You can always edit these later in Settings > Glossary.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.client.glossary.update(get_all_defaults())
+
+        # Persist auto-glossary entries into project model
+        if self.client.glossary:
+            self.project.glossary = self.client.glossary
 
         # Offer to rename folder to English title
         path = self._rename_project_folder(path, translated_title)
@@ -455,6 +488,30 @@ class MainWindow(QMainWindow):
 
         progress.close()
         return actor_translations, translated_title
+
+    def _backfill_actor_glossary(self, actors_raw: list):
+        """Add actor name/nickname glossary entries from already-translated entries.
+
+        For projects saved before auto-glossary existed, this scans existing
+        translations of Actors.json name/nickname fields and adds any missing
+        glossary mappings so future dialogue translations stay consistent.
+        """
+        if not self.project:
+            return
+        for actor in actors_raw:
+            aid = actor["id"]
+            for field in ("name", "nickname"):
+                jp = actor.get(field, "")
+                if not jp or jp in self.client.glossary:
+                    continue
+                # Look for a translated entry matching this actor field
+                entry_id = f"Actors.json/{aid}/{field}"
+                entry = self.project.get_entry_by_id(entry_id)
+                if entry and entry.translation and entry.translation != jp:
+                    self.client.glossary[jp] = entry.translation
+        # Persist any new entries
+        if self.client.glossary:
+            self.project.glossary = self.client.glossary
 
     def _rename_project_folder(self, path: str, translated_title: str) -> str:
         """Offer to rename the project folder to 'English Title - WIP'.
@@ -610,6 +667,9 @@ class MainWindow(QMainWindow):
                 self.client.actor_context = self.parser.build_actor_context(
                     actors_raw, self.project.actor_genders
                 )
+                # Backfill auto-glossary for actor names if missing
+                # (for projects saved before this feature existed)
+                self._backfill_actor_glossary(actors_raw)
 
         self.save_action.setEnabled(True)
         self.batch_action.setEnabled(True)
