@@ -126,6 +126,26 @@ from .variant_dialog import VariantDialog
 class MainWindow(QMainWindow):
     """Main application window."""
 
+    # Files considered "DB" for stage-1 batch (translate names first, QA, then dialogue)
+    _DB_FILES = {
+        "Actors.json", "Classes.json", "Items.json", "Weapons.json",
+        "Armors.json", "Skills.json", "States.json", "Enemies.json",
+        "System.json",
+    }
+
+    # DB fields whose translated values should be auto-added to glossary
+    # so the LLM uses consistent names when they appear in dialogue.
+    _AUTO_GLOSSARY_FIELDS = {
+        "Actors.json": ("name", "nickname"),
+        "Classes.json": ("name",),
+        "Items.json": ("name",),
+        "Weapons.json": ("name",),
+        "Armors.json": ("name",),
+        "Skills.json": ("name",),
+        "Enemies.json": ("name",),
+        "States.json": ("name",),
+    }
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RPG Maker Translator — Local LLM")
@@ -215,11 +235,34 @@ class MainWindow(QMainWindow):
         # ── Translate menu ────────────────────────────────────────
         translate_menu = menubar.addMenu("Translate")
 
-        self.batch_action = QAction("Batch Translate", self)
-        self.batch_action.setShortcut("Ctrl+T")
+        self.batch_db_action = QAction("Batch DB (Names && Terms)", self)
+        self.batch_db_action.setShortcut("Ctrl+D")
+        self.batch_db_action.setToolTip(
+            "Stage 1: Translate database names, descriptions, and system terms. "
+            "QA these before translating dialogue."
+        )
+        self.batch_db_action.triggered.connect(self._batch_translate_db)
+        self.batch_db_action.setEnabled(False)
+        translate_menu.addAction(self.batch_db_action)
+
+        self.batch_dialogue_action = QAction("Batch Dialogue", self)
+        self.batch_dialogue_action.setShortcut("Ctrl+T")
+        self.batch_dialogue_action.setToolTip(
+            "Stage 2: Translate dialogue, events, and plugin text. "
+            "Translated DB names are used as glossary terms."
+        )
+        self.batch_dialogue_action.triggered.connect(self._batch_translate_dialogue)
+        self.batch_dialogue_action.setEnabled(False)
+        translate_menu.addAction(self.batch_dialogue_action)
+
+        self.batch_action = QAction("Batch All", self)
+        self.batch_action.setShortcut("Ctrl+Shift+T")
+        self.batch_action.setToolTip("Translate everything at once (DB + dialogue)")
         self.batch_action.triggered.connect(self._batch_translate)
         self.batch_action.setEnabled(False)
         translate_menu.addAction(self.batch_action)
+
+        translate_menu.addSeparator()
 
         self.stop_action = QAction("Stop", self)
         self.stop_action.triggered.connect(self._stop_translation)
@@ -267,6 +310,8 @@ class MainWindow(QMainWindow):
         self.addToolBar(toolbar)
 
         # Reuse actions created in _build_menubar
+        toolbar.addAction(self.batch_db_action)
+        toolbar.addAction(self.batch_dialogue_action)
         toolbar.addAction(self.batch_action)
         toolbar.addAction(self.stop_action)
 
@@ -394,6 +439,8 @@ class MainWindow(QMainWindow):
         self.plugin_analyzer.analyze_project(path)
 
         self.save_action.setEnabled(True)
+        self.batch_db_action.setEnabled(True)
+        self.batch_dialogue_action.setEnabled(True)
         self.batch_action.setEnabled(True)
         self.export_action.setEnabled(True)
         self.restore_action.setEnabled(True)
@@ -498,28 +545,30 @@ class MainWindow(QMainWindow):
         progress.close()
         return actor_translations, translated_title
 
-    def _backfill_actor_glossary(self, actors_raw: list):
-        """Add actor name/nickname glossary entries from already-translated entries.
+    def _backfill_db_glossary(self):
+        """Add DB name glossary entries from already-translated entries.
 
-        For projects saved before auto-glossary existed, this scans existing
-        translations of Actors.json name/nickname fields and adds any missing
-        glossary mappings so future dialogue translations stay consistent.
+        Scans translated name fields from all database files (Actors, Items,
+        Weapons, Armors, Skills, Enemies, States, Classes) and adds missing
+        glossary mappings so the LLM uses consistent terms in dialogue.
+
+        Called on load_state to handle projects saved before auto-glossary
+        covered all DB types (or before this feature existed at all).
         """
         if not self.project:
             return
-        for actor in actors_raw:
-            aid = actor["id"]
-            for field in ("name", "nickname"):
-                jp = actor.get(field, "")
-                if not jp or jp in self.client.glossary:
-                    continue
-                # Look for a translated entry matching this actor field
-                entry_id = f"Actors.json/{aid}/{field}"
-                entry = self.project.get_entry_by_id(entry_id)
-                if entry and entry.translation and entry.translation != jp:
-                    self.client.glossary[jp] = entry.translation
-        # Persist any new entries
-        if self.client.glossary:
+        for entry in self.project.entries:
+            self._maybe_add_to_glossary(entry)
+
+    def _maybe_add_to_glossary(self, entry):
+        """Auto-add translated DB name fields to glossary for LLM consistency."""
+        fields = self._AUTO_GLOSSARY_FIELDS.get(entry.file)
+        if not fields or entry.field not in fields:
+            return
+        jp = entry.original
+        en = entry.translation
+        if jp and en and jp != en and jp not in self.client.glossary:
+            self.client.glossary[jp] = en
             self.project.glossary = self.client.glossary
 
     def _rename_project_folder(self, path: str, translated_title: str) -> str:
@@ -676,11 +725,14 @@ class MainWindow(QMainWindow):
                 self.client.actor_context = self.parser.build_actor_context(
                     actors_raw, self.project.actor_genders
                 )
-                # Backfill auto-glossary for actor names if missing
-                # (for projects saved before this feature existed)
-                self._backfill_actor_glossary(actors_raw)
+
+        # Backfill auto-glossary for all DB name fields if missing
+        # (for projects saved before this feature existed)
+        self._backfill_db_glossary()
 
         self.save_action.setEnabled(True)
+        self.batch_db_action.setEnabled(True)
+        self.batch_dialogue_action.setEnabled(True)
         self.batch_action.setEnabled(True)
         self.export_action.setEnabled(bool(self.project.project_path))
         self.restore_action.setEnabled(bool(self.project.project_path))
@@ -887,6 +939,8 @@ class MainWindow(QMainWindow):
 
     def _on_batch_finished(self):
         """Handle batch translation completing."""
+        self.batch_db_action.setEnabled(True)
+        self.batch_dialogue_action.setEnabled(True)
         self.batch_action.setEnabled(True)
         self.stop_action.setEnabled(False)
         self.progress_bar.setVisible(False)
@@ -961,6 +1015,53 @@ class MainWindow(QMainWindow):
 
     def _batch_translate(self):
         """Start batch translating all untranslated entries."""
+        self._start_batch(mode="all")
+
+    def _batch_translate_db(self):
+        """Stage 1: Translate only DB entries (names, descriptions, terms).
+
+        Translate DB first so the user can QA names before they become
+        glossary entries used in dialogue.
+        """
+        self._start_batch(mode="db")
+
+    def _batch_translate_dialogue(self):
+        """Stage 2: Translate only dialogue/event entries.
+
+        Warns if no DB name glossary entries exist yet, since translating
+        dialogue without glossary terms may produce inconsistent names.
+        """
+        # Check if any DB names have been glossary'd
+        db_glossary_count = sum(
+            1 for e in self.project.entries
+            if e.file in self._DB_FILES
+            and e.field in (self._AUTO_GLOSSARY_FIELDS.get(e.file) or ())
+            and e.status in ("translated", "reviewed")
+        )
+        if db_glossary_count == 0:
+            reply = QMessageBox.warning(
+                self, "No DB Names Translated",
+                "No database names (items, skills, enemies, etc.) have been "
+                "translated yet.\n\n"
+                "Translating dialogue without glossary terms may produce "
+                "inconsistent item/character names.\n\n"
+                "Recommended: Run 'Batch DB' first to translate names, "
+                "then QA them before translating dialogue.\n\n"
+                "Continue anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        self._start_batch(mode="dialogue")
+
+    def _start_batch(self, mode: str = "all"):
+        """Shared batch translation logic.
+
+        Args:
+            mode: "all" = everything, "db" = DB/System only,
+                  "dialogue" = non-DB only (maps, events, plugins).
+        """
         if not self.client.is_available():
             QMessageBox.warning(
                 self, "Ollama Not Available",
@@ -977,9 +1078,14 @@ class MainWindow(QMainWindow):
         tm_count = 0
         for e in self.project.entries:
             if e.status == "untranslated" and e.original in translated_map:
+                if mode == "db" and e.file not in self._DB_FILES:
+                    continue
+                if mode == "dialogue" and e.file in self._DB_FILES:
+                    continue
                 e.translation = translated_map[e.original]
                 e.status = "translated"
                 self.trans_table.update_entry(e.id, e.translation)
+                self._maybe_add_to_glossary(e)
                 tm_count += 1
 
         if tm_count:
@@ -989,11 +1095,19 @@ class MainWindow(QMainWindow):
             )
 
         untranslated = [e for e in self.project.entries if e.status == "untranslated"]
+        if mode == "db":
+            untranslated = [e for e in untranslated if e.file in self._DB_FILES]
+        elif mode == "dialogue":
+            untranslated = [e for e in untranslated if e.file not in self._DB_FILES]
+
         if not untranslated:
-            QMessageBox.information(self, "Done", "All entries are already translated!")
+            labels = {"all": "All entries", "db": "DB entries", "dialogue": "Dialogue entries"}
+            QMessageBox.information(self, "Done", f"{labels[mode]} are already translated!")
             return
 
         self.batch_action.setEnabled(False)
+        self.batch_db_action.setEnabled(False)
+        self.batch_dialogue_action.setEnabled(False)
         self.stop_action.setEnabled(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(len(untranslated))
@@ -1001,7 +1115,7 @@ class MainWindow(QMainWindow):
         self._batch_start_time = time.time()
         self._batch_done_count = 0
 
-        self.engine.translate_batch(self.project.entries)
+        self.engine.translate_batch(untranslated)
 
     # ── Word Wrap ──────────────────────────────────────────────────
 
@@ -1091,6 +1205,8 @@ class MainWindow(QMainWindow):
             if e.status in ("translated", "reviewed"):
                 e.status = "untranslated"
 
+        self.batch_db_action.setEnabled(False)
+        self.batch_dialogue_action.setEnabled(False)
         self.batch_action.setEnabled(False)
         self.stop_action.setEnabled(True)
         self.progress_bar.setVisible(True)
@@ -1114,6 +1230,9 @@ class MainWindow(QMainWindow):
                 )
             entry.translation = translation
             entry.status = "translated"
+            # Auto-glossary: add translated DB names so the LLM
+            # uses them consistently in subsequent dialogue entries
+            self._maybe_add_to_glossary(entry)
         self.trans_table.update_entry(entry_id, translation)
         self.file_tree.refresh_stats(self.project)
 
