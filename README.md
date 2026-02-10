@@ -107,10 +107,14 @@ After opening a project, a dialog will appear showing all actors found in the ga
 
 ### Translating
 
-- **Batch Translate**: Go to **Translate > Batch Translate** (or `Ctrl+T`) to translate all untranslated entries. Progress and ETA are shown in the status bar. Auto-saves every 25 entries so you don't lose progress if something crashes.
+- **Batch DB** (`Ctrl+D`): Translates only database entries (item names, skill names, enemy names, system terms). Run this first so you can QA names before they feed into dialogue as glossary terms.
+- **Batch Dialogue** (`Ctrl+T`): Translates dialogue, events, and plugin text. Warns you if no DB names have been translated yet. Translated DB names are automatically used as glossary terms.
+- **Batch All** (`Ctrl+Shift+T`): Translates everything at once (DB + dialogue) — the old behavior if you don't need the two-stage workflow.
 - **Translate Selected**: Select rows in the table, right-click, and choose **Translate Selected** to translate specific entries.
 - **Retranslate with Correction**: Right-click a translated entry and choose **Retranslate with Correction...** to provide a hint about what was wrong (e.g., "wrong pronoun", "too literal").
 - **Show Variants**: Right-click and choose **Show Variants (3 options)...** to generate 3 different translations and pick the best one.
+
+Progress and ETA are shown in the status bar. Auto-saves every 25 entries so you don't lose progress if something crashes.
 
 ### Reviewing and Editing
 
@@ -121,7 +125,26 @@ After opening a project, a dialog will appear showing all actors found in the ga
 
 ### Glossary
 
-Open **Settings** and go to the **Glossary** tab to define forced translations for specific terms. The LLM will always use your glossary entries for those Japanese terms (useful for character names, locations, items).
+The glossary forces the LLM to use specific English translations for Japanese terms. Every glossary entry (JP → EN) is injected into the LLM prompt so it always translates that term consistently across every line of dialogue.
+
+**How it works:**
+- Each translation request includes all glossary terms in the prompt, so the LLM sees "Translate: 聖剣は強い / Glossary: 聖剣=Holy Sword" and uses the exact term
+- Without a glossary, the same item name might be translated differently each time ("Sacred Sword" in one line, "Holy Blade" in another)
+
+**Three sources of glossary entries:**
+
+1. **Manual glossary** — Open **Settings > Glossary** tab to add your own JP → EN mappings. Use this for character names, locations, or any term you want translated a specific way.
+
+2. **Default glossary** — When opening a new project, the tool offers to load ~100 preset translations for common Japanese terms (RPG terms, body parts, expressions). You can edit or remove these later in Settings.
+
+3. **Auto-glossary** — When database entries (item names, skill names, enemy names, etc.) are translated, their JP → EN mappings are automatically added to the glossary. This means if "ポーション" is translated as "Potion" in Items.json, every dialogue line mentioning ポーション will also say "Potion".
+
+**Recommended workflow** (two-stage batch):
+1. **Batch DB** (`Ctrl+D`) — Translate all database names and terms first
+2. Review and correct any names in the table — corrections automatically update the glossary
+3. **Batch Dialogue** (`Ctrl+T`) — Translate dialogue/events with the corrected glossary in place
+
+This prevents inconsistent names like an NPC saying "Take the Holy Sword" when the item is actually called "Sacred Blade" in the inventory.
 
 ### Renaming the Project Folder
 
