@@ -5,11 +5,11 @@ from PyQt6.QtWidgets import (
     QLineEdit, QComboBox, QPlainTextEdit, QPushButton,
     QLabel, QGroupBox, QMessageBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QTabWidget, QWidget, QSpinBox,
-    QCheckBox, QMenu,
+    QCheckBox, QMenu, QApplication, QProgressDialog,
 )
 from PyQt6.QtCore import Qt
 
-from ..ollama_client import OllamaClient, SYSTEM_PROMPT
+from ..ollama_client import OllamaClient, SYSTEM_PROMPT, TARGET_LANGUAGES, build_system_prompt
 from ..rpgmaker_mv import RPGMakerMVParser
 from ..default_glossary import CATEGORIES as DEFAULT_GLOSSARY_CATEGORIES
 
@@ -17,12 +17,19 @@ from ..default_glossary import CATEGORIES as DEFAULT_GLOSSARY_CATEGORIES
 class SettingsDialog(QDialog):
     """Dialog for configuring Ollama URL, model, prompt, and glossary."""
 
-    def __init__(self, client: OllamaClient, parent=None, parser: RPGMakerMVParser = None, dark_mode: bool = True, plugin_analyzer=None):
+    def __init__(self, client: OllamaClient, parent=None, parser: RPGMakerMVParser = None,
+                 dark_mode: bool = True, plugin_analyzer=None, engine=None,
+                 general_glossary=None, project_glossary=None):
         super().__init__(parent)
         self.client = client
         self.parser = parser
         self.dark_mode = dark_mode
         self.plugin_analyzer = plugin_analyzer
+        self.engine = engine
+        self._general_glossary_init = general_glossary or {}
+        self._project_glossary_init = project_glossary or {}
+        self.general_glossary = {}   # result after save
+        self.project_glossary = {}   # result after save
         self.setWindowTitle("Settings")
         self.setMinimumSize(600, 500)
         self._build_ui()
@@ -64,6 +71,13 @@ class SettingsDialog(QDialog):
         self.status_label = QLabel("")
         conn_form.addRow("", self.status_label)
 
+        self.lang_combo = QComboBox()
+        for name, stars, tip in TARGET_LANGUAGES:
+            self.lang_combo.addItem(f"{name}  {stars}", userData=name)
+            self.lang_combo.setItemData(self.lang_combo.count() - 1, tip, Qt.ItemDataRole.ToolTipRole)
+        self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
+        conn_form.addRow("Target Language:", self.lang_combo)
+
         conn_layout.addWidget(conn_group)
 
         # Prompt
@@ -92,6 +106,15 @@ class SettingsDialog(QDialog):
         )
         opts_form.addRow("Context window size:", self.context_spin)
 
+        self.workers_spin = QSpinBox()
+        self.workers_spin.setRange(1, 16)
+        self.workers_spin.setToolTip(
+            "Number of parallel translation requests sent to Ollama.\n"
+            "Higher = faster batch translation, but uses more VRAM.\n"
+            "Ollama will be automatically restarted when this changes."
+        )
+        opts_form.addRow("Parallel workers:", self.workers_spin)
+
         self.wordwrap_spin = QSpinBox()
         self.wordwrap_spin.setRange(0, 200)
         self.wordwrap_spin.setSpecialValueText("Auto-detect")
@@ -114,13 +137,60 @@ class SettingsDialog(QDialog):
         conn_layout.addWidget(appear_group)
         tabs.addTab(conn_tab, "Connection && Prompt")
 
-        # ── Tab 2: Glossary ────────────────────────────────────────
+        # ── Tab 2: General Glossary (persists across all projects) ─
+        general_tab = QWidget()
+        general_layout = QVBoxLayout(general_tab)
+
+        general_layout.addWidget(QLabel(
+            "General glossary terms apply to ALL projects and persist across sessions.\n"
+            "Use this for common eroge/RPG terms, honorifics, and recurring vocabulary."
+        ))
+
+        self.general_table = QTableWidget()
+        self.general_table.setColumnCount(2)
+        self.general_table.setHorizontalHeaderLabels(["Japanese Term", "English Translation"])
+        gen_header = self.general_table.horizontalHeader()
+        gen_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        gen_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.general_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        general_layout.addWidget(self.general_table)
+
+        gen_btn_row = QHBoxLayout()
+        gen_add_btn = QPushButton("Add Row")
+        gen_add_btn.clicked.connect(self._add_general_row)
+        gen_btn_row.addWidget(gen_add_btn)
+
+        gen_remove_btn = QPushButton("Remove Selected")
+        gen_remove_btn.clicked.connect(self._remove_general_rows)
+        gen_btn_row.addWidget(gen_remove_btn)
+
+        gen_clear_btn = QPushButton("Clear All")
+        gen_clear_btn.clicked.connect(self._clear_general)
+        gen_btn_row.addWidget(gen_clear_btn)
+
+        gen_btn_row.addStretch()
+
+        # Load Defaults dropdown — preset categories for common terms
+        defaults_btn = QPushButton("Load Defaults \u25bc")
+        defaults_menu = QMenu(self)
+        defaults_menu.addAction("All Categories", self._load_all_defaults)
+        defaults_menu.addSeparator()
+        for cat_name in DEFAULT_GLOSSARY_CATEGORIES:
+            defaults_menu.addAction(cat_name, lambda c=cat_name: self._load_default_category(c))
+        defaults_btn.setMenu(defaults_menu)
+        gen_btn_row.addWidget(defaults_btn)
+
+        general_layout.addLayout(gen_btn_row)
+
+        tabs.addTab(general_tab, "General Glossary")
+
+        # ── Tab 3: Project Glossary (per-project terms) ───────────
         glossary_tab = QWidget()
         glossary_layout = QVBoxLayout(glossary_tab)
 
         glossary_layout.addWidget(QLabel(
-            "Define forced term translations. The LLM will always use these exact mappings.\n"
-            "Example: Character names, locations, items, recurring phrases."
+            "Project-specific term translations (character names, locations, items).\n"
+            "These are saved with the project state. Overrides general glossary if both define a term."
         ))
 
         self.glossary_table = QTableWidget()
@@ -146,20 +216,9 @@ class SettingsDialog(QDialog):
         glossary_btn_row.addWidget(clear_btn)
 
         glossary_btn_row.addStretch()
-
-        # Load Defaults dropdown — lets users pick preset categories
-        defaults_btn = QPushButton("Load Defaults \u25bc")
-        defaults_menu = QMenu(self)
-        defaults_menu.addAction("All Categories", self._load_all_defaults)
-        defaults_menu.addSeparator()
-        for cat_name in DEFAULT_GLOSSARY_CATEGORIES:
-            defaults_menu.addAction(cat_name, lambda c=cat_name: self._load_default_category(c))
-        defaults_btn.setMenu(defaults_menu)
-        glossary_btn_row.addWidget(defaults_btn)
-
         glossary_layout.addLayout(glossary_btn_row)
 
-        tabs.addTab(glossary_tab, "Glossary")
+        tabs.addTab(glossary_tab, "Project Glossary")
 
         # ── Bottom buttons ─────────────────────────────────────────
         btn_row = QHBoxLayout()
@@ -177,26 +236,35 @@ class SettingsDialog(QDialog):
 
     def _load_current(self):
         """Populate fields from current client settings."""
-        # Save originals so we can restore on cancel
+        # Save originals so we can restore on cancel / detect changes
         self._orig_url = self.client.base_url
         self._orig_model = self.client.model
+        self._orig_workers = self.engine.num_workers if self.engine else 2
+        self._orig_language = self.client.target_language
         self.url_edit.setText(self.client.base_url)
         self.model_combo.setCurrentText(self.client.model)
+        # Set language dropdown (find matching item by userData)
+        for i in range(self.lang_combo.count()):
+            if self.lang_combo.itemData(i) == self.client.target_language:
+                self.lang_combo.setCurrentIndex(i)
+                break
         self.prompt_edit.setPlainText(self.client.system_prompt)
         self.context_spin.setValue(self.parser.context_size if self.parser else 3)
+        self.workers_spin.setValue(self.engine.num_workers if self.engine else 2)
         # Word wrap: 0 = auto-detect, >0 = manual override
         if self.plugin_analyzer and getattr(self.plugin_analyzer, '_manual_chars_per_line', 0):
             self.wordwrap_spin.setValue(self.plugin_analyzer._manual_chars_per_line)
         else:
             self.wordwrap_spin.setValue(0)
         self.dark_mode_check.setChecked(self.dark_mode)
+        self._load_general_glossary()
         self._load_glossary()
         self._refresh_models()
 
     def _load_glossary(self):
-        """Load glossary from client into table."""
+        """Load project glossary into table."""
         self.glossary_table.setRowCount(0)
-        for jp, en in self.client.glossary.items():
+        for jp, en in self._project_glossary_init.items():
             row = self.glossary_table.rowCount()
             self.glossary_table.insertRow(row)
             self.glossary_table.setItem(row, 0, QTableWidgetItem(jp))
@@ -223,37 +291,82 @@ class SettingsDialog(QDialog):
         self.glossary_table.setRowCount(0)
         self._add_glossary_row()
 
+    # ── General glossary table operations ─────────────────────────
+
+    def _load_general_glossary(self):
+        """Load general glossary into table."""
+        self.general_table.setRowCount(0)
+        for jp, en in self._general_glossary_init.items():
+            row = self.general_table.rowCount()
+            self.general_table.insertRow(row)
+            self.general_table.setItem(row, 0, QTableWidgetItem(jp))
+            self.general_table.setItem(row, 1, QTableWidgetItem(en))
+        if self.general_table.rowCount() == 0:
+            self._add_general_row()
+
+    def _add_general_row(self):
+        """Add an empty row to the general glossary table."""
+        row = self.general_table.rowCount()
+        self.general_table.insertRow(row)
+        self.general_table.setItem(row, 0, QTableWidgetItem(""))
+        self.general_table.setItem(row, 1, QTableWidgetItem(""))
+
+    def _remove_general_rows(self):
+        """Remove selected rows from the general glossary table."""
+        rows = sorted(set(idx.row() for idx in self.general_table.selectedIndexes()), reverse=True)
+        for row in rows:
+            self.general_table.removeRow(row)
+
+    def _clear_general(self):
+        """Clear all general glossary rows."""
+        self.general_table.setRowCount(0)
+        self._add_general_row()
+
+    def _get_general_glossary(self) -> dict:
+        """Read general glossary from table into a dict."""
+        glossary = {}
+        for row in range(self.general_table.rowCount()):
+            jp_item = self.general_table.item(row, 0)
+            en_item = self.general_table.item(row, 1)
+            jp = jp_item.text().strip() if jp_item else ""
+            en = en_item.text().strip() if en_item else ""
+            if jp and en:
+                glossary[jp] = en
+        return glossary
+
+    # ── Default glossary loading (into general table) ─────────────
+
     def _load_default_category(self, category: str):
-        """Merge a default glossary category into the table without overwriting existing entries."""
+        """Merge a default glossary category into the general glossary table."""
         entries = DEFAULT_GLOSSARY_CATEGORIES.get(category, {})
-        self._merge_glossary_entries(entries)
+        self._merge_into_general(entries)
 
     def _load_all_defaults(self):
-        """Merge all default glossary categories into the table."""
+        """Merge all default glossary categories into the general glossary table."""
         from ..default_glossary import get_all_defaults
-        self._merge_glossary_entries(get_all_defaults())
+        self._merge_into_general(get_all_defaults())
 
-    def _merge_glossary_entries(self, entries: dict):
-        """Add entries to the glossary table, skipping any JP terms already present."""
-        existing = self._get_glossary()
+    def _merge_into_general(self, entries: dict):
+        """Add entries to the general glossary table, skipping any JP terms already present."""
+        existing = self._get_general_glossary()
         added = 0
         for jp, en in entries.items():
             if jp in existing:
                 continue
-            row = self.glossary_table.rowCount()
+            row = self.general_table.rowCount()
             # Replace the trailing empty row if it exists
             if row > 0:
-                last_jp = self.glossary_table.item(row - 1, 0)
-                last_en = self.glossary_table.item(row - 1, 1)
+                last_jp = self.general_table.item(row - 1, 0)
+                last_en = self.general_table.item(row - 1, 1)
                 if last_jp and not last_jp.text().strip() and last_en and not last_en.text().strip():
                     row -= 1
-                    self.glossary_table.setItem(row, 0, QTableWidgetItem(jp))
-                    self.glossary_table.setItem(row, 1, QTableWidgetItem(en))
+                    self.general_table.setItem(row, 0, QTableWidgetItem(jp))
+                    self.general_table.setItem(row, 1, QTableWidgetItem(en))
                     added += 1
                     continue
-            self.glossary_table.insertRow(row)
-            self.glossary_table.setItem(row, 0, QTableWidgetItem(jp))
-            self.glossary_table.setItem(row, 1, QTableWidgetItem(en))
+            self.general_table.insertRow(row)
+            self.general_table.setItem(row, 0, QTableWidgetItem(jp))
+            self.general_table.setItem(row, 1, QTableWidgetItem(en))
             added += 1
         QMessageBox.information(
             self, "Defaults Loaded",
@@ -298,6 +411,18 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "Connection Failed",
                                 "Cannot reach Ollama. Make sure it's running:\n  ollama serve")
 
+    def _on_language_changed(self, index: int):
+        """Auto-update system prompt when target language changes."""
+        new_lang = self.lang_combo.itemData(index)
+        if not new_lang:
+            return
+        # Only auto-update if the prompt matches the template for the old language
+        old_lang = self._orig_language
+        current_prompt = self.prompt_edit.toPlainText().strip()
+        if current_prompt == build_system_prompt(old_lang).strip():
+            self.prompt_edit.setPlainText(build_system_prompt(new_lang))
+            self._orig_language = new_lang
+
     def reject(self):
         """Revert any URL/model changes made during the dialog."""
         self.client.base_url = self._orig_url
@@ -309,9 +434,21 @@ class SettingsDialog(QDialog):
         self.client.base_url = self.url_edit.text().strip() or "http://localhost:11434"
         self.client.model = self.model_combo.currentText().strip()
         self.client.system_prompt = self.prompt_edit.toPlainText().strip() or SYSTEM_PROMPT
-        self.client.glossary = self._get_glossary()
+        self.client.target_language = self.lang_combo.currentData() or "English"
+        # Store glossaries as results — main window handles the merge
+        self.general_glossary = self._get_general_glossary()
+        self.project_glossary = self._get_glossary()
         if self.parser:
             self.parser.context_size = self.context_spin.value()
+
+        new_workers = self.workers_spin.value()
+        if self.engine:
+            self.engine.num_workers = new_workers
+
+        # Auto-restart Ollama if workers count changed
+        if new_workers != self._orig_workers:
+            self._restart_ollama(new_workers)
+
         # Word wrap override
         if self.plugin_analyzer:
             manual = self.wordwrap_spin.value()
@@ -320,6 +457,38 @@ class SettingsDialog(QDialog):
                 self.plugin_analyzer.chars_per_line = manual
         self.dark_mode = self.dark_mode_check.isChecked()
         self.accept()
+
+    def _restart_ollama(self, num_parallel: int):
+        """Restart Ollama with OLLAMA_NUM_PARALLEL matching the new worker count."""
+        progress = QProgressDialog(
+            f"Restarting Ollama with {num_parallel} parallel slots...",
+            None, 0, 0, self,
+        )
+        progress.setWindowTitle("Restarting Ollama")
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.show()
+        QApplication.processEvents()
+
+        ok = self.client.restart_server(num_parallel)
+
+        progress.close()
+
+        if ok:
+            QMessageBox.information(
+                self, "Ollama Restarted",
+                f"Ollama restarted with OLLAMA_NUM_PARALLEL={num_parallel}.\n"
+                f"Workers set to {num_parallel}.",
+            )
+        else:
+            QMessageBox.warning(
+                self, "Ollama Restart Failed",
+                f"Could not restart Ollama with {num_parallel} parallel slots.\n\n"
+                "You may need to restart it manually:\n"
+                f"  1. net stop OllamaService\n"
+                f"  2. set OLLAMA_NUM_PARALLEL={num_parallel}\n"
+                f"  3. ollama serve",
+            )
 
     def get_system_prompt(self) -> str:
         return self.prompt_edit.toPlainText()

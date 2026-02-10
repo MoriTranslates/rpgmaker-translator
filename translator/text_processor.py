@@ -217,15 +217,9 @@ class TextProcessor:
         # Ensure we don't exceed the original line count
         # (each line = one 401 command = one line in the text box)
         if len(lines) > orig_line_count:
-            # Merge excess lines
-            result = []
-            for i in range(orig_line_count):
-                if i < len(lines) - 1 or i == orig_line_count - 1:
-                    # Last slot gets all remaining text
-                    if i == orig_line_count - 1:
-                        result.append(" ".join(lines[i:]))
-                    else:
-                        result.append(lines[i])
+            # Merge excess lines: keep first N-1 lines, join remainder into last slot
+            result = lines[:orig_line_count - 1]
+            result.append(" ".join(lines[orig_line_count - 1:]))
             lines = result
 
         # Add word wrap tag to first line if not already present

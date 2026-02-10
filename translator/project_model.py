@@ -96,7 +96,13 @@ class TranslationProject:
         project.glossary = data.get("glossary", {})
         # JSON converts int keys to strings — convert back to int
         raw_genders = data.get("actor_genders", {})
-        project.actor_genders = {int(k): v for k, v in raw_genders.items()}
+        actor_genders = {}
+        for k, v in raw_genders.items():
+            try:
+                actor_genders[int(k)] = v
+            except (ValueError, TypeError):
+                pass  # Skip malformed keys (e.g. manually edited save files)
+        project.actor_genders = actor_genders
         project._build_index()
         return project
 

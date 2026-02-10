@@ -1,5 +1,6 @@
 """Main application window — ties together all widgets."""
 
+import json
 import os
 import re
 import time
@@ -146,6 +147,9 @@ class MainWindow(QMainWindow):
         "States.json": ("name",),
     }
 
+    # Settings file lives next to main.py
+    _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "_settings.json")
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RPG Maker Translator — Local LLM")
@@ -162,6 +166,10 @@ class MainWindow(QMainWindow):
         self._batch_start_time = 0
         self._batch_done_count = 0
         self._last_save_path = ""
+        self._general_glossary = {}  # persists across all projects
+
+        # Restore persistent settings before building UI
+        self._load_settings()
 
         self._build_ui()
         self._build_menubar()
@@ -171,6 +179,10 @@ class MainWindow(QMainWindow):
 
         # Apply dark mode by default
         self._apply_dark_mode()
+
+        # Auto-start Ollama with saved worker count if not already running
+        if not self.client.is_available():
+            self.client.restart_server(self.engine.num_workers)
 
         # Auto-save timer (every 2 minutes)
         self._autosave_timer = QTimer(self)
@@ -262,6 +274,16 @@ class MainWindow(QMainWindow):
         self.batch_action.setEnabled(False)
         translate_menu.addAction(self.batch_action)
 
+        self.batch_actor_action = QAction("Batch by Actor", self)
+        self.batch_actor_action.setShortcut("Ctrl+Shift+A")
+        self.batch_actor_action.setToolTip(
+            "Translate dialogue grouped by speaker — female speakers first, "
+            "then male, then ungendered. Gives the LLM strong gender context."
+        )
+        self.batch_actor_action.triggered.connect(self._batch_translate_by_actor)
+        self.batch_actor_action.setEnabled(False)
+        translate_menu.addAction(self.batch_actor_action)
+
         translate_menu.addSeparator()
 
         self.stop_action = QAction("Stop", self)
@@ -275,6 +297,22 @@ class MainWindow(QMainWindow):
         self.wordwrap_action.triggered.connect(self._apply_wordwrap)
         self.wordwrap_action.setEnabled(False)
         translate_menu.addAction(self.wordwrap_action)
+
+        self.polish_action = QAction("Polish Grammar", self)
+        self.polish_action.setToolTip(
+            "Run all translations through the LLM for grammar and fluency cleanup"
+        )
+        self.polish_action.triggered.connect(self._polish_translations)
+        self.polish_action.setEnabled(False)
+        translate_menu.addAction(self.polish_action)
+
+        self.fix_codes_action = QAction("Fix Missing Codes", self)
+        self.fix_codes_action.setToolTip(
+            "Scan all translated entries and auto-restore any missing control codes"
+        )
+        self.fix_codes_action.triggered.connect(self._fix_missing_codes)
+        self.fix_codes_action.setEnabled(False)
+        translate_menu.addAction(self.fix_codes_action)
 
         # ── Game menu ─────────────────────────────────────────────
         game_menu = menubar.addMenu("Game")
@@ -338,6 +376,7 @@ class MainWindow(QMainWindow):
         self.trans_table.translate_requested.connect(self._translate_selected)
         self.trans_table.retranslate_correction.connect(self._retranslate_with_correction)
         self.trans_table.variant_requested.connect(self._show_variants)
+        self.trans_table.polish_requested.connect(self._polish_selected)
         self.trans_table.status_changed.connect(self._on_status_changed)
 
         # Engine
@@ -383,8 +422,8 @@ class MainWindow(QMainWindow):
         if not translated_title and raw_title and not has_jp_title:
             translated_title = raw_title
 
-        # Auto-glossary: add translated actor names so the LLM uses them
-        # consistently when those names appear in dialogue
+        # Auto-glossary: add translated actor names to project glossary
+        # so the LLM uses them consistently when they appear in dialogue
         for aid, tl in actor_translations.items():
             for field in ("name", "nickname"):
                 en = tl.get(field, "")
@@ -395,8 +434,8 @@ class MainWindow(QMainWindow):
                 if not actor:
                     continue
                 jp = actor.get(field, "")
-                if jp and en != jp and jp not in self.client.glossary:
-                    self.client.glossary[jp] = en
+                if jp and en != jp and jp not in self.project.glossary:
+                    self.project.glossary[jp] = en
 
         # Show gender assignment dialog with translated names
         if actors_raw:
@@ -409,27 +448,32 @@ class MainWindow(QMainWindow):
                            if a["auto_gender"] != "unknown"}
             actor_ctx = self.parser.build_actor_context(actors_raw, genders)
             self.client.actor_context = actor_ctx
+            self.client.actor_genders = genders
+            self.client.actor_names = {a["id"]: a["name"] for a in actors_raw}
             self.project.actor_genders = genders
         else:
             self.client.actor_context = ""
+            self.client.actor_genders = {}
+            self.client.actor_names = {}
 
-        # Offer to load default glossary terms for new projects
-        if not self.client.glossary:
+        # Offer to load default glossary terms into the general glossary
+        if not self._general_glossary:
             from ..default_glossary import get_all_defaults
             reply = QMessageBox.question(
                 self, "Load Default Glossary?",
                 "Would you like to load common term translations?\n\n"
                 "This adds ~100 preset Japanese\u2192English mappings for body parts,\n"
                 "RPG terms, expressions, etc. so the LLM translates them consistently.\n\n"
-                "You can always edit these later in Settings > Glossary.",
+                "These go into the General Glossary (shared across all projects).\n"
+                "You can edit them in Settings > General Glossary.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
-                self.client.glossary.update(get_all_defaults())
+                self._general_glossary.update(get_all_defaults())
+                self._save_settings()
 
-        # Persist auto-glossary entries into project model
-        if self.client.glossary:
-            self.project.glossary = self.client.glossary
+        # Rebuild merged glossary (general + project auto-glossary entries)
+        self._rebuild_glossary()
 
         # Offer to rename folder to English title
         path = self._rename_project_folder(path, translated_title)
@@ -442,12 +486,15 @@ class MainWindow(QMainWindow):
         self.batch_db_action.setEnabled(True)
         self.batch_dialogue_action.setEnabled(True)
         self.batch_action.setEnabled(True)
+        self.batch_actor_action.setEnabled(True)
         self.export_action.setEnabled(True)
         self.restore_action.setEnabled(True)
         self.rename_action.setEnabled(True)
         self.import_action.setEnabled(True)
         self.txt_export_action.setEnabled(True)
         self.wordwrap_action.setEnabled(True)
+        self.fix_codes_action.setEnabled(True)
+        self.polish_action.setEnabled(True)
 
         plugin_info = ""
         if self.plugin_analyzer.detected_plugins:
@@ -609,10 +656,10 @@ class MainWindow(QMainWindow):
 
         try:
             os.rename(path, new_path)
-            # Update autosave path to point inside the new folder
-            if self._last_save_path:
+            # Update autosave path only if it's inside the old folder
+            if self._last_save_path and os.path.dirname(self._last_save_path) == path:
                 self._last_save_path = os.path.join(
-                    new_path, "_translation_autosave.json"
+                    new_path, os.path.basename(self._last_save_path)
                 )
             return new_path
         except OSError as e:
@@ -675,12 +722,13 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            os.rename(self.project.project_path, new_path)
+            old_path = self.project.project_path
+            os.rename(old_path, new_path)
             self.project.project_path = new_path
-            # Update autosave path to point inside the new folder
-            if self._last_save_path:
+            # Update autosave path only if it's inside the old folder
+            if self._last_save_path and os.path.dirname(self._last_save_path) == old_path:
                 self._last_save_path = os.path.join(
-                    new_path, "_translation_autosave.json"
+                    new_path, os.path.basename(self._last_save_path)
                 )
             self.setWindowTitle(f"RPG Maker Translator \u2014 {new_name}")
             self.statusbar.showMessage(f"Renamed folder to: {new_name}", 5000)
@@ -715,8 +763,8 @@ class MainWindow(QMainWindow):
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries(self.project.entries)
 
-        # Restore glossary
-        self.client.glossary = self.project.glossary
+        # Restore glossary: merge general (global) + project (per-game)
+        self._rebuild_glossary()
 
         # Restore actor context from saved genders
         if self.project.actor_genders and self.project.project_path:
@@ -725,6 +773,8 @@ class MainWindow(QMainWindow):
                 self.client.actor_context = self.parser.build_actor_context(
                     actors_raw, self.project.actor_genders
                 )
+                self.client.actor_genders = self.project.actor_genders
+                self.client.actor_names = {a["id"]: a["name"] for a in actors_raw}
 
         # Backfill auto-glossary for all DB name fields if missing
         # (for projects saved before this feature existed)
@@ -734,12 +784,15 @@ class MainWindow(QMainWindow):
         self.batch_db_action.setEnabled(True)
         self.batch_dialogue_action.setEnabled(True)
         self.batch_action.setEnabled(True)
+        self.batch_actor_action.setEnabled(True)
         self.export_action.setEnabled(bool(self.project.project_path))
         self.restore_action.setEnabled(bool(self.project.project_path))
         self.rename_action.setEnabled(bool(self.project.project_path))
         self.import_action.setEnabled(True)
         self.txt_export_action.setEnabled(True)
         self.wordwrap_action.setEnabled(True)
+        self.fix_codes_action.setEnabled(True)
+        self.polish_action.setEnabled(True)
 
         self.statusbar.showMessage(
             f"Loaded state: {self.project.total} entries "
@@ -791,7 +844,7 @@ class MainWindow(QMainWindow):
             if jp not in self.project.glossary:
                 self.project.glossary[jp] = en
                 imported_glossary += 1
-        self.client.glossary = self.project.glossary
+        self._rebuild_glossary()
 
         # Refresh UI
         self.trans_table.set_entries(self.project.entries)
@@ -910,26 +963,35 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self):
         """Open the settings dialog."""
-        dlg = SettingsDialog(self.client, self, parser=self.parser, dark_mode=self._dark_mode, plugin_analyzer=self.plugin_analyzer)
+        dlg = SettingsDialog(
+            self.client, self, parser=self.parser, dark_mode=self._dark_mode,
+            plugin_analyzer=self.plugin_analyzer, engine=self.engine,
+            general_glossary=self._general_glossary,
+            project_glossary=self.project.glossary,
+        )
         if dlg.exec():
-            # Sync glossary to project model
-            self.project.glossary = self.client.glossary
+            # Update both glossaries from dialog results
+            self._general_glossary = dlg.general_glossary
+            self.project.glossary = dlg.project_glossary
+            self._rebuild_glossary()
             # Apply dark mode if changed
             if dlg.dark_mode != self._dark_mode:
                 self._dark_mode = dlg.dark_mode
                 self._apply_dark_mode()
                 self.trans_table.set_dark_mode(self._dark_mode)
+            # Persist settings to disk
+            self._save_settings()
 
     # ── Filtering ──────────────────────────────────────────────────
 
     def _filter_by_file(self, filename: str):
         """Show only entries from a specific file."""
         entries = self.project.get_entries_for_file(filename)
-        self.trans_table.set_entries(entries)
+        self.trans_table.filter_by_file(entries)
 
     def _show_all_entries(self):
         """Show all entries."""
-        self.trans_table.set_entries(self.project.entries)
+        self.trans_table.clear_file_filter()
 
     # ── Engine signal handlers ─────────────────────────────────────
 
@@ -938,10 +1000,12 @@ class MainWindow(QMainWindow):
         self.statusbar.showMessage(f"Error translating {entry_id}: {error_msg}", 5000)
 
     def _on_batch_finished(self):
-        """Handle batch translation completing."""
+        """Handle batch translation/polish completing."""
         self.batch_db_action.setEnabled(True)
         self.batch_dialogue_action.setEnabled(True)
         self.batch_action.setEnabled(True)
+        self.batch_actor_action.setEnabled(True)
+        self.polish_action.setEnabled(True)
         self.stop_action.setEnabled(False)
         self.progress_bar.setVisible(False)
         self.progress_label.setText("")
@@ -969,6 +1033,65 @@ class MainWindow(QMainWindow):
         else:
             app.setStyleSheet("")
 
+    # ── Glossary merge ─────────────────────────────────────────────
+
+    def _rebuild_glossary(self):
+        """Merge general + project glossaries into client.glossary.
+
+        Project-specific entries override general entries if both define
+        the same Japanese term.
+        """
+        self.client.glossary = {**self._general_glossary, **self.project.glossary}
+
+    # ── Persistent settings ───────────────────────────────────────
+
+    def _load_settings(self):
+        """Load saved settings from _settings.json on startup."""
+        try:
+            with open(self._SETTINGS_FILE, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return  # No saved settings — use defaults
+
+        if "ollama_url" in cfg:
+            self.client.base_url = cfg["ollama_url"]
+        if "model" in cfg:
+            self.client.model = cfg["model"]
+        if "system_prompt" in cfg:
+            self.client.system_prompt = cfg["system_prompt"]
+        if "workers" in cfg:
+            self.engine.num_workers = cfg["workers"]
+        if "context_size" in cfg:
+            self.parser.context_size = cfg["context_size"]
+        if "dark_mode" in cfg:
+            self._dark_mode = cfg["dark_mode"]
+        if "wordwrap_override" in cfg and cfg["wordwrap_override"] > 0:
+            self.plugin_analyzer._manual_chars_per_line = cfg["wordwrap_override"]
+            self.plugin_analyzer.chars_per_line = cfg["wordwrap_override"]
+        if "general_glossary" in cfg and isinstance(cfg["general_glossary"], dict):
+            self._general_glossary = cfg["general_glossary"]
+        if "target_language" in cfg:
+            self.client.target_language = cfg["target_language"]
+
+    def _save_settings(self):
+        """Persist current settings to _settings.json."""
+        cfg = {
+            "ollama_url": self.client.base_url,
+            "model": self.client.model,
+            "system_prompt": self.client.system_prompt,
+            "workers": self.engine.num_workers,
+            "context_size": self.parser.context_size,
+            "dark_mode": self._dark_mode,
+            "wordwrap_override": getattr(self.plugin_analyzer, "_manual_chars_per_line", 0),
+            "general_glossary": self._general_glossary,
+            "target_language": self.client.target_language,
+        }
+        try:
+            with open(self._SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass  # Non-critical — settings just won't persist
+
     # ── Auto-save ──────────────────────────────────────────────────
 
     def _autosave(self):
@@ -986,8 +1109,8 @@ class MainWindow(QMainWindow):
         try:
             self.project.save_state(self._last_save_path)
             self.statusbar.showMessage("Auto-saved", 2000)
-        except Exception:
-            pass  # Silent fail on autosave
+        except Exception as e:
+            self.statusbar.showMessage(f"Auto-save failed: {e}", 5000)
 
     # ── Progress ETA ───────────────────────────────────────────────
 
@@ -1055,6 +1178,135 @@ class MainWindow(QMainWindow):
 
         self._start_batch(mode="dialogue")
 
+    def _batch_translate_by_actor(self):
+        """Translate dialogue grouped by speaker — female speakers first.
+
+        Groups all untranslated entries by the speaker identified in code 101
+        headers, cross-references with actor gender data, and orders:
+          1. Female speaker dialogue
+          2. Male speaker dialogue
+          3. Unknown/no speaker dialogue
+          4. Non-dialogue entries (DB, choices, plugins, etc.)
+
+        This gives the LLM strong, consistent gender context per character
+        and lets the user QA one character's lines at a time.
+        """
+        if not self.client.is_available():
+            QMessageBox.warning(
+                self, "Ollama Not Available",
+                "Cannot connect to Ollama. Make sure it's running:\n  ollama serve"
+            )
+            return
+
+        if not self.client.actor_genders:
+            QMessageBox.warning(
+                self, "No Actor Data",
+                "No actor gender data available.\n\n"
+                "Open a project first (or load a state) so the translator\n"
+                "knows which characters are male/female."
+            )
+            return
+
+        # Translation memory first (same as _start_batch)
+        translated_map = {}
+        for e in self.project.entries:
+            if e.status in ("translated", "reviewed") and e.translation:
+                translated_map[e.original] = e.translation
+
+        tm_count = 0
+        for e in self.project.entries:
+            if e.status == "untranslated" and e.original in translated_map:
+                e.translation = translated_map[e.original]
+                e.status = "translated"
+                self.trans_table.update_entry(e.id, e.translation)
+                self._maybe_add_to_glossary(e)
+                tm_count += 1
+
+        if tm_count:
+            self.file_tree.refresh_stats(self.project)
+
+        untranslated = [e for e in self.project.entries if e.status == "untranslated"]
+        if not untranslated:
+            QMessageBox.information(self, "Done", "All entries are already translated!")
+            return
+
+        # Build name → gender lookup from actor data
+        name_to_gender = {}
+        for actor_id, name in self.client.actor_names.items():
+            gender = self.client.actor_genders.get(actor_id, "")
+            if gender in ("female", "male"):
+                name_to_gender[name] = gender
+
+        # Group entries by speaker gender
+        _speaker_re = re.compile(r'\[Speaker:\s*(.+?)\]')
+        female_entries = []
+        male_entries = []
+        other_dialog = []
+        non_dialog = []
+
+        for entry in untranslated:
+            # Only dialogue/scroll/choice entries have speaker context
+            if entry.field not in ("dialog", "scroll_text", "choice"):
+                non_dialog.append(entry)
+                continue
+
+            speaker = ""
+            if entry.context:
+                m = _speaker_re.search(entry.context)
+                if m:
+                    speaker = m.group(1).strip()
+
+            gender = name_to_gender.get(speaker, "")
+            if gender == "female":
+                female_entries.append(entry)
+            elif gender == "male":
+                male_entries.append(entry)
+            else:
+                other_dialog.append(entry)
+
+        # Combine: female → male → ungendered → non-dialogue
+        ordered = female_entries + male_entries + other_dialog + non_dialog
+
+        # Build summary for confirmation
+        parts = []
+        if female_entries:
+            parts.append(f"  Female speakers: {len(female_entries)}")
+        if male_entries:
+            parts.append(f"  Male speakers: {len(male_entries)}")
+        if other_dialog:
+            parts.append(f"  Other dialogue: {len(other_dialog)}")
+        if non_dialog:
+            parts.append(f"  Non-dialogue (DB/plugins): {len(non_dialog)}")
+        summary = "\n".join(parts)
+
+        if tm_count:
+            summary += f"\n\n  (Translation memory filled {tm_count} duplicates)"
+
+        reply = QMessageBox.question(
+            self, "Batch by Actor",
+            f"Translating {len(ordered)} entries grouped by speaker gender:\n\n"
+            f"{summary}\n\n"
+            "Female speakers are translated first, then male, then the rest.\n"
+            "Each entry gets explicit speaker gender hints for the LLM.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.batch_action.setEnabled(False)
+        self.batch_db_action.setEnabled(False)
+        self.batch_dialogue_action.setEnabled(False)
+        self.batch_actor_action.setEnabled(False)
+        self.stop_action.setEnabled(True)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(ordered))
+        self.progress_bar.setValue(0)
+        self._batch_start_time = time.time()
+        self._batch_done_count = 0
+
+        self.engine.translate_batch(ordered)
+
     def _start_batch(self, mode: str = "all"):
         """Shared batch translation logic.
 
@@ -1108,6 +1360,7 @@ class MainWindow(QMainWindow):
         self.batch_action.setEnabled(False)
         self.batch_db_action.setEnabled(False)
         self.batch_dialogue_action.setEnabled(False)
+        self.batch_actor_action.setEnabled(False)
         self.stop_action.setEnabled(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(len(untranslated))
@@ -1116,6 +1369,53 @@ class MainWindow(QMainWindow):
         self._batch_done_count = 0
 
         self.engine.translate_batch(untranslated)
+
+    # ── Polish Grammar ──────────────────────────────────────────────
+
+    def _polish_translations(self):
+        """Run all translated entries through the LLM for grammar cleanup."""
+        if not self.client.is_available():
+            QMessageBox.warning(
+                self, "Ollama Not Available",
+                "Cannot connect to Ollama. Make sure it's running:\n  ollama serve"
+            )
+            return
+
+        to_polish = [
+            e for e in self.project.entries
+            if e.status in ("translated", "reviewed")
+            and e.translation and e.translation.strip()
+        ]
+        if not to_polish:
+            QMessageBox.information(self, "Nothing to Polish",
+                                    "No translated entries to polish.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Polish Grammar",
+            f"This will run {len(to_polish)} translated entries through the LLM\n"
+            "to fix grammar and improve fluency (English → English).\n\n"
+            "Original Japanese text is not changed — only the English translation\n"
+            "gets cleaned up. This may take a while.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.batch_action.setEnabled(False)
+        self.batch_db_action.setEnabled(False)
+        self.batch_dialogue_action.setEnabled(False)
+        self.batch_actor_action.setEnabled(False)
+        self.polish_action.setEnabled(False)
+        self.stop_action.setEnabled(True)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(to_polish))
+        self.progress_bar.setValue(0)
+        self._batch_start_time = time.time()
+        self._batch_done_count = 0
+
+        self.engine.polish_batch(to_polish)
 
     # ── Word Wrap ──────────────────────────────────────────────────
 
@@ -1136,12 +1436,76 @@ class MainWindow(QMainWindow):
 
         count = self.text_processor.process_all(self.project.entries)
         # Refresh table
-        self.trans_table.set_entries(
-            self.trans_table._entries  # refresh current view
-        )
+        self.trans_table.refresh()
         QMessageBox.information(
             self, "Word Wrap Applied",
             f"Modified {count} entries to fit ~{self.plugin_analyzer.chars_per_line} chars/line."
+        )
+
+    # ── Fix Missing Codes ─────────────────────────────────────────
+
+    def _fix_missing_codes(self):
+        """Batch-fix all translated entries that have missing control codes.
+
+        Scans every translated entry, compares control codes in the original
+        to the translation, and auto-inserts any missing codes at the
+        position they occupied in the original (start → prepend, end → append).
+        """
+        if not self.project.entries:
+            return
+
+        from ..ollama_client import _CONTROL_CODE_RE
+
+        fixed = 0
+        for entry in self.project.entries:
+            if entry.status not in ("translated", "reviewed"):
+                continue
+            if not entry.translation:
+                continue
+
+            orig_codes = _CONTROL_CODE_RE.findall(entry.original)
+            if not orig_codes:
+                continue
+
+            # Check which codes are missing (handle duplicates correctly)
+            trans_check = entry.translation
+            missing = []
+            for code in orig_codes:
+                if code in trans_check:
+                    trans_check = trans_check.replace(code, "", 1)
+                else:
+                    missing.append(code)
+
+            if not missing:
+                continue
+
+            # Insert missing codes based on their position in the original
+            orig_len = len(entry.original)
+            prepend = []
+            append = []
+            for code in missing:
+                pos = entry.original.find(code)
+                if pos < 0:
+                    prepend.append(code)
+                elif orig_len > 0 and pos / orig_len > 0.85:
+                    append.append(code)
+                else:
+                    prepend.append(code)
+
+            new_translation = "".join(prepend) + entry.translation + "".join(append)
+            if new_translation != entry.translation:
+                entry.translation = new_translation
+                fixed += 1
+
+        if fixed:
+            # Refresh table
+            self.trans_table.refresh()
+            self.file_tree.refresh_stats(self.project)
+
+        QMessageBox.information(
+            self, "Fix Missing Codes",
+            f"Fixed {fixed} entries with missing control codes."
+            if fixed else "All entries have their control codes intact."
         )
 
     # ── Export TXT ─────────────────────────────────────────────────
@@ -1208,6 +1572,7 @@ class MainWindow(QMainWindow):
         self.batch_db_action.setEnabled(False)
         self.batch_dialogue_action.setEnabled(False)
         self.batch_action.setEnabled(False)
+        self.batch_actor_action.setEnabled(False)
         self.stop_action.setEnabled(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(len(entries))
@@ -1320,6 +1685,70 @@ class MainWindow(QMainWindow):
         self._correction_thread = thread
         self._correction_worker = worker
 
+    # ── Polish selected entries ───────────────────────────────────
+
+    def _polish_selected(self, entry_ids: list):
+        """Polish grammar on selected entries via background thread."""
+        if not self.client.is_available():
+            QMessageBox.warning(
+                self, "Ollama Not Available",
+                "Cannot connect to Ollama. Make sure it's running:\n  ollama serve"
+            )
+            return
+
+        entries = [self.project.get_entry_by_id(eid) for eid in entry_ids]
+        entries = [e for e in entries if e and e.translation and e.translation.strip()]
+        if not entries:
+            return
+
+        self.statusbar.showMessage(f"Polishing {len(entries)} entries...")
+
+        from PyQt6.QtCore import QThread, QObject, pyqtSignal as Signal
+
+        class _PolishWorker(QObject):
+            entry_done = Signal(str, str)  # entry_id, polished_text
+            finished = Signal(int)         # count polished
+
+            def __init__(self, client, entries_to_polish):
+                super().__init__()
+                self.client = client
+                self.entries = entries_to_polish
+
+            def run(self):
+                count = 0
+                for e in self.entries:
+                    result = self.client.polish(text=e.translation)
+                    if result and result != e.translation:
+                        self.entry_done.emit(e.id, result)
+                        count += 1
+                self.finished.emit(count)
+
+        thread = QThread(self)
+        worker = _PolishWorker(self.client, entries)
+        worker.moveToThread(thread)
+
+        def on_entry(eid, polished):
+            entry = self.project.get_entry_by_id(eid)
+            if entry:
+                entry.translation = polished
+                self.trans_table.update_entry(eid, polished)
+
+        def on_finished(count):
+            self.file_tree.refresh_stats(self.project)
+            self.statusbar.showMessage(
+                f"Polished {count}/{len(entries)} entries", 5000
+            )
+            thread.quit()
+
+        worker.entry_done.connect(on_entry)
+        worker.finished.connect(on_finished)
+        thread.started.connect(worker.run)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+        self._polish_thread = thread
+        self._polish_worker = worker
+
     # ── Translation variants ──────────────────────────────────────
 
     def _show_variants(self, entry_id: str):
@@ -1413,3 +1842,26 @@ class MainWindow(QMainWindow):
 
         self._variant_thread = thread
         self._variant_worker = worker
+
+    # ── Window close cleanup ──────────────────────────────────────
+
+    def closeEvent(self, event):
+        """Clean up background threads and managed Ollama on window close."""
+        # Stop batch translation if running
+        self.engine.cancel()
+        for thread in self.engine._threads:
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(3000)
+
+        # Stop correction/variant threads if running
+        for attr in ("_correction_thread", "_variant_thread"):
+            thread = getattr(self, attr, None)
+            if thread and thread.isRunning():
+                thread.quit()
+                thread.wait(3000)
+
+        # Clean up managed Ollama subprocess (if we started one)
+        self.client.cleanup()
+
+        super().closeEvent(event)

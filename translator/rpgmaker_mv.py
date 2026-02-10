@@ -86,10 +86,9 @@ _MALE_HINTS = re.compile(
 )
 
 
-def _detect_gender(profile: str, note: str, face_name: str,
-                   battler_name: str, nickname: str) -> str:
+def _detect_gender(profile: str, note: str, nickname: str) -> str:
     """Try to detect gender from actor metadata. Returns 'male', 'female', or ''."""
-    all_text = f"{profile} {note} {nickname} {face_name} {battler_name}"
+    all_text = f"{profile} {note} {nickname}"
 
     female_score = len(_FEMALE_HINTS.findall(all_text))
     male_score = len(_MALE_HINTS.findall(all_text))
@@ -184,11 +183,9 @@ class RPGMakerMVParser:
 
             profile = item.get("profile", "").strip()
             nickname = item.get("nickname", "").strip()
-            face_name = item.get("faceName", "").strip()
-            battler_name = item.get("battlerName", "").strip()
             note = item.get("note", "").strip()
 
-            auto_gender = _detect_gender(profile, note, face_name, battler_name, nickname)
+            auto_gender = _detect_gender(profile, note, nickname)
 
             actors.append({
                 "id": item.get("id", 0),
@@ -254,6 +251,11 @@ class RPGMakerMVParser:
         # Back up originals on first export
         self._backup_data_dir(data_dir)
 
+        # Always read from the backup (original Japanese) so that
+        # re-exports after inline edits still find the original text to match.
+        backup_dir = data_dir + "_original"
+        source_dir = backup_dir if os.path.isdir(backup_dir) else data_dir
+
         # Group entries by file
         by_file = {}
         for e in entries:
@@ -261,17 +263,19 @@ class RPGMakerMVParser:
                 by_file.setdefault(e.file, []).append(e)
 
         for filename, file_entries in by_file.items():
-            filepath = os.path.join(data_dir, filename)
-            if not os.path.exists(filepath):
+            source_path = os.path.join(source_dir, filename)
+            if not os.path.exists(source_path):
                 continue
 
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(source_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
             for entry in file_entries:
                 self._apply_translation(data, entry)
 
-            with open(filepath, "w", encoding="utf-8") as f:
+            # Always write to the live data/ directory
+            out_path = os.path.join(data_dir, filename)
+            with open(out_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
         # Export plugin translations (plugins.js is outside data/)
@@ -613,6 +617,13 @@ class RPGMakerMVParser:
         parts = entry.id.split("/")
         filename = parts[0]
 
+        try:
+            self._apply_translation_inner(data, entry, parts, filename)
+        except (ValueError, IndexError, KeyError):
+            pass  # Malformed entry ID — skip silently rather than crash export
+
+    def _apply_translation_inner(self, data, entry, parts, filename):
+        """Inner logic for _apply_translation (split out for safe int parsing)."""
         # Database entries: "Actors.json/1/name"
         if filename in DATABASE_FILES and len(parts) >= 3:
             item_id = int(parts[1])
@@ -816,10 +827,14 @@ class RPGMakerMVParser:
         """Parse plugins.js into a Python list of plugin dicts."""
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
-        m = re.search(r'\[.*\]', content, re.DOTALL)
+        # Match the array assigned to $plugins specifically, not any []
+        m = re.search(r'var\s+\$plugins\s*=\s*(\[.*?\])\s*;', content, re.DOTALL)
+        if not m:
+            # Fallback: non-greedy match of first complete JSON array
+            m = re.search(r'(\[.*?\])\s*;', content, re.DOTALL)
         if not m:
             return []
-        return json.loads(m.group(0))
+        return json.loads(m.group(1))
 
     @staticmethod
     def _write_plugins_js(path: str, plugins: list):
@@ -928,13 +943,20 @@ class RPGMakerMVParser:
         plugins_path = self._find_plugins_file(project_dir)
         if not plugins_path:
             return
-        try:
-            plugins = self._load_plugins_js(plugins_path)
-        except (json.JSONDecodeError, OSError):
-            return
 
         # Backup before first modification
         self._backup_plugins_file(plugins_path)
+
+        # Always read from backup (original Japanese) so re-exports work
+        backup_path = os.path.join(
+            os.path.dirname(plugins_path),
+            os.path.basename(plugins_path).replace("plugins.", "plugins_original."),
+        )
+        source_path = backup_path if os.path.exists(backup_path) else plugins_path
+        try:
+            plugins = self._load_plugins_js(source_path)
+        except (json.JSONDecodeError, OSError):
+            return
 
         # Build lookup: plugin_name → {param_key → plugin_dict}
         plugin_by_name = {}
@@ -977,42 +999,46 @@ class RPGMakerMVParser:
         """Navigate a parsed JSON structure by path segments and replace a value.
 
         Path segments: "[0]" for array indices, "key" for object keys.
+        Recursive so that intermediate JSON-encoded strings are re-serialized
+        after modification (prevents [object Object] bugs in RPG Maker).
         """
-        for i, segment in enumerate(path):
-            is_last = (i == len(path) - 1)
+        if not path:
+            return
+        segment = path[0]
+        is_last = len(path) == 1
 
-            if segment.startswith("[") and segment.endswith("]"):
-                # Array index
-                idx = int(segment[1:-1])
-                if not isinstance(obj, list) or idx >= len(obj):
-                    return
-                if is_last:
-                    if isinstance(obj[idx], str) and obj[idx] == original:
-                        obj[idx] = translation
-                    return
-                else:
-                    val = obj[idx]
-                    if isinstance(val, str):
-                        try:
-                            val = json.loads(val)
-                            obj[idx] = val  # in-place parse
-                        except (json.JSONDecodeError, ValueError):
-                            return
-                    obj = val
+        if segment.startswith("[") and segment.endswith("]"):
+            idx = int(segment[1:-1])
+            if not isinstance(obj, list) or idx >= len(obj):
+                return
+            if is_last:
+                if isinstance(obj[idx], str) and obj[idx] == original:
+                    obj[idx] = translation
             else:
-                # Object key
-                if not isinstance(obj, dict) or segment not in obj:
-                    return
-                if is_last:
-                    if obj[segment] == original:
-                        obj[segment] = translation
-                    return
-                else:
-                    val = obj[segment]
-                    if isinstance(val, str):
-                        try:
-                            val = json.loads(val)
-                            obj[segment] = val
-                        except (json.JSONDecodeError, ValueError):
-                            return
-                    obj = val
+                val = obj[idx]
+                was_string = isinstance(val, str)
+                if was_string:
+                    try:
+                        val = json.loads(val)
+                    except (json.JSONDecodeError, ValueError):
+                        return
+                self._set_nested_value(val, path[1:], original, translation)
+                if was_string:
+                    obj[idx] = json.dumps(val, ensure_ascii=False)
+        else:
+            if not isinstance(obj, dict) or segment not in obj:
+                return
+            if is_last:
+                if obj[segment] == original:
+                    obj[segment] = translation
+            else:
+                val = obj[segment]
+                was_string = isinstance(val, str)
+                if was_string:
+                    try:
+                        val = json.loads(val)
+                    except (json.JSONDecodeError, ValueError):
+                        return
+                self._set_nested_value(val, path[1:], original, translation)
+                if was_string:
+                    obj[segment] = json.dumps(val, ensure_ascii=False)

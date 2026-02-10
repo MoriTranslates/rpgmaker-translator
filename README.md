@@ -110,9 +110,11 @@ After opening a project, a dialog will appear showing all actors found in the ga
 - **Batch DB** (`Ctrl+D`): Translates only database entries (item names, skill names, enemy names, system terms). Run this first so you can QA names before they feed into dialogue as glossary terms.
 - **Batch Dialogue** (`Ctrl+T`): Translates dialogue, events, and plugin text. Warns you if no DB names have been translated yet. Translated DB names are automatically used as glossary terms.
 - **Batch All** (`Ctrl+Shift+T`): Translates everything at once (DB + dialogue) — the old behavior if you don't need the two-stage workflow.
+- **Batch by Actor** (`Ctrl+Shift+A`): Translates dialogue grouped by speaker gender — female speakers first, then male, then ungendered, then non-dialogue entries. Each entry gets explicit gender hints so the LLM uses correct pronouns consistently. Shows a breakdown of how many entries per gender group before starting.
 - **Translate Selected**: Select rows in the table, right-click, and choose **Translate Selected** to translate specific entries.
 - **Retranslate with Correction**: Right-click a translated entry and choose **Retranslate with Correction...** to provide a hint about what was wrong (e.g., "wrong pronoun", "too literal").
 - **Show Variants**: Right-click and choose **Show Variants (3 options)...** to generate 3 different translations and pick the best one.
+- **Polish Grammar**: Run all translations through an English-to-English LLM pass to fix grammar and improve fluency without retranslating from Japanese. Available as a batch operation (Translate menu) or per-entry (right-click).
 
 Progress and ETA are shown in the status bar. Auto-saves every 25 entries so you don't lose progress if something crashes.
 
@@ -122,6 +124,8 @@ Progress and ETA are shown in the status bar. Auto-saves every 25 entries so you
 - Edit the English translation directly in the right-side editor box
 - Right-click the editor to insert missing control codes (`\N[1]`, `\C[2]`, etc.) from the original
 - Right-click a row and choose **Mark as Reviewed** to mark it green
+- **Search** across all entries regardless of file tree selection — the search box ignores control codes so you can find text without worrying about `\C[2]` etc.
+- **Fix Missing Codes** (Translate menu): Batch-fix all translated entries that are missing control codes from the original
 
 ### Glossary
 
@@ -131,13 +135,15 @@ The glossary forces the LLM to use specific English translations for Japanese te
 - Each translation request includes all glossary terms in the prompt, so the LLM sees "Translate: 聖剣は強い / Glossary: 聖剣=Holy Sword" and uses the exact term
 - Without a glossary, the same item name might be translated differently each time ("Sacred Sword" in one line, "Holy Blade" in another)
 
-**Three sources of glossary entries:**
+**Two glossary layers:**
 
-1. **Manual glossary** — Open **Settings > Glossary** tab to add your own JP → EN mappings. Use this for character names, locations, or any term you want translated a specific way.
+1. **General Glossary** (Settings > General Glossary) — shared across all projects. When opening a new project, the tool offers to load ~100 preset translations for common terms (RPG terms, body parts, expressions). You can add, edit, or remove entries.
 
-2. **Default glossary** — When opening a new project, the tool offers to load ~100 preset translations for common Japanese terms (RPG terms, body parts, expressions). You can edit or remove these later in Settings.
+2. **Project Glossary** (Settings > Glossary) — per-project terms. Auto-populated from translated DB names (items, skills, enemies, actors, etc.). You can also add manual entries here.
 
-3. **Auto-glossary** — When database entries (item names, skill names, enemy names, etc.) are translated, their JP → EN mappings are automatically added to the glossary. This means if "ポーション" is translated as "Potion" in Items.json, every dialogue line mentioning ポーション will also say "Potion".
+Both layers are merged at translation time. Project entries override general entries if the same JP term exists in both.
+
+**Auto-glossary** — When database entries are translated, their JP → EN mappings are automatically added to the project glossary. This means if "ポーション" is translated as "Potion" in Items.json, every dialogue line mentioning ポーション will also say "Potion".
 
 **Recommended workflow** (two-stage batch):
 1. **Batch DB** (`Ctrl+D`) — Translate all database names and terms first
@@ -156,11 +162,17 @@ Go to **Project > Rename Folder** to translate the Japanese folder name to Engli
 - **Load State** (`Ctrl+L`): Loads a previously saved state file to continue work
 - **Auto-Save**: The tool auto-saves every 2 minutes if you have entries loaded
 
+### Plugin Parameters
+
+The tool extracts translatable Japanese text from `js/plugins.js` — menu labels, dialog text, UI strings, and custom descriptions stored in plugin configuration. These appear under the "Plugins" category in the file tree. Nested JSON-encoded parameters (arrays, objects) are handled recursively. Non-display text (file paths, color codes, asset IDs) is automatically filtered out.
+
 ### Exporting to the Game
 
-- **Export to Game** (`Ctrl+E`): Writes all translated text back into the game's original JSON files in the `data/` folder (via **Game** menu)
+- **Export to Game** (`Ctrl+E`): Writes all translated text back into the game's original JSON files in the `data/` folder and `js/plugins.js` (via **Game** menu)
 - **Export TXT**: Saves a human-readable text patch file for reference (via **Game** menu)
-- **Restore Originals**: Restores original Japanese files from backup (via **Game** menu)
+- **Restore Originals**: Restores original Japanese files from backup, including `plugins.js` (via **Game** menu)
+
+Exports always read from the original backup (`data_original/`, `plugins_original.js`) so you can safely re-export after editing translations inline.
 
 ### Word Wrap
 
@@ -172,10 +184,14 @@ Go to **Translate > Apply Word Wrap** to automatically format translated text to
 |---------|---------|-------------|
 | Ollama URL | `http://localhost:11434` | Address of the Ollama server |
 | Model | `qwen2.5:14b` | Which LLM model to use |
+| Target Language | English | Translation target (supports 12 languages with quality ratings) |
 | System Prompt | (built-in) | The instruction prompt sent to the LLM |
+| Workers | `2` | Number of parallel translation threads |
 | Context window size | `3` | Number of recent dialogue lines sent as context (higher = better coherence, more VRAM) |
-| Dark mode | On | Catppuccin dark theme (toggle in Settings > Appearance) |
-| Glossary | (empty) | Forced JP-to-EN term mappings |
+| Word wrap override | `0` (auto) | Manual chars-per-line override (0 = auto-detect from plugins) |
+| Dark mode | On | Catppuccin dark theme (toggle in Settings) |
+| General Glossary | (defaults) | JP-to-EN term mappings shared across all projects |
+| Project Glossary | (auto) | Per-project glossary (auto-populated from translated DB names) |
 
 ## Supported Game Formats
 
@@ -204,4 +220,7 @@ Go to **Translate > Apply Word Wrap** to automatically format translated text to
 
 **Wrong pronouns in translation**
 - Open a project fresh and assign correct genders in the actor dialog
-- Use **Retranslate with Correction** and hint "use she/her" or "use he/him"
+- The translator automatically maps `\N[n]` control codes to character genders, so the LLM knows which character each code refers to
+- Speaker gender is also detected from dialogue headers and injected into the prompt
+- Use **Batch by Actor** (`Ctrl+Shift+A`) for the most accurate pronoun handling — it groups dialogue by speaker gender
+- Use **Retranslate with Correction** and hint "use she/her" or "use he/him" for individual fixes

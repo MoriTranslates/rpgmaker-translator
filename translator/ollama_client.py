@@ -1,7 +1,14 @@
 """Ollama REST API wrapper for LLM translation."""
 
+import logging
+import os
 import re
+import subprocess
+import time
+
 import requests
+
+log = logging.getLogger(__name__)
 
 
 # Regex matching RPG Maker control codes that the LLM should never touch.
@@ -10,6 +17,7 @@ _CONTROL_CODE_RE = re.compile(
     r'\\[A-Za-z]+\[\d*\]'      # \V[1], \N[2], \C[3], \FS[24], etc.
     r'|\\[{}$.|!><^]'           # \{, \}, \$, \., \|, \!, \>, \<, \^
     r'|<[^>]+>'                 # HTML-like tags: <br>, <WordWrap>, <B>, etc.
+    r'|%\d+'                    # %1, %2, etc. — RPG Maker format specifiers in battle/skill messages
 )
 
 # Japanese bracket pairs → English equivalents
@@ -54,12 +62,62 @@ Context-sensitive translation:
 - For adult scenes, use natural and explicit English that matches the original intensity. Do not tone down or soften the language."""
 
 
+_POLISH_SYSTEM_PROMPT = """\
+You are an English editor for a translated RPG game. The text was machine-translated \
+from Japanese and may have awkward grammar, unnatural phrasing, or broken sentences.
+
+Your job:
+- Fix grammar, spelling, and punctuation errors.
+- Make the English sound natural and fluent while keeping the EXACT same meaning.
+- Preserve the tone (casual, formal, dramatic, comedic, sexual, etc.).
+- Do NOT add, remove, or change any information — only improve how it reads.
+- Do NOT change character names, honorifics (-san, -chan, etc.), or proper nouns.
+- If the text contains code markers like «CODE1», output them exactly as-is.
+- Keep line breaks in the same positions.
+- For short menu labels or single words that are already correct, output them unchanged.
+- Output ONLY the polished text, nothing else. No explanations, no notes."""
+
+
 _NAME_SYSTEM_PROMPT = (
     "You are a Japanese to English translator. Translate the given Japanese text "
     "into natural English. Output ONLY the translation, nothing else. "
     "For Japanese names, transliterate them into romaji. "
     "If the text is already in English, output it as-is."
 )
+
+# Supported target languages with quality ratings for Qwen2.5
+# (name, stars, tooltip description)
+TARGET_LANGUAGES = [
+    ("English",               "\u2605\u2605\u2605\u2605\u2605", "Best — primary JP translation target, huge parallel corpus"),
+    ("Chinese (Simplified)",  "\u2605\u2605\u2605\u2605\u2605", "Excellent — Qwen's native language"),
+    ("Chinese (Traditional)", "\u2605\u2605\u2605\u2605\u2606", "Very good — close to Simplified Chinese"),
+    ("Korean",                "\u2605\u2605\u2605\u2605\u2606", "Very good — strong CJK language family support"),
+    ("Spanish",               "\u2605\u2605\u2605\u2606\u2606", "Good general quality, less game/eroge-specific data"),
+    ("Portuguese",            "\u2605\u2605\u2605\u2606\u2606", "Good general quality, less game/eroge-specific data"),
+    ("French",                "\u2605\u2605\u2605\u2606\u2606", "Good general quality, less game/eroge-specific data"),
+    ("German",                "\u2605\u2605\u2605\u2606\u2606", "Good general quality, less game/eroge-specific data"),
+    ("Russian",               "\u2605\u2605\u2606\u2606\u2606", "Fair — limited JP\u2192RU parallel training data"),
+    ("Indonesian",            "\u2605\u2605\u2606\u2606\u2606", "Fair — limited parallel training data"),
+    ("Vietnamese",            "\u2605\u2605\u2606\u2606\u2606", "Fair — limited parallel training data"),
+    ("Thai",                  "\u2605\u2605\u2606\u2606\u2606", "Fair — limited parallel training data"),
+]
+
+
+def build_system_prompt(target_language: str = "English") -> str:
+    """Build the main translation system prompt for a given target language.
+
+    Uses the English prompt as template and swaps "English" for the target.
+    """
+    if target_language == "English":
+        return SYSTEM_PROMPT
+    return SYSTEM_PROMPT.replace("English", target_language)
+
+
+def _build_name_prompt(target_language: str = "English") -> str:
+    """Build the short name-translation prompt for a given target language."""
+    if target_language == "English":
+        return _NAME_SYSTEM_PROMPT
+    return _NAME_SYSTEM_PROMPT.replace("English", target_language)
 
 
 class OllamaClient:
@@ -69,8 +127,12 @@ class OllamaClient:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.system_prompt = SYSTEM_PROMPT  # Customizable system prompt
+        self.target_language = "English"   # Target translation language
         self.actor_context = ""  # Character reference for pronoun inference
+        self.actor_genders = {}  # {actor_id(int): "male"/"female"/"unknown"}
+        self.actor_names = {}    # {actor_id(int): "name string"}
         self.glossary = {}       # JP term -> EN translation forced mappings
+        self._managed_proc = None  # subprocess.Popen if we started Ollama
 
     def is_available(self) -> bool:
         """Check if Ollama server is reachable."""
@@ -79,6 +141,118 @@ class OllamaClient:
             return r.status_code == 200
         except (requests.RequestException, ValueError, OSError):
             return False
+
+    # ── Ollama process management ─────────────────────────────────
+
+    def stop_server(self):
+        """Stop any running Ollama process (service or managed subprocess)."""
+        # 1. Kill our own managed subprocess if we started one
+        if self._managed_proc and self._managed_proc.poll() is None:
+            log.info("Stopping managed Ollama subprocess (PID %d)", self._managed_proc.pid)
+            self._managed_proc.terminate()
+            try:
+                self._managed_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._managed_proc.kill()
+                self._managed_proc.wait(timeout=3)
+            self._managed_proc = None
+
+        # 2. Stop the Windows service (if running)
+        try:
+            subprocess.run(
+                ["net", "stop", "OllamaService"],
+                capture_output=True, timeout=10,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        # 3. Kill any remaining ollama.exe processes
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "ollama.exe"],
+                capture_output=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        # Brief pause to let ports release
+        time.sleep(0.5)
+
+    def restart_server(self, num_parallel: int = 2) -> bool:
+        """Restart Ollama with OLLAMA_NUM_PARALLEL set.
+
+        Stops any existing Ollama process, then starts a new one as a
+        managed subprocess. Returns True if the server becomes reachable.
+        """
+        self.stop_server()
+
+        # Find ollama executable
+        ollama_exe = self._find_ollama_exe()
+        if not ollama_exe:
+            log.error("Could not find ollama.exe")
+            return False
+
+        # Build environment with OLLAMA_NUM_PARALLEL
+        env = os.environ.copy()
+        env["OLLAMA_NUM_PARALLEL"] = str(num_parallel)
+
+        log.info("Starting Ollama: %s serve (OLLAMA_NUM_PARALLEL=%d)", ollama_exe, num_parallel)
+        try:
+            self._managed_proc = subprocess.Popen(
+                [ollama_exe, "serve"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except (FileNotFoundError, OSError) as e:
+            log.error("Failed to start Ollama: %s", e)
+            return False
+
+        # Wait for server to become reachable (up to 15s)
+        for _ in range(30):
+            time.sleep(0.5)
+            if self.is_available():
+                log.info("Ollama server ready (PID %d)", self._managed_proc.pid)
+                return True
+            # Check if process died
+            if self._managed_proc.poll() is not None:
+                log.error("Ollama process exited with code %d", self._managed_proc.returncode)
+                self._managed_proc = None
+                return False
+
+        log.error("Ollama server did not become reachable within 15s")
+        return False
+
+    def cleanup(self):
+        """Kill managed Ollama subprocess. Call on app exit."""
+        if self._managed_proc and self._managed_proc.poll() is None:
+            log.info("Cleaning up managed Ollama subprocess (PID %d)", self._managed_proc.pid)
+            self._managed_proc.terminate()
+            try:
+                self._managed_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._managed_proc.kill()
+            self._managed_proc = None
+
+    @staticmethod
+    def _find_ollama_exe() -> str | None:
+        """Locate the ollama executable on the system."""
+        # Check PATH first
+        for path_dir in os.environ.get("PATH", "").split(os.pathsep):
+            candidate = os.path.join(path_dir, "ollama.exe")
+            if os.path.isfile(candidate):
+                return candidate
+        # Common install locations on Windows
+        for base in [
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Ollama"),
+            r"C:\Program Files\Ollama",
+        ]:
+            candidate = os.path.join(base, "ollama.exe")
+            if os.path.isfile(candidate):
+                return candidate
+        return None
 
     def list_models(self) -> list:
         """Get list of available model names from Ollama."""
@@ -109,11 +283,11 @@ class OllamaClient:
                 json={
                     "model": self.model,
                     "messages": [
-                        {"role": "system", "content": _NAME_SYSTEM_PROMPT},
+                        {"role": "system", "content": _build_name_prompt(self.target_language)},
                         {"role": "user", "content": user_msg},
                     ],
                     "stream": False,
-                    "options": {"temperature": 0, "seed": 42, "num_predict": 256},
+                    "options": {"temperature": 0, "seed": 42, "num_predict": 256, "num_ctx": 4096},
                 },
                 timeout=30,
             )
@@ -160,6 +334,77 @@ class OllamaClient:
         for jp, en in _JP_BRACKETS.items():
             text = text.replace(jp, en)
         return text
+
+    # Regex to detect \N[n] actor name codes among extracted codes
+    _ACTOR_NAME_CODE_RE = re.compile(r'\\[Nn]\[(\d+)\]')
+
+    def _build_code_hints(self, code_map: dict) -> str:
+        """Build hints mapping «CODEn» placeholders to actor names and genders.
+
+        When \\N[1] gets replaced by «CODE3», the LLM has no idea that
+        «CODE3» refers to a specific character. This method detects \\N[n]
+        codes in the mapping and creates an explicit hint so the LLM can
+        use correct pronouns for referenced characters.
+        """
+        if not code_map or not self.actor_genders:
+            return ""
+        hints = []
+        for placeholder, code in code_map.items():
+            m = self._ACTOR_NAME_CODE_RE.match(code)
+            if not m:
+                continue
+            actor_id = int(m.group(1))
+            gender = self.actor_genders.get(actor_id, "")
+            if not gender or gender == "unknown":
+                continue
+            name = self.actor_names.get(actor_id, f"Actor {actor_id}")
+            if gender == "female":
+                pronoun = "she/her"
+            elif gender == "male":
+                pronoun = "he/him"
+            else:
+                pronoun = "they/them"
+            hints.append(f"  {placeholder} = name of {name} ({pronoun})")
+        if not hints:
+            return ""
+        return (
+            "Character name codes (these will display as character names "
+            "in-game — use the CORRECT pronouns for each):\n"
+            + "\n".join(hints)
+        )
+
+    def _build_speaker_hint(self, context: str) -> str:
+        """If context identifies a speaker, add their gender as a translation hint.
+
+        The parser embeds ``[Speaker: name]`` in dialogue context from code 101
+        headers.  Cross-referencing with actor data lets us tell the LLM
+        the speaker's gender so first-person voice and pronoun references
+        are accurate.
+        """
+        if not context or not self.actor_genders:
+            return ""
+        m = re.search(r'\[Speaker:\s*(.+?)\]', context)
+        if not m:
+            return ""
+        speaker = m.group(1).strip()
+        if not speaker:
+            return ""
+        for actor_id, name in self.actor_names.items():
+            if name == speaker or speaker == name:
+                gender = self.actor_genders.get(actor_id, "")
+                if gender == "female":
+                    return (
+                        f"Speaker: {name} is FEMALE. "
+                        "Lines spoken by her use first-person I/me. "
+                        "Others referring to her use she/her.\n"
+                    )
+                elif gender == "male":
+                    return (
+                        f"Speaker: {name} is MALE. "
+                        "Lines spoken by him use first-person I/me. "
+                        "Others referring to him use he/him.\n"
+                    )
+        return ""
 
     # Human-readable labels for RPG Maker entry field types
     _FIELD_HINTS = {
@@ -211,6 +456,10 @@ class OllamaClient:
             user_msg += f"Glossary (MUST use these exact translations for these terms):\n{glossary_str}\n\n"
         if context:
             user_msg += f"Context (surrounding dialogue for reference, do NOT translate this):\n{context}\n\n"
+            # Add speaker gender hint derived from context [Speaker: name]
+            speaker_hint = self._build_speaker_hint(context)
+            if speaker_hint:
+                user_msg += speaker_hint + "\n"
         if correction and old_translation:
             user_msg += (
                 f"PREVIOUS TRANSLATION (WRONG — do NOT reuse):\n{old_translation}\n\n"
@@ -223,12 +472,17 @@ class OllamaClient:
                 "You MUST output them exactly as-is. Do NOT replace them with character "
                 "names or any other text.\n\n"
             )
+            # Add actor-to-code mapping so LLM knows which codes are character names
+            code_hints = self._build_code_hints(code_map)
+            if code_hints:
+                user_msg += code_hints + "\n\n"
         if field:
-            hint = self._FIELD_HINTS.get(field, field)
-            user_msg += f"Content type: {hint}\n"
             # For terms fields like "terms.messages[0]", label as menu/system term
             if field.startswith("terms."):
                 user_msg += "Content type: menu/system term\n"
+            else:
+                hint = self._FIELD_HINTS.get(field, field)
+                user_msg += f"Content type: {hint}\n"
         user_msg += f"Translate this:\n{clean_text}"
 
         payload = {
@@ -242,6 +496,7 @@ class OllamaClient:
                 "temperature": 0,
                 "seed": 42,
                 "num_predict": 1024,
+                "num_ctx": 4096,
             },
         }
 
@@ -255,6 +510,11 @@ class OllamaClient:
             data = r.json()
             result = data.get("message", {}).get("content", "").strip()
 
+            # Guard: treat empty LLM output as a failure so we don't
+            # silently mark entries as "translated" with blank text.
+            if not result:
+                raise ConnectionError("Ollama returned empty translation")
+
             # Post-process: restore control codes from placeholders
             if code_map:
                 result = self._restore_codes(result, code_map)
@@ -262,6 +522,57 @@ class OllamaClient:
             return result
         except requests.RequestException as e:
             raise ConnectionError(f"Ollama API error: {e}") from e
+
+    def polish(self, text: str) -> str:
+        """Polish an existing English translation for grammar and fluency.
+
+        Uses the same placeholder system to protect control codes.
+        Returns the polished text, or the original on failure.
+        """
+        if not text or not text.strip():
+            return text
+
+        clean_text, code_map = self._extract_codes(text)
+
+        user_msg = ""
+        if code_map:
+            user_msg += (
+                "IMPORTANT: The text contains code markers like «CODE1», «CODE2», etc. "
+                "These are internal engine formatting tags. "
+                "You MUST output them exactly as-is.\n\n"
+            )
+        user_msg += f"Polish this:\n{clean_text}"
+
+        try:
+            r = requests.post(
+                f"{self.base_url}/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": _POLISH_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "stream": False,
+                    "options": {
+                        "temperature": 0,
+                        "seed": 42,
+                        "num_predict": 1024,
+                        "num_ctx": 4096,
+                    },
+                },
+                timeout=120,
+            )
+            r.raise_for_status()
+            result = r.json().get("message", {}).get("content", "").strip()
+            if not result:
+                return text  # Keep original on empty response
+
+            if code_map:
+                result = self._restore_codes(result, code_map)
+
+            return result
+        except requests.RequestException:
+            return text  # Keep original on error
 
     def translate_variants(self, text: str, context: str = "",
                            field: str = "", count: int = 3) -> list:
@@ -303,6 +614,9 @@ class OllamaClient:
                         "IMPORTANT: Code markers like «CODE1» are engine tags. "
                         "Output them exactly as-is.\n\n"
                     )
+                    code_hints = self._build_code_hints(code_map)
+                    if code_hints:
+                        user_msg += code_hints + "\n\n"
                 if field:
                     hint = self._FIELD_HINTS.get(field, field)
                     user_msg += f"Content type: {hint}\n"
@@ -321,6 +635,7 @@ class OllamaClient:
                             "temperature": 0.5,
                             "seed": seeds[i],
                             "num_predict": 1024,
+                            "num_ctx": 4096,
                         },
                     },
                     timeout=120,
@@ -347,6 +662,7 @@ class OllamaClient:
                                 "temperature": 0.8,
                                 "seed": seeds[i] + 100,
                                 "num_predict": 1024,
+                                "num_ctx": 4096,
                             },
                         },
                         timeout=120,

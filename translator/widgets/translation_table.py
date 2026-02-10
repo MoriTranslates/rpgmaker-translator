@@ -1,13 +1,19 @@
-"""Translation table widget — main workspace for reviewing and editing translations."""
+"""Translation table widget — main workspace for reviewing and editing translations.
+
+Uses QTableView + QAbstractTableModel for virtual scrolling — only visible
+rows are rendered, so 24k+ entries load instantly.
+"""
 
 import re
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QWidget, QVBoxLayout, QHBoxLayout, QTableView,
     QLineEdit, QComboBox, QLabel, QMenu, QAbstractItemView, QHeaderView,
     QInputDialog, QTextEdit, QSplitter, QGroupBox,
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QTimer
+from PyQt6.QtCore import (
+    pyqtSignal, Qt, QTimer, QAbstractTableModel, QModelIndex,
+)
 from PyQt6.QtGui import QColor, QAction, QTextCursor
 
 from ..project_model import TranslationEntry
@@ -32,7 +38,7 @@ STATUS_COLORS_LIGHT = {
 STATUS_COLORS_DARK = {
     "untranslated": QColor(80, 40, 40),      # dark red
     "translated":   QColor(70, 65, 30),      # dark yellow
-    "reviewed":     QColor(30, 70, 40),      # dark green
+    "reviewed":     QColor(30, 70, 40),       # dark green
     "skipped":      QColor(50, 50, 55),      # dark gray
 }
 
@@ -50,6 +56,115 @@ COL_FIELD = 2
 COL_ORIGINAL = 3
 COL_TRANSLATION = 4
 
+_COLUMN_HEADERS = ["", "File", "Field", "Original (JP)", "Translation (EN)"]
+
+
+class TranslationTableModel(QAbstractTableModel):
+    """Model backing the translation table — provides data on demand."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._entries: list[TranslationEntry] = []
+        self._dark_mode = True
+
+    @property
+    def _status_colors(self):
+        return STATUS_COLORS_DARK if self._dark_mode else STATUS_COLORS_LIGHT
+
+    def set_entries(self, entries: list):
+        self.beginResetModel()
+        self._entries = entries
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self._entries)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 5
+
+    def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        row, col = index.row(), index.column()
+        if row < 0 or row >= len(self._entries):
+            return None
+
+        entry = self._entries[row]
+
+        if role == Qt.ItemDataRole.DisplayRole or role == Qt.ItemDataRole.EditRole:
+            if col == COL_STATUS:
+                return STATUS_ICONS.get(entry.status, "")
+            elif col == COL_FILE:
+                return entry.file
+            elif col == COL_FIELD:
+                return entry.field
+            elif col == COL_ORIGINAL:
+                return entry.original
+            elif col == COL_TRANSLATION:
+                return entry.translation
+
+        elif role == Qt.ItemDataRole.BackgroundRole:
+            return self._status_colors.get(entry.status, QColor(255, 255, 255))
+
+        elif role == Qt.ItemDataRole.TextAlignmentRole:
+            if col == COL_STATUS:
+                return Qt.AlignmentFlag.AlignCenter
+
+        return None
+
+    def setData(self, index: QModelIndex, value, role=Qt.ItemDataRole.EditRole):
+        if not index.isValid() or role != Qt.ItemDataRole.EditRole:
+            return False
+        row, col = index.row(), index.column()
+        if col != COL_TRANSLATION or row < 0 or row >= len(self._entries):
+            return False
+
+        entry = self._entries[row]
+        new_text = str(value)
+        entry.translation = new_text
+        if new_text.strip():
+            entry.status = "translated"
+        else:
+            entry.status = "untranslated"
+        # Emit change for the entire row (status icon + colors changed too)
+        self.dataChanged.emit(
+            self.index(row, 0), self.index(row, self.columnCount() - 1)
+        )
+        return True
+
+    def flags(self, index: QModelIndex):
+        base = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
+        if index.column() == COL_TRANSLATION:
+            return base | Qt.ItemFlag.ItemIsEditable
+        return base
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            return _COLUMN_HEADERS[section] if section < len(_COLUMN_HEADERS) else ""
+        return None
+
+    # ── Helpers for external updates ──────────────────────────────
+
+    def entry_at(self, row: int) -> TranslationEntry | None:
+        if 0 <= row < len(self._entries):
+            return self._entries[row]
+        return None
+
+    def refresh_row(self, row: int):
+        """Notify the view that a row's data changed."""
+        if 0 <= row < len(self._entries):
+            self.dataChanged.emit(
+                self.index(row, 0), self.index(row, self.columnCount() - 1)
+            )
+
+    def refresh_all(self):
+        """Notify the view that all visible data may have changed (e.g. dark mode toggle)."""
+        if self._entries:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._entries) - 1, self.columnCount() - 1),
+            )
+
 
 class TranslationTable(QWidget):
     """Table view for browsing, editing, and managing translations."""
@@ -57,13 +172,14 @@ class TranslationTable(QWidget):
     translate_requested = pyqtSignal(list)    # List of entry IDs to translate
     retranslate_correction = pyqtSignal(str, str)  # entry_id, user correction hint
     variant_requested = pyqtSignal(str)       # entry_id — request translation variants
+    polish_requested = pyqtSignal(list)       # List of entry IDs to polish
     status_changed = pyqtSignal()             # Emitted when any status changes
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._entries = []
-        self._visible_entries = []
-        self._updating = False
+        self._all_entries = []      # full project (never file-filtered)
+        self._entries = []           # current file-filtered subset (or all)
+        self._visible_entries = []   # after search + status filter
         self._dark_mode = True  # Match main_window default
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
@@ -80,7 +196,7 @@ class TranslationTable(QWidget):
 
         filter_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Filter by text...")
+        self.search_edit.setPlaceholderText("Search all entries (ignores codes)...")
         self.search_edit.textChanged.connect(self._schedule_filter)
         filter_row.addWidget(self.search_edit)
 
@@ -95,15 +211,14 @@ class TranslationTable(QWidget):
         # ── Vertical splitter: table on top, editor on bottom ─────
         vsplit = QSplitter(Qt.Orientation.Vertical)
 
-        # ── Table ──────────────────────────────────────────────────
-        self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["", "File", "Field", "Original (JP)", "Translation (EN)"])
+        # ── Table (QTableView + model) ────────────────────────────
+        self._model = TranslationTableModel(self)
+        self.table = QTableView()
+        self.table.setModel(self._model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
-        self.table.cellChanged.connect(self._on_cell_changed)
         self.table.setWordWrap(True)
 
         # Column widths
@@ -154,115 +269,84 @@ class TranslationTable(QWidget):
 
         # Track current selection
         self._selected_row = -1
-        self.table.currentCellChanged.connect(self._on_row_selected)
+        self.table.selectionModel().currentRowChanged.connect(self._on_row_selected)
+
+        # Detect edits via model's dataChanged (from in-table editing)
+        self._model.dataChanged.connect(self._on_model_data_changed)
 
         # ── Stats bar ──────────────────────────────────────────────
         self.stats_label = QLabel("No entries loaded")
         layout.addWidget(self.stats_label)
 
-    @property
-    def _status_colors(self):
-        return STATUS_COLORS_DARK if self._dark_mode else STATUS_COLORS_LIGHT
-
     def set_dark_mode(self, dark: bool):
         """Switch row colors between dark and light palettes."""
         self._dark_mode = dark
-        if self._visible_entries:
-            self._refresh_table()
+        self._model._dark_mode = dark
+        self._model.refresh_all()
 
     def set_entries(self, entries: list):
-        """Load entries into the table."""
+        """Load full project entries into the table."""
+        self._all_entries = entries
         self._entries = entries
+        self._apply_filter()
+
+    def filter_by_file(self, entries: list):
+        """Show only entries from a specific file (file tree click).
+
+        The full project list is kept so text search can span all files.
+        """
+        self._entries = entries
+        self._apply_filter()
+
+    def clear_file_filter(self):
+        """Remove file filter — show all project entries."""
+        self._entries = self._all_entries
+        self._apply_filter()
+
+    def refresh(self):
+        """Re-apply current filters (after external data changes)."""
         self._apply_filter()
 
     def _schedule_filter(self):
         """Debounce search — wait 250ms after last keystroke before filtering."""
         self._filter_timer.start()
 
+    @staticmethod
+    def _strip_codes(text: str) -> str:
+        """Remove control codes from text for search matching."""
+        return _CODE_RE.sub("", text)
+
     def _apply_filter(self):
-        """Filter visible entries by search text and status."""
+        """Filter visible entries by search text and status.
+
+        When a search query is active, searches ALL project entries
+        (ignoring file tree filter) so you can find text across the
+        entire game.  Control codes are stripped before matching.
+        """
         query = self.search_edit.text().lower()
         status = self.status_filter.currentText().lower()
 
+        # Search all entries when query is active, file-filtered otherwise
+        source = self._all_entries if query else self._entries
+
         self._visible_entries = []
-        for e in self._entries:
+        for e in source:
             if status != "all" and e.status != status:
                 continue
-            if query and query not in e.original.lower() and query not in e.translation.lower():
-                continue
+            if query:
+                orig_clean = self._strip_codes(e.original).lower()
+                trans_clean = self._strip_codes(e.translation).lower()
+                if query not in orig_clean and query not in trans_clean:
+                    continue
             self._visible_entries.append(e)
 
-        self._refresh_table()
-
-    def _refresh_table(self):
-        """Rebuild the table rows from visible entries."""
-        self._updating = True
-        self.table.setUpdatesEnabled(False)
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(self._visible_entries))
-
-        read_only = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
-
-        for row, entry in enumerate(self._visible_entries):
-            color = self._status_colors.get(entry.status, QColor(255, 255, 255))
-
-            # Status icon
-            status_item = QTableWidgetItem(STATUS_ICONS.get(entry.status, ""))
-            status_item.setFlags(read_only)
-            status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            status_item.setBackground(color)
-            self.table.setItem(row, COL_STATUS, status_item)
-
-            # File
-            file_item = QTableWidgetItem(entry.file)
-            file_item.setFlags(read_only)
-            file_item.setBackground(color)
-            self.table.setItem(row, COL_FILE, file_item)
-
-            # Field
-            field_item = QTableWidgetItem(entry.field)
-            field_item.setFlags(read_only)
-            field_item.setBackground(color)
-            self.table.setItem(row, COL_FIELD, field_item)
-
-            # Original (read-only)
-            orig_item = QTableWidgetItem(entry.original)
-            orig_item.setFlags(read_only)
-            orig_item.setBackground(color)
-            self.table.setItem(row, COL_ORIGINAL, orig_item)
-
-            # Translation (editable)
-            trans_item = QTableWidgetItem(entry.translation)
-            trans_item.setBackground(color)
-            self.table.setItem(row, COL_TRANSLATION, trans_item)
-
-        self.table.setUpdatesEnabled(True)
-        self._updating = False
+        self._model.set_entries(self._visible_entries)
         self._update_stats()
 
-    def _on_cell_changed(self, row: int, col: int):
-        """Handle manual edits in the translation column."""
-        if self._updating or col != COL_TRANSLATION:
-            return
-        if 0 <= row < len(self._visible_entries):
-            entry = self._visible_entries[row]
-            new_text = self.table.item(row, col).text()
-            entry.translation = new_text
-            if new_text.strip():
-                entry.status = "translated"
-            else:
-                entry.status = "untranslated"
-            self._update_row_color(row, entry)
-            self.status_changed.emit()
-
-    def _update_row_color(self, row: int, entry: TranslationEntry):
-        """Update the background color and status icon for a row."""
-        color = self._status_colors.get(entry.status, QColor(255, 255, 255))
-        self.table.item(row, COL_STATUS).setText(STATUS_ICONS.get(entry.status, ""))
-        for col in range(5):
-            item = self.table.item(row, col)
-            if item:
-                item.setBackground(color)
+    def _on_model_data_changed(self, top_left, bottom_right, roles=None):
+        """Handle edits made via the table's inline editor."""
+        self._update_stats()
+        self.status_changed.emit()
 
     def update_entry(self, entry_id: str, translation: str):
         """Update a specific entry's translation (called after LLM translates)."""
@@ -270,10 +354,7 @@ class TranslationTable(QWidget):
             if entry.id == entry_id:
                 entry.translation = translation
                 entry.status = "translated"
-                self._updating = True
-                self.table.item(row, COL_TRANSLATION).setText(translation)
-                self._update_row_color(row, entry)
-                self._updating = False
+                self._model.refresh_row(row)
                 # Also update editor panel if this row is selected
                 if row == self._selected_row:
                     self.trans_editor.blockSignals(True)
@@ -285,7 +366,7 @@ class TranslationTable(QWidget):
 
     def get_selected_entry_ids(self) -> list:
         """Return IDs of currently selected entries."""
-        rows = set(idx.row() for idx in self.table.selectedIndexes())
+        rows = set(idx.row() for idx in self.table.selectionModel().selectedRows())
         return [self._visible_entries[r].id for r in sorted(rows) if r < len(self._visible_entries)]
 
     def _show_context_menu(self, pos):
@@ -303,6 +384,10 @@ class TranslationTable(QWidget):
         variant_action = QAction("Show Variants (3 options)...", self)
         variant_action.triggered.connect(self._request_variants)
         menu.addAction(variant_action)
+
+        polish_action = QAction("Polish Grammar", self)
+        polish_action.triggered.connect(self._polish_selected)
+        menu.addAction(polish_action)
 
         menu.addSeparator()
 
@@ -353,36 +438,40 @@ class TranslationTable(QWidget):
         if ids:
             self.variant_requested.emit(ids[0])
 
+    def _polish_selected(self):
+        """Emit signal to polish grammar of selected entries."""
+        ids = self.get_selected_entry_ids()
+        if ids:
+            self.polish_requested.emit(ids)
+
     def _set_status(self, status: str):
         """Set status for all selected rows."""
-        rows = sorted(set(idx.row() for idx in self.table.selectedIndexes()))
+        rows = sorted(set(idx.row() for idx in self.table.selectionModel().selectedRows()))
         for row in rows:
             if row < len(self._visible_entries):
                 entry = self._visible_entries[row]
                 entry.status = status
-                self._update_row_color(row, entry)
+                self._model.refresh_row(row)
         self._update_stats()
         self.status_changed.emit()
 
     def _copy_original(self):
         """Copy original text to translation column for selected rows."""
-        rows = sorted(set(idx.row() for idx in self.table.selectedIndexes()))
-        self._updating = True
+        rows = sorted(set(idx.row() for idx in self.table.selectionModel().selectedRows()))
         for row in rows:
             if row < len(self._visible_entries):
                 entry = self._visible_entries[row]
                 entry.translation = entry.original
                 entry.status = "translated"
-                self.table.item(row, COL_TRANSLATION).setText(entry.original)
-                self._update_row_color(row, entry)
-        self._updating = False
+                self._model.refresh_row(row)
         self._update_stats()
         self.status_changed.emit()
 
     # ── Editor panel handlers ─────────────────────────────────────
 
-    def _on_row_selected(self, row: int, col: int, prev_row: int, prev_col: int):
+    def _on_row_selected(self, current: QModelIndex, previous: QModelIndex):
         """When a row is clicked, load its text into the editor panel."""
+        row = current.row()
         if row < 0 or row >= len(self._visible_entries):
             self._selected_row = -1
             self.orig_editor.clear()
@@ -413,11 +502,8 @@ class TranslationTable(QWidget):
         else:
             entry.status = "untranslated"
 
-        # Sync back to the table cell
-        self._updating = True
-        self.table.item(row, COL_TRANSLATION).setText(new_text)
-        self._update_row_color(row, entry)
-        self._updating = False
+        # Sync back to the model (refreshes colors + status icon)
+        self._model.refresh_row(row)
         self.status_changed.emit()
 
     def _show_editor_context_menu(self, pos):
