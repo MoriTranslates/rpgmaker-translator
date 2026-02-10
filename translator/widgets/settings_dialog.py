@@ -115,6 +115,35 @@ class SettingsDialog(QDialog):
         )
         opts_form.addRow("Parallel workers:", self.workers_spin)
 
+        self.batch_spin = QSpinBox()
+        self.batch_spin.setRange(1, 20)
+        self.batch_spin.setSpecialValueText("Disabled (single-entry)")
+        self.batch_spin.setToolTip(
+            "Number of entries sent per LLM request as a JSON batch.\n"
+            "1 = single-entry mode (recommended for local Ollama).\n"
+            "5-10 = useful for cloud APIs (reduces network round trips).\n\n"
+            "For local LLMs, batching does NOT improve speed\n"
+            "(GPU generates the same tokens either way).\n"
+            "It's mainly useful for cloud APIs where per-request\n"
+            "latency and rate limits are the bottleneck.\n\n"
+            "If the LLM returns invalid JSON, entries automatically\n"
+            "fall back to single-entry translation."
+        )
+        opts_form.addRow("Batch size:", self.batch_spin)
+
+        self.history_spin = QSpinBox()
+        self.history_spin.setRange(0, 30)
+        self.history_spin.setSpecialValueText("Disabled")
+        self.history_spin.setToolTip(
+            "Number of recent translation pairs sent to the LLM as context.\n"
+            "The LLM sees its own previous translations, improving style\n"
+            "consistency and pronoun resolution across sequential dialogue.\n\n"
+            "0 = disabled (no history sent).\n"
+            "10 = recommended (good balance of context vs. speed).\n"
+            "Higher values use more context window but may improve consistency."
+        )
+        opts_form.addRow("Translation history:", self.history_spin)
+
         self.wordwrap_spin = QSpinBox()
         self.wordwrap_spin.setRange(0, 200)
         self.wordwrap_spin.setSpecialValueText("Auto-detect")
@@ -251,6 +280,8 @@ class SettingsDialog(QDialog):
         self.prompt_edit.setPlainText(self.client.system_prompt)
         self.context_spin.setValue(self.parser.context_size if self.parser else 3)
         self.workers_spin.setValue(self.engine.num_workers if self.engine else 2)
+        self.batch_spin.setValue(self.engine.batch_size if self.engine else 5)
+        self.history_spin.setValue(self.engine.max_history if self.engine else 10)
         # Word wrap: 0 = auto-detect, >0 = manual override
         if self.plugin_analyzer and getattr(self.plugin_analyzer, '_manual_chars_per_line', 0):
             self.wordwrap_spin.setValue(self.plugin_analyzer._manual_chars_per_line)
@@ -444,6 +475,8 @@ class SettingsDialog(QDialog):
         new_workers = self.workers_spin.value()
         if self.engine:
             self.engine.num_workers = new_workers
+            self.engine.batch_size = self.batch_spin.value()
+            self.engine.max_history = self.history_spin.value()
 
         # Auto-restart Ollama if workers count changed
         if new_workers != self._orig_workers:

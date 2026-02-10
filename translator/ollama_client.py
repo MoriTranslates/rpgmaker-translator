@@ -1,5 +1,6 @@
 """Ollama REST API wrapper for LLM translation."""
 
+import json
 import logging
 import os
 import re
@@ -406,6 +407,17 @@ class OllamaClient:
                     )
         return ""
 
+    def _filter_glossary(self, text: str, context: str = "") -> dict[str, str]:
+        """Return only glossary entries whose JP term appears in text or context.
+
+        Matches against the raw (untransformed) text so JP bracket forms
+        still match.  Simple substring check — fast for typical glossaries.
+        """
+        if not self.glossary:
+            return {}
+        search_text = text + "\n" + context
+        return {jp: en for jp, en in self.glossary.items() if jp in search_text}
+
     # Human-readable labels for RPG Maker entry field types
     _FIELD_HINTS = {
         "dialog": "dialogue line",
@@ -428,7 +440,8 @@ class OllamaClient:
 
     def translate(self, text: str, context: str = "",
                   correction: str = "", old_translation: str = "",
-                  field: str = "") -> str:
+                  field: str = "",
+                  history: list[tuple[str, str]] | None = None) -> str:
         """Translate Japanese text to English using the configured model.
 
         Args:
@@ -451,9 +464,6 @@ class OllamaClient:
         user_msg = ""
         if self.actor_context:
             user_msg += f"{self.actor_context}\n\n"
-        if self.glossary:
-            glossary_str = "\n".join(f"  {jp} = {en}" for jp, en in self.glossary.items())
-            user_msg += f"Glossary (MUST use these exact translations for these terms):\n{glossary_str}\n\n"
         if context:
             user_msg += f"Context (surrounding dialogue for reference, do NOT translate this):\n{context}\n\n"
             # Add speaker gender hint derived from context [Speaker: name]
@@ -483,20 +493,37 @@ class OllamaClient:
             else:
                 hint = self._FIELD_HINTS.get(field, field)
                 user_msg += f"Content type: {hint}\n"
+        # Glossary placed last (right before text) for maximum attention from smaller models
+        filtered_glossary = self._filter_glossary(text, context)
+        if filtered_glossary:
+            glossary_str = "\n".join(f"  {jp} → {en}" for jp, en in filtered_glossary.items())
+            user_msg += (
+                f"REQUIRED glossary — use these EXACT translations:\n{glossary_str}\n\n"
+            )
         user_msg += f"Translate this:\n{clean_text}"
+
+        # Build messages: system → history pairs → current request
+        messages = [{"role": "system", "content": self.system_prompt}]
+        if history:
+            for hist_jp, hist_en in history:
+                messages.append({"role": "user", "content": f"Translate this:\n{hist_jp}"})
+                messages.append({"role": "assistant", "content": hist_en})
+        messages.append({"role": "user", "content": user_msg})
+
+        # Scale context window for history
+        num_ctx = 4096
+        if history:
+            num_ctx = min(4096 + len(history) * 256, 8192)
 
         payload = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_msg},
-            ],
+            "messages": messages,
             "stream": False,
             "options": {
                 "temperature": 0,
                 "seed": 42,
                 "num_predict": 1024,
-                "num_ctx": 4096,
+                "num_ctx": num_ctx,
             },
         }
 
@@ -574,6 +601,258 @@ class OllamaClient:
         except requests.RequestException:
             return text  # Keep original on error
 
+    # ── Batch JSON translation ─────────────────────────────────
+
+    # Regex for extracting a JSON object from LLM response that may have
+    # markdown fences or preamble text around it.
+    _JSON_EXTRACT_RE = re.compile(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', re.DOTALL)
+
+    @staticmethod
+    def _parse_batch_response(raw: str, expected_keys: list[str]) -> dict[str, str]:
+        """Parse and validate a batch JSON response from the LLM.
+
+        Handles clean JSON, markdown-fenced JSON, and JSON embedded in text.
+        Returns a dict mapping keys to translated strings.
+        Raises ValueError if JSON is unparseable or no expected keys found.
+        """
+        # Try 1: direct parse
+        result = None
+        try:
+            result = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Try 2: strip markdown fences
+        if result is None:
+            stripped = re.sub(r'```(?:json)?\s*', '', raw).strip()
+            stripped = re.sub(r'\s*```\s*$', '', stripped).strip()
+            try:
+                result = json.loads(stripped)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Try 3: regex extract first JSON object
+        if result is None:
+            m = OllamaClient._JSON_EXTRACT_RE.search(raw)
+            if m:
+                try:
+                    result = json.loads(m.group(0))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        if not isinstance(result, dict):
+            raise ValueError(f"Could not parse JSON from LLM response: {raw[:200]}")
+
+        # Validate: at least one expected key must be present
+        found = {k: str(v).strip() for k, v in result.items()
+                 if k in expected_keys and v is not None and str(v).strip()}
+        if not found:
+            raise ValueError(f"No expected keys found in response. Expected {expected_keys}, got {list(result.keys())}")
+
+        return found
+
+    def translate_batch(self, entries: list[tuple[str, str, str, str]]) -> dict[str, str]:
+        """Translate multiple entries in a single API call using JSON format.
+
+        Args:
+            entries: List of (key, original_text, context, field) tuples.
+
+        Returns:
+            Dict mapping key -> translated text (with codes restored).
+        """
+        if not entries:
+            return {}
+
+        # Pre-process each entry: extract codes, convert brackets
+        code_maps = {}  # key -> code_map
+        payload = {}    # key -> cleaned text
+        any_codes = False
+
+        for key, original, _context, _field in entries:
+            clean, code_map = self._extract_codes(original)
+            clean = self._convert_jp_brackets(clean)
+            code_maps[key] = code_map
+            payload[key] = clean
+            if code_map:
+                any_codes = True
+
+        # Build user message (context/glossary/actors ONCE for entire batch)
+        user_msg = ""
+        if self.actor_context:
+            user_msg += f"{self.actor_context}\n\n"
+
+        # Use context from the first entry (entries are sequential)
+        first_context = entries[0][2] if entries[0][2] else ""
+        if first_context:
+            user_msg += f"Context (surrounding dialogue for reference, do NOT translate this):\n{first_context}\n\n"
+            speaker_hint = self._build_speaker_hint(first_context)
+            if speaker_hint:
+                user_msg += speaker_hint + "\n"
+
+        if any_codes:
+            user_msg += (
+                "IMPORTANT: The text contains code markers like «CODE1», «CODE2», etc. "
+                "These are internal engine formatting tags — NOT names or variables. "
+                "You MUST output them exactly as-is.\n\n"
+            )
+            # Build combined code hints from all entries
+            combined_map = {}
+            for cm in code_maps.values():
+                combined_map.update(cm)
+            code_hints = self._build_code_hints(combined_map)
+            if code_hints:
+                user_msg += code_hints + "\n\n"
+
+        # Glossary placed last (before text) for maximum attention from smaller models
+        batch_search_text = "\n".join(original for _key, original, _ctx, _field in entries)
+        filtered_glossary = self._filter_glossary(batch_search_text, first_context)
+        if filtered_glossary:
+            glossary_str = "\n".join(f"  {jp} → {en}" for jp, en in filtered_glossary.items())
+            user_msg += f"REQUIRED glossary — use these EXACT translations:\n{glossary_str}\n\n"
+
+        payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
+        user_msg += (
+            "Translate the following JSON. Each value is a separate line of text to translate.\n"
+            "Respond with ONLY a JSON object using the EXACT same keys, "
+            "where each value is the translated text:\n\n"
+            f"{payload_json}"
+        )
+
+        # Build system prompt with batch instruction
+        batch_sys = (
+            self.system_prompt + "\n\n"
+            "CRITICAL: You must respond with a valid JSON object. "
+            "Use the exact same keys from the input. "
+            "Do not add any text outside the JSON."
+        )
+
+        num_predict = min(1024 * len(entries), 8192)
+
+        try:
+            r = requests.post(
+                f"{self.base_url}/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": batch_sys},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "stream": False,
+                    "format": "json",
+                    "options": {
+                        "temperature": 0,
+                        "seed": 42,
+                        "num_predict": num_predict,
+                        "num_ctx": max(4096, 2048 * len(entries)),
+                    },
+                },
+                timeout=120 + 30 * len(entries),
+            )
+            r.raise_for_status()
+            raw = r.json().get("message", {}).get("content", "").strip()
+            if not raw:
+                raise ConnectionError("Ollama returned empty response for batch")
+        except requests.RequestException as e:
+            raise ConnectionError(f"Ollama API error: {e}") from e
+
+        expected_keys = [key for key, *_ in entries]
+        parsed = self._parse_batch_response(raw, expected_keys)
+
+        # Restore control codes per-entry
+        results = {}
+        for key, translation in parsed.items():
+            if code_maps.get(key):
+                translation = self._restore_codes(translation, code_maps[key])
+            results[key] = translation
+
+        return results
+
+    def polish_batch(self, entries: list[tuple[str, str]]) -> dict[str, str]:
+        """Polish multiple English translations in a single API call.
+
+        Args:
+            entries: List of (key, english_text) tuples.
+
+        Returns:
+            Dict mapping key -> polished text (with codes restored).
+        """
+        if not entries:
+            return {}
+
+        code_maps = {}
+        payload = {}
+        any_codes = False
+
+        for key, text in entries:
+            clean, code_map = self._extract_codes(text)
+            code_maps[key] = code_map
+            payload[key] = clean
+            if code_map:
+                any_codes = True
+
+        user_msg = ""
+        if any_codes:
+            user_msg += (
+                "IMPORTANT: The text contains code markers like «CODE1», «CODE2», etc. "
+                "These are internal engine formatting tags. "
+                "You MUST output them exactly as-is.\n\n"
+            )
+
+        payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
+        user_msg += (
+            "Polish the following JSON. Each value is a separate English translation to improve.\n"
+            "Respond with ONLY a JSON object using the EXACT same keys, "
+            "where each value is the polished text:\n\n"
+            f"{payload_json}"
+        )
+
+        batch_sys = (
+            _POLISH_SYSTEM_PROMPT + "\n\n"
+            "CRITICAL: You must respond with a valid JSON object. "
+            "Use the exact same keys from the input. "
+            "Do not add any text outside the JSON."
+        )
+
+        num_predict = min(1024 * len(entries), 8192)
+
+        try:
+            r = requests.post(
+                f"{self.base_url}/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": batch_sys},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "stream": False,
+                    "format": "json",
+                    "options": {
+                        "temperature": 0,
+                        "seed": 42,
+                        "num_predict": num_predict,
+                        "num_ctx": max(4096, 2048 * len(entries)),
+                    },
+                },
+                timeout=120 + 30 * len(entries),
+            )
+            r.raise_for_status()
+            raw = r.json().get("message", {}).get("content", "").strip()
+            if not raw:
+                raise ConnectionError("Ollama returned empty response for batch")
+        except requests.RequestException as e:
+            raise ConnectionError(f"Ollama API error: {e}") from e
+
+        expected_keys = [key for key, _ in entries]
+        parsed = self._parse_batch_response(raw, expected_keys)
+
+        results = {}
+        for key, translation in parsed.items():
+            if code_maps.get(key):
+                translation = self._restore_codes(translation, code_maps[key])
+            results[key] = translation
+
+        return results
+
     def translate_variants(self, text: str, context: str = "",
                            field: str = "", count: int = 3) -> list:
         """Generate multiple translation variants using different seeds/temperatures.
@@ -602,11 +881,6 @@ class OllamaClient:
                 user_msg = ""
                 if self.actor_context:
                     user_msg += f"{self.actor_context}\n\n"
-                if self.glossary:
-                    glossary_str = "\n".join(
-                        f"  {jp} = {en}" for jp, en in self.glossary.items()
-                    )
-                    user_msg += f"Glossary (MUST use these exact translations):\n{glossary_str}\n\n"
                 if context:
                     user_msg += f"Context (surrounding dialogue, do NOT translate):\n{context}\n\n"
                 if code_map:
@@ -620,6 +894,13 @@ class OllamaClient:
                 if field:
                     hint = self._FIELD_HINTS.get(field, field)
                     user_msg += f"Content type: {hint}\n"
+                # Glossary last for maximum attention from smaller models
+                filtered_glossary = self._filter_glossary(text, context)
+                if filtered_glossary:
+                    glossary_str = "\n".join(
+                        f"  {jp} → {en}" for jp, en in filtered_glossary.items()
+                    )
+                    user_msg += f"REQUIRED glossary — use these EXACT translations:\n{glossary_str}\n\n"
                 user_msg += f"Translate this:\n{clean_text}"
 
                 r = requests.post(

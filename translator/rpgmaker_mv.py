@@ -50,13 +50,16 @@ def _has_japanese(text: str) -> bool:
 _PLUGIN_TAG_RE = re.compile(r'^<[^>]+>$')  # <選択肢ヘルプ> — plugin tag
 _ASSET_ID_RE = re.compile(r'^[^\s]*_[^\s]*$')  # 立ち絵_通常 — asset filename (no spaces, has _)
 _FILE_PATH_RE = re.compile(r'^[a-zA-Z][\w]*[/\\]')  # img/pictures/foo — file path (starts with ASCII dir)
+_JS_CODE_RE = re.compile(r'[;{}()\[\]=]')  # contains JS syntax chars — likely code, not text
+_COLOR_RE = re.compile(r'^#[0-9a-fA-F]{3,8}$')  # CSS color: #FFF, #FF0000, #FF000080
+_EVAL_RE = re.compile(r'\b(function|var |let |const |this\.|return |if\s*\()', re.IGNORECASE)
 
 
 def _is_plugin_display_text(text: str) -> bool:
     """Check if a plugin parameter value is likely display text (not a tag/ID/path).
 
-    Returns False for plugin tags, asset filenames, and file paths that would
-    break the game if translated.
+    Returns False for plugin tags, asset filenames, file paths, code snippets,
+    and other values that would break the game if translated.
     """
     stripped = text.strip()
     if not _has_japanese(stripped):
@@ -69,6 +72,15 @@ def _is_plugin_display_text(text: str) -> bool:
         return False
     # File paths: img/pictures/立ち絵
     if _FILE_PATH_RE.search(stripped):
+        return False
+    # CSS color codes
+    if _COLOR_RE.match(stripped):
+        return False
+    # JavaScript code (semicolons, braces, assignments, etc.)
+    if _JS_CODE_RE.search(stripped):
+        return False
+    # Eval-like patterns (function, var, this., etc.)
+    if _EVAL_RE.search(stripped):
         return False
     return True
 
@@ -852,7 +864,12 @@ class RPGMakerMVParser:
             shutil.copy2(path, backup)
 
     def _parse_plugins(self, project_dir: str) -> list:
-        """Extract translatable strings from plugin parameters in plugins.js."""
+        """Extract translatable strings from plugin parameters in plugins.js.
+
+        Plugin entries default to 'skipped' status because some plugin parameters
+        are internal lookup keys — translating them would break the plugin.
+        Users must manually un-skip entries they want translated.
+        """
         plugins_path = self._find_plugins_file(project_dir)
         if not plugins_path:
             return []
@@ -900,6 +917,7 @@ class RPGMakerMVParser:
                 file="plugins.js",
                 field="plugin_param",
                 original=value,
+                status="skipped",  # default skipped — user must opt-in
             ))
 
     def _scan_parsed_value(self, obj, id_prefix: str, entries: list):
@@ -920,6 +938,7 @@ class RPGMakerMVParser:
                     file="plugins.js",
                     field="plugin_param",
                     original=obj,
+                    status="skipped",  # default skipped — user must opt-in
                 ))
         elif isinstance(obj, list):
             for i, item in enumerate(obj):

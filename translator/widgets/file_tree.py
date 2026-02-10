@@ -1,5 +1,6 @@
 """File tree widget showing project files grouped by type."""
 
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QTreeWidget, QTreeWidgetItem
 from PyQt6.QtCore import pyqtSignal, Qt
 
@@ -63,6 +64,16 @@ class FileTreeWidget(QTreeWidget):
                 categorized.add(filename)
 
             cat_item.setText(1, f"{cat_translated}/{cat_total}")
+            # Add warning styling for Plugins category
+            if category == "Plugins":
+                cat_item.setText(0, "Plugins (experimental)")
+                cat_item.setToolTip(0,
+                    "Plugin parameters are skipped by default.\n"
+                    "Some parameters are internal identifiers \u2014\n"
+                    "translating them will break the plugin.\n\n"
+                    "Right-click entries \u2192 Unskip to enable translation."
+                )
+                cat_item.setForeground(0, QColor("#e5c07b"))  # amber/warning
             cat_item.setExpanded(True)
 
         # Maps category — any Map###.json files

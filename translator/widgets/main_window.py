@@ -504,6 +504,22 @@ class MainWindow(QMainWindow):
             f"~{self.plugin_analyzer.chars_per_line} chars/line{plugin_info}", 8000
         )
 
+        # Warn about plugin entries
+        plugin_count = sum(1 for e in entries if e.file == "plugins.js")
+        if plugin_count > 0:
+            QMessageBox.warning(
+                self, "Plugin Parameters (Experimental)",
+                f"Found {plugin_count} translatable strings in plugins.js.\n\n"
+                "These are SKIPPED by default because some plugin parameters\n"
+                "are internal lookup keys \u2014 translating them will break the plugin.\n\n"
+                "To translate plugin text:\n"
+                "  1. Click 'Plugins' in the file tree\n"
+                "  2. Review each entry carefully\n"
+                "  3. Right-click \u2192 'Unskip' on entries you want translated\n\n"
+                "Safe to translate: menu labels, help text, descriptions\n"
+                "Dangerous to translate: command names, tags, identifiers",
+            )
+
         # Window title
         folder = os.path.basename(path)
         self.setWindowTitle(f"RPG Maker Translator \u2014 {folder}")
@@ -1072,6 +1088,10 @@ class MainWindow(QMainWindow):
             self._general_glossary = cfg["general_glossary"]
         if "target_language" in cfg:
             self.client.target_language = cfg["target_language"]
+        if "batch_size" in cfg:
+            self.engine.batch_size = cfg["batch_size"]
+        if "max_history" in cfg:
+            self.engine.max_history = cfg["max_history"]
 
     def _save_settings(self):
         """Persist current settings to _settings.json."""
@@ -1080,6 +1100,8 @@ class MainWindow(QMainWindow):
             "model": self.client.model,
             "system_prompt": self.client.system_prompt,
             "workers": self.engine.num_workers,
+            "batch_size": self.engine.batch_size,
+            "max_history": self.engine.max_history,
             "context_size": self.parser.context_size,
             "dark_mode": self._dark_mode,
             "wordwrap_override": getattr(self.plugin_analyzer, "_manual_chars_per_line", 0),

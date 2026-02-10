@@ -118,6 +118,15 @@ After opening a project, a dialog will appear showing all actors found in the ga
 
 Progress and ETA are shown in the status bar. Auto-saves every 25 entries so you don't lose progress if something crashes.
 
+### Translation History
+
+During batch translation, the tool sends the last N translated lines to the LLM as "assistant messages" — the model sees itself having recently translated nearby dialogue, which improves:
+- **Tone consistency** — characters maintain their speech style across lines
+- **Pronoun resolution** — ambiguous Japanese subjects get correct pronouns based on recent context
+- **Term consistency** — repeated concepts get the same English phrasing
+
+Configure the window size in Settings > Translation Options > Translation history (default: 10, 0 = disabled).
+
 ### Reviewing and Editing
 
 - Click any row to view the original Japanese and English translation side-by-side in the editor panel at the bottom
@@ -132,7 +141,8 @@ Progress and ETA are shown in the status bar. Auto-saves every 25 entries so you
 The glossary forces the LLM to use specific English translations for Japanese terms. Every glossary entry (JP → EN) is injected into the LLM prompt so it always translates that term consistently across every line of dialogue.
 
 **How it works:**
-- Each translation request includes all glossary terms in the prompt, so the LLM sees "Translate: 聖剣は強い / Glossary: 聖剣=Holy Sword" and uses the exact term
+- **Smart injection**: Only glossary terms that appear in the current text or context are sent to the LLM — a 200-entry glossary won't bloat prompts for lines that only mention 2 terms
+- The LLM sees "Translate: 聖剣は強い / Glossary: 聖剣=Holy Sword" and uses the exact term
 - Without a glossary, the same item name might be translated differently each time ("Sacred Sword" in one line, "Holy Blade" in another)
 
 **Two glossary layers:**
@@ -164,7 +174,14 @@ Go to **Project > Rename Folder** to translate the Japanese folder name to Engli
 
 ### Plugin Parameters
 
-The tool extracts translatable Japanese text from `js/plugins.js` — menu labels, dialog text, UI strings, and custom descriptions stored in plugin configuration. These appear under the "Plugins" category in the file tree. Nested JSON-encoded parameters (arrays, objects) are handled recursively. Non-display text (file paths, color codes, asset IDs) is automatically filtered out.
+The tool extracts translatable Japanese text from `js/plugins.js` — menu labels, dialog text, UI strings, and custom descriptions stored in plugin configuration. These appear under the "Plugins (experimental)" category in the file tree.
+
+**Important:** Plugin entries are **skipped by default** because some parameters are internal lookup keys — translating them will break the plugin. To translate plugin text:
+1. Click "Plugins" in the file tree to view entries
+2. Review each entry — safe to translate: menu labels, help text, descriptions
+3. Right-click entries you want translated and choose "Unskip"
+
+Non-display text (file paths, color codes, JS code, asset IDs) is automatically filtered out.
 
 ### Exporting to the Game
 
@@ -188,6 +205,8 @@ Go to **Translate > Apply Word Wrap** to automatically format translated text to
 | System Prompt | (built-in) | The instruction prompt sent to the LLM |
 | Workers | `2` | Number of parallel translation threads |
 | Context window size | `3` | Number of recent dialogue lines sent as context (higher = better coherence, more VRAM) |
+| Batch size | `1` (disabled) | Entries per JSON batch (1 = single-entry; >1 = useful for cloud APIs, not local Ollama) |
+| Translation history | `10` | Sliding window of recent translations sent as assistant messages for tone/pronoun consistency (0 = disabled) |
 | Word wrap override | `0` (auto) | Manual chars-per-line override (0 = auto-detect from plugins) |
 | Dark mode | On | Catppuccin dark theme (toggle in Settings) |
 | General Glossary | (defaults) | JP-to-EN term mappings shared across all projects |
