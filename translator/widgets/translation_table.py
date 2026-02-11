@@ -216,6 +216,28 @@ class TranslationTable(QWidget):
         self.status_filter.currentTextChanged.connect(self._apply_filter)
         filter_row.addWidget(self.status_filter)
 
+        filter_row.addWidget(QLabel("Field:"))
+        self.field_filter = QComboBox()
+        self.field_filter.addItems([
+            "All Fields",
+            "Dialogue",
+            "Choices",
+            "Scroll Text",
+            "Names",
+            "Descriptions",
+            "Messages / Battle",
+            "System / Terms",
+            "Plugin Commands",
+            "Plugin Params",
+            "Map Names",
+        ])
+        self.field_filter.setToolTip(
+            "Filter entries by field type.\n"
+            "Useful for reviewing all choices, spotting plugin commands, etc."
+        )
+        self.field_filter.currentTextChanged.connect(self._apply_filter)
+        filter_row.addWidget(self.field_filter)
+
         self.jp_check = QCheckBox("JP in translation")
         self.jp_check.setToolTip("Show only entries where the translation still contains Japanese characters")
         self.jp_check.stateChanged.connect(self._apply_filter)
@@ -333,24 +355,50 @@ class TranslationTable(QWidget):
         """Remove control codes from text for search matching."""
         return _CODE_RE.sub("", text)
 
-    def _apply_filter(self):
-        """Filter visible entries by search text, status, and QA checks.
+    # Field filter dropdown → set of matching entry.field values
+    _FIELD_FILTER_MAP = {
+        "All Fields":        None,  # no filtering
+        "Dialogue":          {"dialog"},
+        "Choices":           {"choice"},
+        "Scroll Text":       {"scroll_text"},
+        "Names":             {"name", "nickname", "change_name", "change_nickname"},
+        "Descriptions":      {"description", "profile", "change_profile"},
+        "Messages / Battle": {"message1", "message2", "message3", "message4"},
+        "System / Terms":    {"gameTitle"},     # terms.* handled via startswith
+        "Plugin Commands":   {"plugin_command"},
+        "Plugin Params":     {"plugin_param"},
+        "Map Names":         {"displayName"},
+    }
 
-        When a search query is active, searches ALL project entries
-        (ignoring file tree filter) so you can find text across the
+    def _apply_filter(self):
+        """Filter visible entries by search text, status, field type, and QA checks.
+
+        When a search query or field filter is active, searches ALL project
+        entries (ignoring file tree filter) so you can find text across the
         entire game.  Control codes are stripped before matching.
         """
         query = self.search_edit.text().lower()
         status = self.status_filter.currentText().lower()
+        field_label = self.field_filter.currentText()
+        field_set = self._FIELD_FILTER_MAP.get(field_label)
         jp_only = self.jp_check.isChecked()
 
-        # Search all entries when query or JP filter is active
-        source = self._all_entries if (query or jp_only) else self._entries
+        # Search all entries when query, field filter, or JP filter is active
+        use_all = query or jp_only or field_set is not None
+        source = self._all_entries if use_all else self._entries
 
         self._visible_entries = []
         for e in source:
             if status != "all" and e.status != status:
                 continue
+            if field_set is not None:
+                if field_label == "System / Terms":
+                    # Match gameTitle + any terms.* field
+                    if e.field not in field_set and not e.field.startswith("terms."):
+                        continue
+                else:
+                    if e.field not in field_set:
+                        continue
             if query:
                 orig_clean = self._strip_codes(e.original).lower()
                 trans_clean = self._strip_codes(e.translation).lower()

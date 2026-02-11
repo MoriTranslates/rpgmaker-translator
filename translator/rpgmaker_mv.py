@@ -905,6 +905,8 @@ class RPGMakerMVParser:
                     ))
 
             # Plugin Command MV (356) — single string parameter
+            # Default to skipped: these are internal command identifiers that
+            # plugins match by exact string.  Translating them breaks the plugin.
             if code == CODE_PLUGIN_COMMAND_MV and params:
                 text = params[0] if isinstance(params[0], str) else ""
                 if _is_translatable(text):
@@ -914,9 +916,11 @@ class RPGMakerMVParser:
                         file=filename,
                         field="plugin_command",
                         original=text,
+                        status="skipped",
                     ))
 
             # Plugin Command MZ (357) — params[3+] may contain translatable text
+            # Default to skipped: same reason as MV plugin commands.
             if code == CODE_PLUGIN_COMMAND_MZ and len(params) >= 4:
                 for pi in range(3, len(params)):
                     text = params[pi] if isinstance(params[pi], str) else ""
@@ -927,6 +931,7 @@ class RPGMakerMVParser:
                             file=filename,
                             field="plugin_command",
                             original=text,
+                            status="skipped",
                         ))
 
             i += 1
