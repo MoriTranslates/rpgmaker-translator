@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from collections import Counter
 
 from PyQt6.QtWidgets import (
     QMainWindow, QSplitter, QToolBar, QStatusBar, QProgressBar,
@@ -1294,22 +1295,8 @@ class MainWindow(QMainWindow):
             return
 
         # Translation memory first (same as _start_batch)
-        translated_map = {}
-        for e in self.project.entries:
-            if e.status in ("translated", "reviewed") and e.translation:
-                translated_map[e.original] = e.translation
-
-        tm_count = 0
-        for e in self.project.entries:
-            if e.status == "untranslated" and e.original in translated_map:
-                e.translation = translated_map[e.original]
-                e.status = "translated"
-                self.trans_table.update_entry(e.id, e.translation)
-                self._maybe_add_to_glossary(e)
-                tm_count += 1
-
-        if tm_count:
-            self.file_tree.refresh_stats(self.project)
+        self._current_batch_mode = "all"
+        tm_count = self._run_translation_memory()
 
         untranslated = [e for e in self.project.entries if e.status == "untranslated"]
         if not untranslated:
@@ -1349,6 +1336,12 @@ class MainWindow(QMainWindow):
                 male_entries.append(entry)
             else:
                 other_dialog.append(entry)
+
+        # Sort each group for TM priority (dup seeds first, unique in order, dup copies last)
+        female_entries = self._sort_for_tm_priority(female_entries)
+        male_entries = self._sort_for_tm_priority(male_entries)
+        other_dialog = self._sort_for_tm_priority(other_dialog)
+        non_dialog = self._sort_for_tm_priority(non_dialog)
 
         # Combine: female → male → ungendered → non-dialogue
         ordered = female_entries + male_entries + other_dialog + non_dialog
@@ -1423,6 +1416,38 @@ class MainWindow(QMainWindow):
 
         return tm_count
 
+    @staticmethod
+    def _sort_for_tm_priority(entries: list) -> list:
+        """Sort entries to maximize translation memory hits at checkpoints.
+
+        Returns a new list ordered as:
+        1. Seeds — first copy of each duplicated text, shortest first
+           (translate one, TM fills all copies at the next checkpoint)
+        2. Unique — entries appearing only once, in original order
+           (preserves dialogue locality for the translation history window)
+        3. Dupes — remaining duplicate copies, at the end
+           (workers skip these after TM fills them)
+        """
+        dup_counts = Counter(e.original for e in entries)
+
+        seen = set()
+        seeds = []
+        unique = []
+        dupes = []
+
+        for e in entries:
+            if dup_counts[e.original] > 1:
+                if e.original not in seen:
+                    seeds.append(e)
+                    seen.add(e.original)
+                else:
+                    dupes.append(e)
+            else:
+                unique.append(e)
+
+        seeds.sort(key=lambda e: len(e.original))
+        return seeds + unique + dupes
+
     def _start_batch(self, mode: str = "all"):
         """Shared batch translation logic.
 
@@ -1456,6 +1481,9 @@ class MainWindow(QMainWindow):
             labels = {"all": "All entries", "db": "DB entries", "dialogue": "Dialogue entries"}
             QMessageBox.information(self, "Done", f"{labels[mode]} are already translated!")
             return
+
+        # Sort: duplicated short strings first → unique in order → dup copies last
+        untranslated = self._sort_for_tm_priority(untranslated)
 
         self.batch_action.setEnabled(False)
         self.batch_db_action.setEnabled(False)
