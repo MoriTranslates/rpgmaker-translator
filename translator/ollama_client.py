@@ -120,20 +120,37 @@ _NAME_SYSTEM_PROMPT = (
 )
 
 # Supported target languages with quality ratings for Qwen3
+# Qwen3 supports 119 languages (up from 29 in Qwen2.5), trained on 36T tokens.
+# Ratings reflect JP→target translation quality specifically.
+# 5★/4★ = works well even on 8b models
+# 3★    = better with 14b+
+# 2★    = 14b+ strongly recommended, may struggle on 8b
 # (name, stars, tooltip description)
 TARGET_LANGUAGES = [
-    ("English",               "\u2605\u2605\u2605\u2605\u2605", "Best — primary JP translation target, huge parallel corpus"),
-    ("Chinese (Simplified)",  "\u2605\u2605\u2605\u2605\u2605", "Excellent — Qwen's native language"),
-    ("Chinese (Traditional)", "\u2605\u2605\u2605\u2605\u2606", "Very good — close to Simplified Chinese"),
-    ("Korean",                "\u2605\u2605\u2605\u2605\u2606", "Very good — strong CJK language family support"),
-    ("Spanish",               "\u2605\u2605\u2605\u2606\u2606", "Good general quality, less game/eroge-specific data"),
-    ("Portuguese",            "\u2605\u2605\u2605\u2606\u2606", "Good general quality, less game/eroge-specific data"),
-    ("French",                "\u2605\u2605\u2605\u2606\u2606", "Good general quality, less game/eroge-specific data"),
-    ("German",                "\u2605\u2605\u2605\u2606\u2606", "Good general quality, less game/eroge-specific data"),
-    ("Russian",               "\u2605\u2605\u2606\u2606\u2606", "Fair — limited JP\u2192RU parallel training data"),
-    ("Indonesian",            "\u2605\u2605\u2606\u2606\u2606", "Fair — limited parallel training data"),
-    ("Vietnamese",            "\u2605\u2605\u2606\u2606\u2606", "Fair — limited parallel training data"),
-    ("Thai",                  "\u2605\u2605\u2606\u2606\u2606", "Fair — limited parallel training data"),
+    ("English",               "\u2605\u2605\u2605\u2605\u2605", "Best — massive JP parallel corpus. Works well on 8b+"),
+    ("Chinese (Simplified)",  "\u2605\u2605\u2605\u2605\u2605", "Excellent — Qwen's native language, huge JP\u2194CN corpus. Works well on 8b+"),
+    ("Chinese (Traditional)", "\u2605\u2605\u2605\u2605\u2606", "Excellent — close to Simplified, strong CJK support. Works well on 8b+"),
+    ("Korean",                "\u2605\u2605\u2605\u2605\u2606", "Excellent — strong CJK family, large JP\u2194KR corpus. Works well on 8b+"),
+    ("Spanish",               "\u2605\u2605\u2605\u2605\u2606", "Very good — major language, strong Qwen3 training. Works well on 8b+"),
+    ("Portuguese",            "\u2605\u2605\u2605\u2605\u2606", "Very good — large speaker base, solid Qwen3 support. Works well on 8b+"),
+    ("French",                "\u2605\u2605\u2605\u2605\u2606", "Very good — major language, strong Qwen3 training. Works well on 8b+"),
+    ("German",                "\u2605\u2605\u2605\u2605\u2606", "Very good — major language, strong Qwen3 training. Works well on 8b+"),
+    ("Russian",               "\u2605\u2605\u2605\u2606\u2606", "Good — improved in Qwen3, decent JP\u2192RU community. Better with 14b+"),
+    ("Italian",               "\u2605\u2605\u2605\u2606\u2606", "Good — well-supported European language in Qwen3. Better with 14b+"),
+    ("Polish",                "\u2605\u2605\u2605\u2606\u2606", "Good — improved EU language support in Qwen3. Better with 14b+"),
+    ("Dutch",                 "\u2605\u2605\u2605\u2606\u2606", "Good — improved EU language support in Qwen3. Better with 14b+"),
+    ("Turkish",               "\u2605\u2605\u2605\u2606\u2606", "Good — well-represented in Qwen3 training. Better with 14b+"),
+    ("Indonesian",            "\u2605\u2605\u2605\u2606\u2606", "Good — strong Austronesian support (Alibaba SEA focus). Better with 14b+"),
+    ("Vietnamese",            "\u2605\u2605\u2605\u2606\u2606", "Good — improved in Qwen3, growing JP game community. Better with 14b+"),
+    ("Thai",                  "\u2605\u2605\u2605\u2606\u2606", "Good — improved in Qwen3, active JP fan-translation scene. Better with 14b+"),
+    ("Malay",                 "\u2605\u2605\u2605\u2606\u2606", "Good — strong Austronesian support in Qwen3. Better with 14b+"),
+    ("Arabic",                "\u2605\u2605\u2606\u2606\u2606", "Fair — less JP\u2192AR parallel data, RTL script. 14b+ strongly recommended"),
+    ("Hindi",                 "\u2605\u2605\u2606\u2606\u2606", "Fair — limited JP\u2192HI parallel data. 14b+ strongly recommended"),
+    ("Ukrainian",             "\u2605\u2605\u2606\u2606\u2606", "Fair — Cyrillic training, limited JP parallel data. 14b+ strongly recommended"),
+    ("Czech",                 "\u2605\u2605\u2606\u2606\u2606", "Fair — supported EU language, limited JP data. 14b+ strongly recommended"),
+    ("Romanian",              "\u2605\u2605\u2606\u2606\u2606", "Fair — supported EU language, limited JP data. 14b+ strongly recommended"),
+    ("Hungarian",             "\u2605\u2605\u2606\u2606\u2606", "Fair — supported EU language, limited JP data. 14b+ strongly recommended"),
+    ("Tagalog",               "\u2605\u2605\u2606\u2606\u2606", "Fair — Austronesian support, limited JP data. 14b+ strongly recommended"),
 ]
 
 

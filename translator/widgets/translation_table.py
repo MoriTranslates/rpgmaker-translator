@@ -9,7 +9,7 @@ import re
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableView,
     QLineEdit, QComboBox, QLabel, QMenu, QAbstractItemView, QHeaderView,
-    QInputDialog, QTextEdit, QSplitter, QGroupBox,
+    QInputDialog, QTextEdit, QSplitter, QGroupBox, QCheckBox,
 )
 from PyQt6.QtCore import (
     pyqtSignal, Qt, QTimer, QAbstractTableModel, QModelIndex,
@@ -23,6 +23,15 @@ _CODE_RE = re.compile(
     r'\\[A-Za-z]+\[\d*\]'
     r'|\\[{}$.|!><^]'
     r'|<[^>]+>'
+)
+
+# Japanese characters — hiragana, katakana, CJK kanji (for QA filter)
+_JAPANESE_RE = re.compile(
+    r'[\u3040-\u309F'   # Hiragana
+    r'\u30A0-\u30FF'    # Katakana
+    r'\u4E00-\u9FFF'    # CJK Unified Ideographs
+    r'\u3400-\u4DBF'    # CJK Extension A
+    r'\uFF65-\uFF9F]'   # Halfwidth Katakana
 )
 
 
@@ -207,6 +216,11 @@ class TranslationTable(QWidget):
         self.status_filter.currentTextChanged.connect(self._apply_filter)
         filter_row.addWidget(self.status_filter)
 
+        self.jp_check = QCheckBox("JP in translation")
+        self.jp_check.setToolTip("Show only entries where the translation still contains Japanese characters")
+        self.jp_check.stateChanged.connect(self._apply_filter)
+        filter_row.addWidget(self.jp_check)
+
         layout.addLayout(filter_row)
 
         # ── Vertical splitter: table on top, editor on bottom ─────
@@ -320,7 +334,7 @@ class TranslationTable(QWidget):
         return _CODE_RE.sub("", text)
 
     def _apply_filter(self):
-        """Filter visible entries by search text and status.
+        """Filter visible entries by search text, status, and QA checks.
 
         When a search query is active, searches ALL project entries
         (ignoring file tree filter) so you can find text across the
@@ -328,9 +342,10 @@ class TranslationTable(QWidget):
         """
         query = self.search_edit.text().lower()
         status = self.status_filter.currentText().lower()
+        jp_only = self.jp_check.isChecked()
 
-        # Search all entries when query is active, file-filtered otherwise
-        source = self._all_entries if query else self._entries
+        # Search all entries when query or JP filter is active
+        source = self._all_entries if (query or jp_only) else self._entries
 
         self._visible_entries = []
         for e in source:
@@ -340,6 +355,10 @@ class TranslationTable(QWidget):
                 orig_clean = self._strip_codes(e.original).lower()
                 trans_clean = self._strip_codes(e.translation).lower()
                 if query not in orig_clean and query not in trans_clean:
+                    continue
+            if jp_only:
+                # Only show entries where the translation contains Japanese
+                if not e.translation or not _JAPANESE_RE.search(e.translation):
                     continue
             self._visible_entries.append(e)
 

@@ -1117,8 +1117,27 @@ class MainWindow(QMainWindow):
         # Run translation memory to fill duplicates from newly translated entries
         tm_count = self._run_translation_memory()
         if tm_count:
-            self.statusbar.showMessage(
-                f"Translation memory: filled {tm_count} duplicate(s)", 3000
+            # Track TM fills separately — workers skip these silently
+            self._tm_checkpoint_count += tm_count
+            # Immediately update progress bar (workers won't emit for these)
+            effective = self._batch_done_count + self._tm_checkpoint_count
+            total = self.progress_bar.maximum()
+            self.progress_bar.setValue(effective)
+            # Recalculate ETA with TM fills counted
+            elapsed = time.time() - self._batch_start_time
+            remaining_count = max(0, total - effective)
+            if effective > 0 and elapsed > 0:
+                rate = elapsed / effective
+                remaining = remaining_count * rate
+                if remaining > 60:
+                    eta = f" | ETA: {remaining/60:.0f}m"
+                else:
+                    eta = f" | ETA: {remaining:.0f}s"
+            else:
+                eta = ""
+            self.progress_label.setText(
+                f"Translating {effective}/{total}{eta}: "
+                f"TM filled {tm_count} duplicate(s)"
             )
 
     def _on_status_changed(self):
@@ -1237,15 +1256,20 @@ class MainWindow(QMainWindow):
 
     def _on_progress(self, current: int, total: int, text: str):
         """Update progress bar with ETA during batch translation."""
-        self.progress_bar.setValue(current)
         self._batch_done_count = current
+        # Effective progress = engine progress + TM checkpoint fills
+        tm_offset = getattr(self, "_tm_checkpoint_count", 0)
+        effective = current + tm_offset
 
-        # Calculate ETA
+        self.progress_bar.setValue(effective)
+
+        # Calculate ETA based on effective progress
         eta_str = ""
         elapsed = time.time() - self._batch_start_time
-        if current > 0 and elapsed > 0:
-            rate = elapsed / current  # seconds per entry
-            remaining = (total - current) * rate
+        remaining_count = max(0, total - effective)
+        if effective > 0 and elapsed > 0:
+            rate = elapsed / effective  # seconds per entry (including TM)
+            remaining = remaining_count * rate
             if remaining > 3600:
                 eta_str = f" | ETA: {remaining/3600:.1f}h"
             elif remaining > 60:
@@ -1253,7 +1277,7 @@ class MainWindow(QMainWindow):
             else:
                 eta_str = f" | ETA: {remaining:.0f}s"
 
-        self.progress_label.setText(f"Translating {current}/{total}{eta_str}: {text}")
+        self.progress_label.setText(f"Translating {effective}/{total}{eta_str}: {text}")
 
     # ── Translation memory ─────────────────────────────────────────
 
@@ -1417,6 +1441,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self._batch_start_time = time.time()
         self._batch_done_count = 0
+        self._tm_checkpoint_count = 0
 
         self.engine.translate_batch(ordered)
 
@@ -1529,6 +1554,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self._batch_start_time = time.time()
         self._batch_done_count = 0
+        self._tm_checkpoint_count = 0  # TM fills during batch (not counted by engine)
 
         self.engine.translate_batch(untranslated)
 

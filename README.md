@@ -1,8 +1,29 @@
 # RPG Maker Translator — Local LLM
 
-A desktop tool for translating RPG Maker MV/MZ games from Japanese to English using a local LLM (no cloud API needed). Runs entirely on your machine with Ollama.
+A desktop tool for translating RPG Maker MV/MZ games using a local LLM — no cloud API, no API keys, no per-token costs. Runs entirely on your machine with Ollama. Architected and built in 3 days — designed by a human, coded with [Claude Code](https://claude.ai/code).
+
+**24 target languages** | **Pronoun-aware gender system** | **Two-layer glossary** | **Batch translation with ETA** | **Auto-save & resume** | **Dark mode**
 
 ![Screenshot](screenshot.png)
+
+## Key Features
+
+- **24 target languages** — English, Chinese, Korean, Spanish, French, German, Russian, and 17 more with quality ratings and model size guidance
+- **100% local & free** — No cloud API, no API keys, no usage limits. Your data never leaves your machine
+- **Pronoun-aware translation** — Actor gender assignment, speaker detection, and per-character pronoun hints so the LLM gets he/she/they right
+- **Two-layer glossary** — General glossary (shared across projects) + project glossary (auto-populated from translated DB names) for consistent terminology
+- **Two-stage workflow** — Translate database names first (Batch DB), then dialogue (Batch Dialogue) with auto-glossary so item/skill/character names stay consistent
+- **Batch by Actor** — Groups dialogue by speaker gender for the most accurate pronoun handling
+- **Translation memory** — Auto-fills duplicate strings before batch translation, saving LLM calls
+- **Translation history** — Sends recent translations as context so the LLM maintains consistent tone and pronouns
+- **Auto-retry** — Detects leftover Japanese in translations and automatically retries with a stronger prompt
+- **Grammar polish** — English-to-English LLM pass to fix grammar without retranslating from Japanese
+- **Translation variants** — Generate 3 different translations and pick the best one
+- **Plugin parameter extraction** — Translates menu labels, UI strings, and descriptions from `plugins.js`
+- **Auto-save & checkpointing** — Auto-saves every 2 minutes + checkpoint every 25 entries during batch translation
+- **QA tools** — "JP in translation" filter to find incomplete translations, cross-file search, missing control code detection
+- **Export & restore** — Write translations back to game files with backup-based idempotent re-export
+- **Dark mode** — Catppuccin dark theme
 
 ## Requirements
 
@@ -213,7 +234,7 @@ Go to **Translate > Apply Word Wrap** to automatically format translated text to
 |---------|---------|-------------|
 | Ollama URL | `http://localhost:11434` | Address of the Ollama server |
 | Model | `qwen3:14b` | Which LLM model to use |
-| Target Language | English | Translation target (supports 12 languages with quality ratings) |
+| Target Language | English | Translation target (24 languages with quality ratings and model size guidance) |
 | System Prompt | (built-in) | The instruction prompt sent to the LLM |
 | Workers | `2` | Number of parallel translation threads |
 | Context window size | `3` | Number of recent dialogue lines sent as context (higher = better coherence, more VRAM) |
@@ -233,6 +254,19 @@ Go to **Translate > Apply Word Wrap** to automatically format translated text to
 | RPG Maker VX Ace (.rvdata2) | Planned |
 | RPG Maker VX (.rvdata) | Planned |
 | RPG Maker XP (.rxdata) | Planned |
+
+## Supported Languages
+
+Translate from Japanese into **24 target languages**. Quality ratings reflect JP→target translation accuracy with Qwen3. Larger models help more for lower-rated languages.
+
+| Rating | Languages | Model Guidance |
+|--------|-----------|---------------|
+| **5 stars** | English, Chinese (Simplified) | Works well even on 8b models |
+| **4 stars** | Chinese (Traditional), Korean, Spanish, Portuguese, French, German | Works well even on 8b models |
+| **3 stars** | Russian, Italian, Polish, Dutch, Turkish, Indonesian, Vietnamese, Thai, Malay | Better with 14b+ |
+| **2 stars** | Arabic, Hindi, Ukrainian, Czech, Romanian, Hungarian, Tagalog | 14b+ strongly recommended |
+
+Select your target language in **Settings**. Each language shows its star rating and model recommendation in the tooltip.
 
 ## Troubleshooting
 

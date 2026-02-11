@@ -40,18 +40,15 @@ class TranslationWorker(QObject):
                 break
 
             if self.mode == "translate":
-                # Skip already translated/reviewed or empty
+                # Skip already translated/reviewed (e.g. filled by TM at checkpoint)
                 if entry.status in ("translated", "reviewed", "skipped"):
-                    self.item_processed.emit("(skipped)")
                     continue
                 if not entry.original.strip():
                     entry.status = "skipped"
-                    self.item_processed.emit("(empty)")
                     continue
             else:
                 # Polish mode: skip entries without translations
                 if not entry.translation or not entry.translation.strip():
-                    self.item_processed.emit("(skipped)")
                     continue
 
             preview = (entry.translation if self.mode == "polish" else entry.original)
@@ -114,15 +111,12 @@ class BatchTranslationWorker(QObject):
                 break
             if self.mode == "translate":
                 if entry.status in ("translated", "reviewed", "skipped"):
-                    self.item_processed.emit("(skipped)")
-                    continue
+                    continue  # TM-filled at checkpoint — already counted
                 if not entry.original.strip():
                     entry.status = "skipped"
-                    self.item_processed.emit("(empty)")
                     continue
             else:
                 if not entry.translation or not entry.translation.strip():
-                    self.item_processed.emit("(skipped)")
                     continue
             to_process.append(entry)
 
