@@ -569,6 +569,9 @@ class MainWindow(QMainWindow):
     def _pre_translate_info(self, entries, actors_raw):
         """Translate game title + actor names/profiles before the gender dialog.
 
+        Translations are saved directly to the TranslationEntry objects so
+        they persist across save/load cycles.
+
         Returns:
             (actor_translations, translated_title) where actor_translations is
             {actor_id: {"name": ..., "nickname": ..., "profile": ...}}
@@ -597,6 +600,9 @@ class MainWindow(QMainWindow):
         if not self.client.is_available():
             return {}, ""
 
+        # Build entry lookup for saving translations back
+        entry_by_id = {e.id: e for e in entries}
+
         progress = QProgressDialog(
             "Translating character info...", "Skip", 0, len(items), self
         )
@@ -614,11 +620,15 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             if progress.wasCanceled():
                 return actor_translations, translated_title
-            result = self.client.translate_name(title_entry.original, hint="game title")
-            if result and result != title_entry.original:
-                translated_title = result
-                title_entry.translation = result
-                title_entry.status = "translated"
+            if title_entry.status in ("translated", "reviewed"):
+                # Already translated (from a saved state) — reuse it
+                translated_title = title_entry.translation
+            else:
+                result = self.client.translate_name(title_entry.original, hint="game title")
+                if result and result != title_entry.original:
+                    translated_title = result
+                    title_entry.translation = result
+                    title_entry.status = "translated"
             idx += 1
             progress.setValue(idx)
 
@@ -636,6 +646,16 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
                 if progress.wasCanceled():
                     return actor_translations, translated_title
+
+                # Check if this entry was already translated (saved state)
+                entry_id = f"Actors/{aid}/{field}"
+                entry = entry_by_id.get(entry_id)
+                if entry and entry.status in ("translated", "reviewed") and entry.translation:
+                    actor_translations[aid][field] = entry.translation
+                    idx += 1
+                    progress.setValue(idx)
+                    continue
+
                 field_hints = {
                     "name": "character's personal name",
                     "nickname": "character's nickname or title",
@@ -644,6 +664,10 @@ class MainWindow(QMainWindow):
                 result = self.client.translate_name(text, hint=field_hints[field])
                 if result and result != text:
                     actor_translations[aid][field] = result
+                    # Save translation to the entry so it persists
+                    if entry and entry.status == "untranslated":
+                        entry.translation = result
+                        entry.status = "translated"
                 idx += 1
                 progress.setValue(idx)
 
@@ -953,10 +977,16 @@ class MainWindow(QMainWindow):
 
         try:
             self.parser.save_project(self.project.project_path, self.project.entries)
+            # Inject word wrap plugin if user requested it
+            plugin_msg = ""
+            if self.plugin_analyzer.should_inject_plugin():
+                self.parser.inject_wordwrap_plugin(self.project.project_path)
+                plugin_msg = "\nWord wrap plugin (TranslatorWordWrap.js) injected."
             QMessageBox.information(
                 self, "Export Complete",
                 f"Exported {len(translated)} translations to game files.\n"
                 f"Original Japanese files backed up in data_original/."
+                + plugin_msg
             )
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", str(e))
@@ -1014,6 +1044,10 @@ class MainWindow(QMainWindow):
                 if os.path.isfile(backup_path):
                     shutil.copy2(backup_path, plugins_path)
                     plugins_restored = True
+
+            # Clean up injected word wrap plugin
+            self.parser.remove_wordwrap_plugin(self.project.project_path)
+            self.plugin_analyzer.inject_wordwrap = False
 
             msg = "Original Japanese files have been restored.\n"
             if plugins_restored:
@@ -1553,22 +1587,42 @@ class MainWindow(QMainWindow):
             return
 
         summary = self.plugin_analyzer.get_summary()
-        reply = QMessageBox.question(
-            self, "Apply Word Wrap",
-            f"Detected settings:\n\n{summary}\n\n"
-            f"Apply word wrapping to all translated entries?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
+
+        # If no word wrap plugin, offer to inject one
+        if not self.plugin_analyzer.has_wordwrap_plugin:
+            reply = QMessageBox.question(
+                self, "Apply Word Wrap",
+                f"Detected settings:\n\n{summary}\n\n"
+                "No word wrap plugin detected.\n"
+                "Inject a word wrap plugin so the game handles wrapping at runtime?\n\n"
+                "Yes = inject plugin + use <WordWrap> tags (recommended)\n"
+                "No = manual line breaks (approximate, may break mid-word)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.plugin_analyzer.inject_wordwrap = True
+                self.plugin_analyzer.wordwrap_tag = "<WordWrap>"
+            # Either way, proceed to apply wrapping
+        else:
+            reply = QMessageBox.question(
+                self, "Apply Word Wrap",
+                f"Detected settings:\n\n{summary}\n\n"
+                f"Apply word wrapping to all translated entries?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         count = self.text_processor.process_all(self.project.entries)
-        # Refresh table
         self.trans_table.refresh()
-        QMessageBox.information(
-            self, "Word Wrap Applied",
-            f"Modified {count} entries to fit ~{self.plugin_analyzer.chars_per_line} chars/line."
-        )
+
+        msg = f"Modified {count} entries."
+        if self.plugin_analyzer.inject_wordwrap:
+            msg += ("\n\n<WordWrap> tags added. The word wrap plugin will be "
+                    "injected when you Export to Game.")
+        else:
+            msg += f"\nWrapped to ~{self.plugin_analyzer.chars_per_line} chars/line."
+        QMessageBox.information(self, "Word Wrap Applied", msg)
 
     # ── Fix Missing Codes ─────────────────────────────────────────
 
@@ -1930,7 +1984,8 @@ class MainWindow(QMainWindow):
         try:
             self.parser.export_patch_zip(
                 self.project.project_path, self.project.entries,
-                path, game_title=game_title)
+                path, game_title=game_title,
+                inject_wordwrap=self.plugin_analyzer.should_inject_plugin())
             n_files = len(set(e.file for e in translated))
             QMessageBox.information(
                 self, "Patch Zip Created",

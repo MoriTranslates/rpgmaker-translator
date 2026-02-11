@@ -14,10 +14,88 @@ import re
 DEFAULT_CHARS_PER_LINE = 55
 DEFAULT_MAX_LINES = 4
 
+# Minimal word wrap plugin for RPG Maker MV/MZ.
+# Injected into games that lack a word wrap plugin (YEP/VisuMZ).
+# Recognises <WordWrap> tag and wraps text at word boundaries using
+# the game's actual font metrics.
+WORDWRAP_PLUGIN_JS = r"""/*:
+ * @plugindesc Word wrap for translated text. Add <WordWrap> at the start of a message to enable.
+ * @author RPG Maker Translator
+ *
+ * @help
+ * This plugin enables automatic word wrapping for translated text.
+ * Place <WordWrap> at the beginning of a message to activate it.
+ * Text will wrap at word boundaries to fit the message window.
+ *
+ * Auto-injected by RPG Maker Translator during export.
+ */
+(function() {
+    'use strict';
+
+    // --- Detect <WordWrap> tag and pre-wrap text ---
+    var _Window_Base_convertEscapeCharacters =
+        Window_Base.prototype.convertEscapeCharacters;
+    Window_Base.prototype.convertEscapeCharacters = function(text) {
+        text = _Window_Base_convertEscapeCharacters.call(this, text);
+        this._twrWordWrap = false;
+        if (/<wordwrap>/i.test(text)) {
+            this._twrWordWrap = true;
+            text = text.replace(/<wordwrap>/gi, '');
+            text = this._twrApplyWordWrap(text);
+        }
+        return text;
+    };
+
+    // --- Pre-process: insert \n at word boundaries ---
+    Window_Base.prototype._twrApplyWordWrap = function(text) {
+        var maxWidth = this.contentsWidth ? this.contentsWidth() :
+                       (this.contents ? this.contents.width : 408);
+        var lines = text.split('\n');
+        var result = [];
+        for (var i = 0; i < lines.length; i++) {
+            result.push(this._twrWrapLine(lines[i], maxWidth));
+        }
+        return result.join('\n');
+    };
+
+    Window_Base.prototype._twrWrapLine = function(line, maxWidth) {
+        if (!line) return line;
+        var words = line.split(' ');
+        var currentLine = '';
+        var currentWidth = 0;
+        var resultLines = [];
+        for (var j = 0; j < words.length; j++) {
+            var word = words[j];
+            var cleanWord = this._twrStripCodes(word);
+            var wordWidth = this.textWidth(cleanWord);
+            var spaceWidth = currentLine ? this.textWidth(' ') : 0;
+            if (currentWidth + spaceWidth + wordWidth > maxWidth && currentLine) {
+                resultLines.push(currentLine);
+                currentLine = word;
+                currentWidth = wordWidth;
+            } else {
+                currentLine += (currentLine ? ' ' : '') + word;
+                currentWidth += spaceWidth + wordWidth;
+            }
+        }
+        if (currentLine) resultLines.push(currentLine);
+        return resultLines.join('\n');
+    };
+
+    // --- Strip escape codes for width measurement ---
+    Window_Base.prototype._twrStripCodes = function(text) {
+        return text.replace(/\x1b[A-Za-z](?:\[\d*\])?/g, '')
+                   .replace(/\x1b[{}$.|!><^]/g, '')
+                   .replace(/<[^>]+>/g, '');
+    };
+})();
+"""
+
 # Known message plugins and their settings
 MESSAGE_PLUGINS = {
     "YEP_MessageCore": {
         "width_param": "Default Width",
+        "rows_param": "Message Rows",
         "wordwrap_param": "Word Wrapping",
         "default_width": 816,
     },
@@ -27,6 +105,7 @@ MESSAGE_PLUGINS = {
     "CGMZ_MessageSystem": {"width_param": "Window Width"},
     "VisuMZ_MessageCore": {
         "width_param": "General:MessageWindow:MessageWidth",
+        "rows_param": "General:MessageWindow:MessageRows",
         "wordwrap_param": "Word Wrap:EnableWordWrap",
         "default_width": 816,
     },
@@ -52,6 +131,7 @@ class PluginAnalyzer:
         self.has_wordwrap_plugin = False
         self.wordwrap_tag = ""  # e.g. "<WordWrap>" if plugin supports it
         self.detected_plugins = []
+        self.inject_wordwrap = False  # True → inject our plugin during export
 
     def analyze_project(self, project_dir: str):
         """Analyze a project's plugins to detect message settings."""
@@ -118,6 +198,16 @@ class PluginAnalyzer:
             except (ValueError, TypeError):
                 pass
 
+        # Check for message rows parameter
+        rows_param = config.get("rows_param", "")
+        if rows_param and rows_param in params:
+            try:
+                rows = int(params[rows_param])
+                if rows > 0:
+                    self.max_lines = rows
+            except (ValueError, TypeError):
+                pass
+
         # Check for word wrap support
         wordwrap_param = config.get("wordwrap_param", "")
         if wordwrap_param:
@@ -175,6 +265,10 @@ class PluginAnalyzer:
             lines.append("No word wrap plugin — manual line breaks needed")
         return "\n".join(lines)
 
+    def should_inject_plugin(self) -> bool:
+        """True if no existing word wrap plugin and injection was requested."""
+        return self.inject_wordwrap and not self.has_wordwrap_plugin
+
 
 class TextProcessor:
     """Applies word wrapping and text cleanup to translated entries."""
@@ -199,9 +293,11 @@ class TextProcessor:
         orig_lines = original.split("\n")
         orig_line_count = len(orig_lines)
 
-        # If the game has a word wrap plugin, we can let it handle wrapping
-        # Just need to add the tag and keep text as a single block per message box
-        if self.analyzer.has_wordwrap_plugin and self.analyzer.wordwrap_tag:
+        # If the game has a word wrap plugin (or we'll inject one),
+        # let it handle wrapping — just add the tag
+        use_plugin = ((self.analyzer.has_wordwrap_plugin or self.analyzer.inject_wordwrap)
+                      and self.analyzer.wordwrap_tag)
+        if use_plugin:
             return self._apply_plugin_wordwrap(translation, orig_line_count)
 
         # No word wrap plugin — we need to manually break lines

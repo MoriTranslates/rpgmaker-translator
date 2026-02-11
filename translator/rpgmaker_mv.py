@@ -295,7 +295,8 @@ class RPGMakerMVParser:
         self._save_plugins(project_dir, entries)
 
     def export_patch_zip(self, project_dir: str, entries: list,
-                         zip_path: str, game_title: str = ""):
+                         zip_path: str, game_title: str = "",
+                         inject_wordwrap: bool = False):
         """Export translated game files as a ready-to-install zip.
 
         Zip layout::
@@ -360,7 +361,8 @@ class RPGMakerMVParser:
                 and e.status in ("translated", "reviewed")
             ]
             has_plugins = False
-            if plugin_entries and plugins_path:
+            need_plugins_js = plugin_entries or inject_wordwrap
+            if need_plugins_js and plugins_path:
                 plugins_backup = os.path.join(
                     os.path.dirname(plugins_path),
                     os.path.basename(plugins_path).replace(
@@ -395,6 +397,18 @@ class RPGMakerMVParser:
                                     parsed, ensure_ascii=False)
                             except (json.JSONDecodeError, ValueError):
                                 continue
+
+                    # Inject word wrap plugin entry if requested
+                    if inject_wordwrap:
+                        if not any(p.get("name") == self.INJECTED_PLUGIN_NAME
+                                   for p in plugins):
+                            plugins.append({
+                                "name": self.INJECTED_PLUGIN_NAME,
+                                "status": True,
+                                "description": "Word wrap for translated text (auto-injected)",
+                                "parameters": {},
+                            })
+
                     js_content = "var $plugins =\n" + json.dumps(
                         plugins, ensure_ascii=False, indent=2) + ";\n"
                     zf.writestr(f"_translation/{js_rel}/plugins.js", js_content)
@@ -402,17 +416,25 @@ class RPGMakerMVParser:
                 except (json.JSONDecodeError, OSError):
                     pass
 
+            # Include word wrap JS plugin file in zip
+            if inject_wordwrap and js_rel:
+                from .text_processor import WORDWRAP_PLUGIN_JS
+                arc = f"_translation/{js_rel}/plugins/{self.INJECTED_PLUGIN_NAME}.js"
+                zf.writestr(arc, WORDWRAP_PLUGIN_JS.strip() + "\n")
+
             # Count files
             data_files = [f for f in by_file if f != "plugins.js"]
             total_entries = sum(len(v) for v in by_file.values())
 
             # install.bat
             zf.writestr("install.bat", self._build_install_bat(
-                data_rel, js_rel, data_files, has_plugins, game_title))
+                data_rel, js_rel, data_files, has_plugins, game_title,
+                inject_wordwrap=inject_wordwrap))
 
             # uninstall.bat
             zf.writestr("uninstall.bat", self._build_uninstall_bat(
-                data_rel, js_rel, has_plugins, game_title))
+                data_rel, js_rel, has_plugins, game_title,
+                inject_wordwrap=inject_wordwrap))
 
             # README.txt
             readme = (
@@ -434,7 +456,8 @@ class RPGMakerMVParser:
     @staticmethod
     def _build_install_bat(data_rel: str, js_rel: str,
                            data_files: list, has_plugins: bool,
-                           game_title: str) -> str:
+                           game_title: str,
+                           inject_wordwrap: bool = False) -> str:
         """Generate install.bat: back up originals, copy translations from _translation/."""
         dr = data_rel.replace("/", "\\")           # e.g. "data" or "www\\data"
         tr = f"_translation\\{dr}"                  # e.g. "_translation\\data"
@@ -504,6 +527,17 @@ class RPGMakerMVParser:
                 ")",
             ]
 
+        if inject_wordwrap and js_rel:
+            jr = js_rel.replace("/", "\\")
+            tjr = f"_translation\\{jr}"
+            lines += [
+                f'if exist "{tjr}\\plugins\\TranslatorWordWrap.js" (',
+                f'    if not exist "{jr}\\plugins\\" mkdir "{jr}\\plugins"',
+                f'    copy /Y "{tjr}\\plugins\\TranslatorWordWrap.js" "{jr}\\plugins\\TranslatorWordWrap.js" >nul',
+                f"    echo   Installed word wrap plugin",
+                ")",
+            ]
+
         lines += [
             "",
             "echo.",
@@ -516,7 +550,8 @@ class RPGMakerMVParser:
 
     @staticmethod
     def _build_uninstall_bat(data_rel: str, js_rel: str,
-                             has_plugins: bool, game_title: str) -> str:
+                             has_plugins: bool, game_title: str,
+                             inject_wordwrap: bool = False) -> str:
         """Generate uninstall.bat: restore originals from backup."""
         dr = data_rel.replace("/", "\\")
         lines = [
@@ -548,6 +583,15 @@ class RPGMakerMVParser:
                 f'if exist "{jr}\\plugins_original.js" (',
                 f'    copy /Y "{jr}\\plugins_original.js" "{jr}\\plugins.js" >nul',
                 "    echo   plugins.js restored.",
+                ")",
+            ]
+
+        if inject_wordwrap and js_rel:
+            jr = js_rel.replace("/", "\\")
+            lines += [
+                f'if exist "{jr}\\plugins\\TranslatorWordWrap.js" (',
+                f'    del "{jr}\\plugins\\TranslatorWordWrap.js"',
+                "    echo   Removed word wrap plugin.",
                 ")",
             ]
 
@@ -1328,3 +1372,63 @@ class RPGMakerMVParser:
                 self._set_nested_value(val, path[1:], original, translation)
                 if was_string:
                     obj[segment] = json.dumps(val, ensure_ascii=False)
+
+    # ── Word wrap plugin injection ─────────────────────────────────
+
+    INJECTED_PLUGIN_NAME = "TranslatorWordWrap"
+
+    def inject_wordwrap_plugin(self, project_dir: str):
+        """Write TranslatorWordWrap.js and register it in plugins.js.
+
+        Called during export when no existing word wrap plugin was detected
+        and the user chose to inject one.
+        """
+        from .text_processor import WORDWRAP_PLUGIN_JS
+
+        plugins_path = self._find_plugins_file(project_dir)
+        if not plugins_path:
+            return
+
+        # Write the JS file next to plugins.js (js/plugins/ folder)
+        js_dir = os.path.dirname(plugins_path)
+        plugins_dir = os.path.join(js_dir, "plugins")
+        os.makedirs(plugins_dir, exist_ok=True)
+        js_path = os.path.join(plugins_dir, f"{self.INJECTED_PLUGIN_NAME}.js")
+        with open(js_path, "w", encoding="utf-8") as f:
+            f.write(WORDWRAP_PLUGIN_JS.strip() + "\n")
+
+        # Add entry to $plugins array (read from backup if available)
+        backup_path = os.path.join(
+            js_dir,
+            os.path.basename(plugins_path).replace("plugins.", "plugins_original."),
+        )
+        source = backup_path if os.path.exists(backup_path) else plugins_path
+        try:
+            plugins = self._load_plugins_js(source)
+        except (json.JSONDecodeError, OSError):
+            return
+
+        # Don't duplicate if already present
+        if any(p.get("name") == self.INJECTED_PLUGIN_NAME for p in plugins):
+            self._write_plugins_js(plugins_path, plugins)
+            return
+
+        plugins.append({
+            "name": self.INJECTED_PLUGIN_NAME,
+            "status": True,
+            "description": "Word wrap for translated text (auto-injected)",
+            "parameters": {},
+        })
+        self._write_plugins_js(plugins_path, plugins)
+
+    def remove_wordwrap_plugin(self, project_dir: str):
+        """Remove the injected word wrap plugin (cleanup during restore)."""
+        plugins_path = self._find_plugins_file(project_dir)
+        if not plugins_path:
+            return
+
+        # Remove JS file
+        js_dir = os.path.dirname(plugins_path)
+        js_path = os.path.join(js_dir, "plugins", f"{self.INJECTED_PLUGIN_NAME}.js")
+        if os.path.isfile(js_path):
+            os.remove(js_path)
