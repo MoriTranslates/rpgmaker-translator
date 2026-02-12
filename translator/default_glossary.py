@@ -30,6 +30,8 @@ BODY = {
     "金玉": "balls",
     "太もも": "thighs",
     "恥丘": "pubic mound",
+    "お股": "crotch",
+    "秘部": "genitals",
 }
 
 # ── Sexual acts / states ────────────────────────────────────────
@@ -82,6 +84,17 @@ ACTS = {
     "手マン": "fingering",
     "前戯": "foreplay",
     "ロリコン": "lolicon",
+    "イラマチオ": "irrumatio",
+    "素股": "thighjob",
+    "尻コキ": "assjob",
+    "ぶっかけ": "cumshot",
+    "受精": "fertilized",
+    "出産": "childbirth",
+    "キス": "kiss",
+    "膣内射精": "creampie",
+    "膣外射精": "non-creampie",
+    "乳揉まれ": "fondled",
+    "尻揉まれ": "ass groped",
 }
 
 # ── RPG / game terms ────────────────────────────────────────────
@@ -158,6 +171,10 @@ RPG = {
     "タイトルへ": "To Title",
     "ステータス": "Status",
     "やっぱりやめる": "Never mind",
+    "初めから": "Start",
+    "回想する": "Recollection",
+    "討伐": "Extermination",
+    "邪気": "Miasma",
     # Locations
     "避暑地": "summer resort",
     "別荘": "villa",
@@ -238,6 +255,10 @@ COMBAT = {
     "聖": "Holy",
     "無": "None",
     "物理": "Physical",
+    "神聖": "Holy",
+    "暗黒": "Dark",
+    "木": "Wood",
+    "地": "Earth",
     # Additional
     "状態異常": "Status Ailment",
     "ターン終了": "End Turn",
@@ -338,6 +359,11 @@ STATUS = {
     "恋人": "lover",
     "許嫁": "fiance",
     "婚約者": "fiance",
+    "理性": "sanity",
+    "性欲": "libido",
+    "絶頂回数": "orgasms",
+    "経験人数": "partners",
+    "射精量": "cum amount",
 }
 
 # ── Fantasy races / classes ────────────────────────────────────
@@ -389,6 +415,37 @@ RACES = {
     "メイド": "maid",
     "くノ一": "kunoichi",
     "魔術師": "sorcerer",
+    "大魔導士": "archmage",
+    "忍び": "shinobi",
+    # Demons / angels / monsters
+    "聖女": "saintess",
+    "上級悪魔": "arch demon",
+    "魔神": "devil",
+    "魔人": "demon",
+    "睡魔": "mare",
+    "淫魔": "succubus",
+    "夢魔": "succubus",
+    "大天使": "archangel",
+    "権天使": "principality",
+    "能天使": "power",
+    "力天使": "virtue",
+    "主天使": "dominion",
+    "智天使": "cherub",
+    "飛天魔": "nephilim",
+    "堕天使": "fallen angel",
+    "鬼": "oni",
+    "妖怪": "yokai",
+    "式神": "shikigami",
+    "幽霊": "ghost",
+    "幽鬼": "revenant",
+    "デーモン": "daemon",
+    "ローパー": "roper",
+    "人型": "humanoid",
+    "獣型": "beast",
+    "触手型": "tentacle type",
+    "軟体型": "slime type",
+    "虫型": "insect type",
+    "竜": "dragon",
 }
 
 # ── Clothing / attire ──────────────────────────────────────────
@@ -401,6 +458,7 @@ CLOTHING = {
     "水着": "swimsuit",
     "下着": "underwear",
     "パンツ": "panties",
+    "ショーツ": "panties",
     "ブラ": "bra",
     "ストッキング": "stockings",
     "ガーターベルト": "garter belt",
