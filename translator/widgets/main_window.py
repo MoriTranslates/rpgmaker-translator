@@ -828,6 +828,7 @@ class MainWindow(QMainWindow):
 
         Called on load_state to handle projects saved before auto-glossary
         covered all DB types (or before this feature existed at all).
+        Writes directly to project.glossary (doesn't require client.glossary).
 
         Returns the number of entries added.
         """
@@ -835,7 +836,18 @@ class MainWindow(QMainWindow):
             return 0
         before = len(self.project.glossary)
         for entry in self.project.entries:
-            self._maybe_add_to_glossary(entry)
+            fields = self._AUTO_GLOSSARY_FIELDS.get(entry.file)
+            is_map_name = (
+                entry.file.startswith("Map")
+                and entry.file.endswith(".json")
+                and entry.field == self._AUTO_GLOSSARY_MAP_FIELD
+            )
+            if not is_map_name and (not fields or entry.field not in fields):
+                continue
+            jp = entry.original
+            en = entry.translation
+            if jp and en and jp != en and jp not in self.project.glossary:
+                self.project.glossary[jp] = en
         return len(self.project.glossary) - before
 
     def _title_case(self, text: str) -> str:
