@@ -384,7 +384,7 @@ class TextProcessor:
         cleaned = CONTROL_CODE_REGEX.sub("", text)
         return len(cleaned)
 
-    def process_all(self, entries: list, original_entries: list = None) -> int:
+    def process_all(self, entries: list) -> int:
         """Process all translated entries. Returns count of modified entries."""
         count = 0
         for entry in entries:

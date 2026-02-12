@@ -1,5 +1,6 @@
 """Image Translation tab — browse, OCR, translate, and preview game images."""
 
+import logging
 import os
 import shutil
 import tempfile
@@ -19,6 +20,8 @@ from ..image_translator import (
     ALL_IMAGE_EXTS, ENCRYPTED_EXTS,
     read_encryption_key, decrypt_rpgmvp, encrypt_to_rpgmvp,
 )
+
+log = logging.getLogger(__name__)
 
 
 def _png_output_name(filename: str) -> str:
@@ -430,7 +433,8 @@ class ImagePanel(QWidget):
                 pm = QPixmap()
                 pm.loadFromData(raw_bytes)
                 return pm
-            except Exception:
+            except Exception as exc:
+                log.warning("Failed to decrypt image %s: %s", path, exc)
                 return QPixmap()
         return QPixmap(path)
 
@@ -654,6 +658,7 @@ class ImagePanel(QWidget):
 
     def _on_image_error(self, idx: int, msg: str):
         """Update UI after an image error."""
+        log.warning("Image %d error: %s", idx, msg)
         self._refresh_table()
 
     def _on_all_done(self):
