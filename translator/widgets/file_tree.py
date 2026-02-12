@@ -66,14 +66,12 @@ class FileTreeWidget(QTreeWidget):
             cat_item.setText(1, f"{cat_translated}/{cat_total}")
             # Add warning styling for Plugins category
             if category == "Plugins":
-                cat_item.setText(0, "Plugins (experimental)")
                 cat_item.setToolTip(0,
-                    "Plugin parameters are skipped by default.\n"
-                    "Some parameters are internal identifiers \u2014\n"
-                    "translating them will break the plugin.\n\n"
-                    "Right-click entries \u2192 Unskip to enable translation."
+                    "Japanese display text extracted from plugin parameters.\n"
+                    "Asset filenames and internal IDs are automatically skipped.\n\n"
+                    "Review entries and skip any that look like command\n"
+                    "triggers rather than player-visible text."
                 )
-                cat_item.setForeground(0, QColor("#e5c07b"))  # amber/warning
             cat_item.setExpanded(True)
 
         # Maps category — any Map###.json files

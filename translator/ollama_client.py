@@ -663,8 +663,11 @@ class OllamaClient:
         parts.append(f"Translate this:\n{clean_text}")
         return "\n\n".join(parts)
 
-    # Fix LLM tokenizer artifacts: "I 've" → "I've", "do n't" → "don't", etc.
-    _CONTRACTION_RE = re.compile(r"\b(\w+)\s+('(?:ve|re|ll|t|s|d|m))\b", re.IGNORECASE)
+    # Fix LLM tokenizer artifacts that split contractions:
+    #   "I 've" → "I've"   "Couldn' t" → "Couldn't"   "do n't" → "don't"
+    # Handles space before and/or after the apostrophe (ASCII ' or curly ')
+    _CONTRACTION_RE = re.compile(
+        r"\b(\w+)\s*(['\u2019])\s*(ve|re|ll|t|s|d|m)\b", re.IGNORECASE)
 
     def _postprocess_result(self, result: str, code_map: dict) -> str:
         """Strip thinking/notes, apply Pig Latin, restore control codes."""
@@ -674,8 +677,8 @@ class OllamaClient:
             result = _to_pig_latin(result)
         if code_map:
             result = self._restore_codes(result, code_map)
-        # Fix contraction spacing artifacts (I 've → I've, do n't → don't)
-        result = self._CONTRACTION_RE.sub(r"\1\2", result)
+        # Fix contraction spacing artifacts (I 've → I've, Couldn' t → Couldn't)
+        result = self._CONTRACTION_RE.sub(r"\1\2\3", result)
         # Strip outer quotes if LLM wrapped the translation in them
         first = result.find('"')
         last = result.rfind('"')
@@ -701,6 +704,7 @@ class OllamaClient:
         "note": "developer note",
         "plugin_command": "plugin command text",
         "plugin_param": "plugin configuration text",
+        "script_variable": "quest/UI text stored in game variable",
     }
 
     def translate(self, text: str, context: str = "",

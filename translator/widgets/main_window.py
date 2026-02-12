@@ -257,6 +257,14 @@ class MainWindow(QMainWindow):
 
         project_menu.addSeparator()
 
+        self.close_action = QAction("Close Project", self)
+        self.close_action.setShortcut("Ctrl+W")
+        self.close_action.triggered.connect(self._close_project)
+        self.close_action.setEnabled(False)
+        project_menu.addAction(self.close_action)
+
+        project_menu.addSeparator()
+
         self.rename_action = QAction("Rename Folder...", self)
         self.rename_action.triggered.connect(self._rename_folder)
         self.rename_action.setEnabled(False)
@@ -586,9 +594,16 @@ class MainWindow(QMainWindow):
                     self.plugin_analyzer.analyze_project(path)
                     if getattr(self.client, "vision_model", ""):
                         self.image_panel.set_project(path, self.client)
+                    # Count plugin entries for status message
+                    plugin_count = sum(
+                        1 for e in self.project.entries if e.file == "plugins.js"
+                    )
+                    plugin_info = (f" | +{plugin_count} plugin entries"
+                                   if plugin_count else "")
                     self.statusbar.showMessage(
                         f"Resumed: {self.project.total} entries "
-                        f"({self.project.translated_count} translated)", 5000
+                        f"({self.project.translated_count} translated)"
+                        f"{plugin_info}", 8000
                     )
                     folder = os.path.basename(path)
                     self.setWindowTitle(f"RPG Maker Translator \u2014 {folder}")
@@ -648,20 +663,17 @@ class MainWindow(QMainWindow):
             f"~{self.plugin_analyzer.chars_per_line} chars/line{plugin_info}", 8000
         )
 
-        # Warn about plugin entries
+        # Info about plugin entries
         plugin_count = sum(1 for e in entries if e.file == "plugins.js")
         if plugin_count > 0:
-            QMessageBox.warning(
-                self, "Plugin Parameters (Experimental)",
+            QMessageBox.information(
+                self, "Plugin Parameters",
                 f"Found {plugin_count} translatable strings in plugins.js.\n\n"
-                "These are SKIPPED by default because some plugin parameters\n"
-                "are internal lookup keys \u2014 translating them will break the plugin.\n\n"
-                "To translate plugin text:\n"
-                "  1. Click 'Plugins' in the file tree\n"
-                "  2. Review each entry carefully\n"
-                "  3. Right-click \u2192 'Unskip' on entries you want translated\n\n"
-                "Safe to translate: menu labels, help text, descriptions\n"
-                "Dangerous to translate: command names, tags, identifiers",
+                "Only values containing Japanese display text were extracted.\n"
+                "Asset filenames and internal identifiers are skipped.\n\n"
+                "Review the entries in the Plugins section of the file tree.\n"
+                "Skip any entries that look like command triggers or tags\n"
+                "rather than player-visible text.",
             )
 
         # Window title
@@ -675,6 +687,64 @@ class MainWindow(QMainWindow):
         if not candidates:
             return None
         return max(candidates, key=lambda x: x[1])[0]
+
+    def _close_project(self):
+        """Close the current project and reset to empty state."""
+        if not self.project.entries:
+            return
+
+        reply = QMessageBox.question(
+            self, "Close Project",
+            "Close the current project?\n\n"
+            "Make sure you have saved your state first.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Reset project
+        self.project = TranslationProject()
+        self.file_tree.load_project(self.project)
+        self.trans_table.set_entries([])
+        self._actors_ready = False
+        self._last_save_path = ""
+
+        # Clear client actor context
+        self.client.actor_genders = {}
+        self.client.actor_names = {}
+        self.client.actor_context = ""
+
+        # Disable project-dependent actions
+        self.close_action.setEnabled(False)
+        self.save_action.setEnabled(False)
+        self.save_as_action.setEnabled(False)
+        self.rename_action.setEnabled(False)
+        self.import_action.setEnabled(False)
+        self.import_folder_action.setEnabled(False)
+        self.scan_plugin_edits_action.setEnabled(False)
+        self.batch_db_action.setEnabled(False)
+        self.batch_dialogue_action.setEnabled(False)
+        self.batch_action.setEnabled(False)
+        self.batch_actor_action.setEnabled(False)
+        self.wordwrap_action.setEnabled(False)
+        self.find_replace_action.setEnabled(False)
+        self.cleanup_action.setEnabled(False)
+        self.polish_action.setEnabled(False)
+        self.consistency_action.setEnabled(False)
+        self.translate_images_action.setEnabled(False)
+        self.load_vocab_action.setEnabled(False)
+        self.export_vocab_action.setEnabled(False)
+        self.scan_glossary_action.setEnabled(False)
+        self.scan_project_glossary_action.setEnabled(False)
+        self.apply_glossary_action.setEnabled(False)
+        self.export_action.setEnabled(False)
+        self.restore_action.setEnabled(False)
+        self.txt_export_action.setEnabled(False)
+        self.create_patch_action.setEnabled(False)
+        self.export_zip_action.setEnabled(False)
+
+        self.setWindowTitle("RPG Maker Translator")
+        self.statusbar.showMessage("Project closed.", 5000)
 
     def _pre_translate_info(self, entries, actors_raw):
         """Translate game title + actor names/profiles before the gender dialog.
@@ -1110,6 +1180,11 @@ class MainWindow(QMainWindow):
             if self.parser._find_data_dir(save_dir):
                 self.project.project_path = save_dir
 
+        # Merge plugin entries that didn't exist when the state was saved
+        # (e.g. saved before plugin extraction was enabled).
+        if self.project.project_path:
+            self._merge_new_plugin_entries()
+
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries(self.project.entries)
 
@@ -1136,10 +1211,31 @@ class MainWindow(QMainWindow):
         self._last_save_path = path
         return True
 
+    def _merge_new_plugin_entries(self) -> int:
+        """Extract plugin + System.json entries and merge any missing from project.
+
+        Handles saves created before plugin extraction or new System.json
+        term fields (params, basic) were added — new entries are appended
+        without duplicating existing ones.
+
+        Returns the number of entries added.
+        """
+        existing_ids = {e.id for e in self.project.entries}
+        new_entries = self.parser._parse_plugins(self.project.project_path)
+        # Also re-parse System.json for newly supported term fields
+        data_dir = self.parser._find_data_dir(self.project.project_path)
+        if data_dir:
+            new_entries.extend(self.parser._parse_system(data_dir))
+        added = [e for e in new_entries if e.id not in existing_ids]
+        if added:
+            self.project.entries.extend(added)
+        return len(added)
+
     def _enable_project_actions(self):
         """Enable all project-dependent menu actions."""
         has_path = bool(self.project.project_path)
         # Project
+        self.close_action.setEnabled(True)
         self.save_action.setEnabled(True)
         self.save_as_action.setEnabled(True)
         self.rename_action.setEnabled(has_path)
@@ -2202,6 +2298,8 @@ class MainWindow(QMainWindow):
             self.engine.max_history = cfg["max_history"]
         if "vision_model" in cfg:
             self.client.vision_model = cfg["vision_model"]
+        if "extract_script_strings" in cfg:
+            self.parser.extract_script_strings = cfg["extract_script_strings"]
 
     def _save_settings(self):
         """Persist current settings to _settings.json."""
@@ -2218,6 +2316,7 @@ class MainWindow(QMainWindow):
             "general_glossary": self._general_glossary,
             "target_language": self.client.target_language,
             "vision_model": getattr(self.client, "vision_model", ""),
+            "extract_script_strings": self.parser.extract_script_strings,
         }
         try:
             with open(self._SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -2700,8 +2799,11 @@ class MainWindow(QMainWindow):
                 msg += f"\n\nAcross {len(files)} files."
         QMessageBox.information(self, "Word Wrap Applied", msg)
 
-    # Same regex as ollama_client for fixing contraction spacing
-    _CONTRACTION_RE = re.compile(r"\b(\w+)\s+('(?:ve|re|ll|t|s|d|m))\b", re.IGNORECASE)
+    # Same regex as ollama_client for fixing contraction spacing:
+    #   "I 've" → "I've"   "Couldn' t" → "Couldn't"   "do n't" → "don't"
+    # Handles space before and/or after the apostrophe (ASCII ' or curly ')
+    _CONTRACTION_RE = re.compile(
+        r"\b(\w+)\s*(['\u2019])\s*(ve|re|ll|t|s|d|m)\b", re.IGNORECASE)
 
     # Japanese speech/quote brackets that produce redundant "" in translations
     _JP_SPEECH_BRACKETS = set('\u300c\u300d\u300e\u300f')  # 「」『』
@@ -2726,8 +2828,8 @@ class MainWindow(QMainWindow):
                 if first != -1 and last > first:
                     entry.translation = t[:first] + t[first + 1:last] + t[last + 1:]
 
-            # Fix contraction spacing (I 've → I've, do n't → don't)
-            entry.translation = self._CONTRACTION_RE.sub(r"\1\2", entry.translation)
+            # Fix contraction spacing (I 've → I've, Couldn' t → Couldn't)
+            entry.translation = self._CONTRACTION_RE.sub(r"\1\2\3", entry.translation)
 
             if entry.translation != original_text:
                 if '"' in original_text and '"' not in entry.translation:

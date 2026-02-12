@@ -196,6 +196,23 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(appear_group)
 
+        # Experimental
+        exp_group = QGroupBox("Experimental")
+        exp_form = QFormLayout(exp_group)
+
+        self.script_strings_check = QCheckBox(
+            "Extract strings from Script commands (355/655)"
+        )
+        self.script_strings_check.setToolTip(
+            "Extracts Japanese text from $gameVariables.setValue() calls\n"
+            "in event Script commands. Used for quest text, dynamic labels, etc.\n\n"
+            "WARNING: Modifying script commands can break game logic.\n"
+            "Review extracted entries carefully before exporting."
+        )
+        exp_form.addRow(self.script_strings_check)
+
+        layout.addWidget(exp_group)
+
         # ── Bottom buttons ─────────────────────────────────────────
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -232,6 +249,9 @@ class SettingsDialog(QDialog):
         else:
             self.wordwrap_spin.setValue(0)
         self.dark_mode_check.setChecked(self.dark_mode)
+        self.script_strings_check.setChecked(
+            self.parser.extract_script_strings if self.parser else False
+        )
         self.vision_combo.setCurrentText(getattr(self.client, "vision_model", "") or "")
         # Fetch models in background thread so the dialog appears instantly
         self._model_fetcher = _ModelFetcher(
@@ -409,6 +429,8 @@ class SettingsDialog(QDialog):
             if manual > 0:
                 self.plugin_analyzer.chars_per_line = manual
         self.dark_mode = self.dark_mode_check.isChecked()
+        if self.parser:
+            self.parser.extract_script_strings = self.script_strings_check.isChecked()
         self.accept()
 
     def _restart_ollama(self, num_parallel: int):

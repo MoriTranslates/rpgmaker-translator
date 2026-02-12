@@ -28,6 +28,8 @@ CODE_CHANGE_NICKNAME = 324    # Change Actor Nickname — params[0]=actorId, par
 CODE_CHANGE_PROFILE = 325     # Change Actor Profile — params[0]=actorId, params[1]=profile
 CODE_PLUGIN_COMMAND_MV = 356  # Plugin Command (MV) — params[0]=command string
 CODE_PLUGIN_COMMAND_MZ = 357  # Plugin Command (MZ) — params vary by plugin
+CODE_SCRIPT = 355             # Script (first line) — params[0]=JS code
+CODE_SCRIPT_CONT = 655        # Script (continuation) — params[0]=JS code
 
 # Database files and their translatable fields
 DATABASE_FILES = {
@@ -137,6 +139,11 @@ _JS_CODE_RE = re.compile(r'[;{}()\[\]=]')  # contains JS syntax chars — likely
 _COLOR_RE = re.compile(r'^#[0-9a-fA-F]{3,8}$')  # CSS color: #FFF, #FF0000, #FF000080
 _EVAL_RE = re.compile(r'\b(function|var |let |const |this\.|return |if\s*\()', re.IGNORECASE)
 
+# Script command (355/655) patterns for extractable string literals
+# Matches: $gameVariables.setValue(N, "text") or $gameVariables.setValue(N, 'text')
+_SCRIPT_VAR_SET_RE = re.compile(
+    r'\$gameVariables\.setValue\(\s*(\d+)\s*,\s*(["\'])(.*?)\2\s*\)')
+
 
 def _is_plugin_display_text(text: str) -> bool:
     """Check if a plugin parameter value is likely display text (not a tag/ID/path).
@@ -201,6 +208,7 @@ class RPGMakerMVParser:
     def __init__(self):
         self.context_size = 3  # Number of recent dialogue entries for LLM context
         self._require_japanese = True  # False = extract all text (for import)
+        self.extract_script_strings = False  # Experimental: extract strings from Script (355/655)
 
     def _should_extract(self, text: str) -> bool:
         """Check if text should be extracted as a translatable entry."""
@@ -836,9 +844,9 @@ class RPGMakerMVParser:
                 original=title,
             ))
 
-        # Terms — messages array
+        # Terms — messages (array in MZ, dict in MV)
         terms = data.get("terms", {})
-        messages = terms.get("messages", [])
+        messages = terms.get("messages", {})
         if isinstance(messages, list):
             for i, msg in enumerate(messages):
                 if isinstance(msg, str) and self._should_extract(msg):
@@ -846,6 +854,15 @@ class RPGMakerMVParser:
                         id=f"System.json/terms/messages/{i}",
                         file="System.json",
                         field=f"terms.messages[{i}]",
+                        original=msg,
+                    ))
+        elif isinstance(messages, dict):
+            for key, msg in messages.items():
+                if isinstance(msg, str) and self._should_extract(msg):
+                    entries.append(TranslationEntry(
+                        id=f"System.json/terms/messages/{key}",
+                        file="System.json",
+                        field=f"terms.messages.{key}",
                         original=msg,
                     ))
 
@@ -859,6 +876,30 @@ class RPGMakerMVParser:
                         file="System.json",
                         field=f"terms.commands[{i}]",
                         original=cmd,
+                    ))
+
+        # Terms — params array (stat/parameter names: HP, MP, ATK, etc.)
+        params = terms.get("params", [])
+        if isinstance(params, list):
+            for i, param in enumerate(params):
+                if isinstance(param, str) and self._should_extract(param):
+                    entries.append(TranslationEntry(
+                        id=f"System.json/terms/params/{i}",
+                        file="System.json",
+                        field=f"terms.params[{i}]",
+                        original=param,
+                    ))
+
+        # Terms — basic array (HP/MP abbreviations and similar)
+        basic = terms.get("basic", [])
+        if isinstance(basic, list):
+            for i, b in enumerate(basic):
+                if isinstance(b, str) and self._should_extract(b):
+                    entries.append(TranslationEntry(
+                        id=f"System.json/terms/basic/{i}",
+                        file="System.json",
+                        field=f"terms.basic[{i}]",
+                        original=b,
                     ))
 
         return entries
@@ -1104,6 +1145,33 @@ class RPGMakerMVParser:
                                         original=val,
                                     ))
 
+            # Script (355/655) — experimental: extract string literals
+            # from $gameVariables.setValue(N, "Japanese text") calls.
+            if self.extract_script_strings and code == CODE_SCRIPT:
+                # Collect full script: 355 line + all following 655 lines
+                script_lines = [params[0] if params and isinstance(params[0], str) else ""]
+                j = i
+                while j < len(cmd_list):
+                    c = cmd_list[j]
+                    if isinstance(c, dict) and c.get("code") == CODE_SCRIPT_CONT:
+                        p = c.get("parameters", [""])
+                        script_lines.append(p[0] if p and isinstance(p[0], str) else "")
+                        j += 1
+                    else:
+                        break
+                full_script = "\n".join(script_lines)
+                for m in _SCRIPT_VAR_SET_RE.finditer(full_script):
+                    var_id, _quote, text = m.group(1), m.group(2), m.group(3)
+                    if text and _has_japanese(text):
+                        dialog_counter += 1
+                        entries.append(TranslationEntry(
+                            id=f"{filename}/{prefix}/script_var_{dialog_counter}",
+                            file=filename,
+                            field="script_variable",
+                            original=text,
+                            context=f"[SCRIPT_VAR:{var_id}:{m.group(0)}]",
+                        ))
+
             i += 1
 
         return entries
@@ -1314,17 +1382,34 @@ class RPGMakerMVParser:
             if "gameTitle" in entry.id and not entry.id.endswith("terms"):
                 data["gameTitle"] = entry.translation
             elif "terms/messages/" in entry.id:
-                idx = int(parts[-1])
+                key = parts[-1]
                 terms = data.get("terms", {})
-                messages = terms.get("messages", [])
-                if 0 <= idx < len(messages):
-                    messages[idx] = entry.translation
+                messages = terms.get("messages", {})
+                if isinstance(messages, list):
+                    idx = int(key)
+                    if 0 <= idx < len(messages):
+                        messages[idx] = entry.translation
+                elif isinstance(messages, dict):
+                    if key in messages:
+                        messages[key] = entry.translation
             elif "terms/commands/" in entry.id:
                 idx = int(parts[-1])
                 terms = data.get("terms", {})
                 commands = terms.get("commands", [])
                 if 0 <= idx < len(commands):
                     commands[idx] = entry.translation
+            elif "terms/params/" in entry.id:
+                idx = int(parts[-1])
+                terms = data.get("terms", {})
+                params = terms.get("params", [])
+                if 0 <= idx < len(params):
+                    params[idx] = entry.translation
+            elif "terms/basic/" in entry.id:
+                idx = int(parts[-1])
+                terms = data.get("terms", {})
+                basic = terms.get("basic", [])
+                if 0 <= idx < len(basic):
+                    basic[idx] = entry.translation
 
         # Map displayName
         elif "displayName" in entry.id and entry.field == "displayName":
@@ -1368,6 +1453,12 @@ class RPGMakerMVParser:
                 plugin_name = parts_id[-2]
                 self._replace_mz_plugin_param(data, plugin_name, param_key,
                                               entry.original, entry.translation)
+
+        # Script variable (355/655) — replace string in $gameVariables.setValue()
+        elif entry.field == "script_variable" and "/script_var_" in entry.id:
+            if entry.context and entry.context.startswith("[SCRIPT_VAR:"):
+                # context = "[SCRIPT_VAR:21:$gameVariables.setValue(21, "text")]"
+                self._replace_script_string(data, entry.original, entry.translation)
 
     def _apply_event_translation(self, data, entry: TranslationEntry):
         """Apply event dialogue/choice translation back into map or common event data."""
@@ -1567,6 +1658,58 @@ class RPGMakerMVParser:
         log.warning("Export: MZ plugin %s/%s not matched — original %r",
                     plugin_name, param_key, original[:60])
 
+    def _replace_script_string(self, data, original: str, translation: str):
+        """Replace a Japanese string inside Script commands (355/655).
+
+        Finds the original string literal in concatenated 355+655 script lines
+        and replaces it in-place, preserving surrounding JS code.
+        """
+        def process_commands(cmd_list):
+            i = 0
+            while i < len(cmd_list):
+                cmd = cmd_list[i]
+                if not isinstance(cmd, dict) or cmd.get("code") != CODE_SCRIPT:
+                    i += 1
+                    continue
+                # Collect 355 + following 655 lines
+                script_cmds = [cmd]
+                j = i + 1
+                while j < len(cmd_list):
+                    c = cmd_list[j]
+                    if isinstance(c, dict) and c.get("code") == CODE_SCRIPT_CONT:
+                        script_cmds.append(c)
+                        j += 1
+                    else:
+                        break
+                # Check if any line contains the original string
+                for sc in script_cmds:
+                    p = sc.get("parameters", [""])
+                    line = p[0] if p and isinstance(p[0], str) else ""
+                    if original in line:
+                        p[0] = line.replace(original, translation, 1)
+                        return True
+                i = j
+            return False
+
+        if isinstance(data, dict):
+            for event in (data.get("events") or []):
+                if not event or not isinstance(event, dict):
+                    continue
+                for page in (event.get("pages") or []):
+                    if page and isinstance(page, dict):
+                        if process_commands(page.get("list", [])):
+                            return
+            if "list" in data:
+                if process_commands(data.get("list", [])):
+                    return
+        elif isinstance(data, list):
+            for event in data:
+                if event and isinstance(event, dict):
+                    if process_commands(event.get("list", [])):
+                        return
+        log.warning("Export: script string not matched — original %r",
+                    original[:60])
+
     # ── plugins.js extraction & export ─────────────────────────────
 
     @staticmethod
@@ -1742,19 +1885,181 @@ class RPGMakerMVParser:
             if orig != curr and orig.strip():
                 out.append((id_prefix, plugin_name, param_label, orig, curr))
 
+    # Keys whose values are asset filenames / internal IDs — never translate.
+    _PLUGIN_ASSET_KEY_RE = re.compile(
+        r'(?:image|Image|pic(?:Name|ture)|BGM|BGS|SE |Sound|Skin|Windowskin'
+        r'|Skeleton|Background Image|Back Image|Joker Image'
+        r'|Spade|Club|Heart|Diamond|json file'
+        r'|picOrigin|picX|picY|picOpacity|picZoom|picShow'
+        r'|\.png|\.ogg|\.rpgmvp'
+        r'|Button|Key$|triggerKey|triggerButton|SkipKey|Skip Key'
+        r'|Help Commands|Command List)',
+        re.IGNORECASE,
+    )
+
+    # Section header markers used by plugins as visual dividers.
+    _PLUGIN_SECTION_RE = re.compile(r'^#{2,}[^#].*#{2,}$')
+
+    # Looks like an asset filename: only word chars, underscores, %, digits —
+    # no spaces, no Japanese particles/punctuation.
+    _PLUGIN_ASSET_VALUE_RE = re.compile(
+        r'^[\w%.\-/\\]+$', re.ASCII,
+    )
+
+    # Stricter Japanese check: actual hiragana/katakana/kanji required.
+    # Excludes fullwidth Latin (ａ-ｚ) which JP_REGEX matches but isn't JP text.
+    _JP_DISPLAY_RE = re.compile(
+        r'[\u3040-\u309F'    # Hiragana
+        r'\u30A0-\u30FF'     # Katakana
+        r'\u4E00-\u9FFF'     # CJK kanji
+        r'\u3400-\u4DBF]',   # CJK Extension A
+    )
+
+    # JavaScript code embedded in plugin parameters (SceneCustomMenu, etc.).
+    _JS_CODE_RE = re.compile(
+        r';\s*//'            # statement; // comment
+        r'|^\s*\$(?:game|data)'  # $gameParty, $dataSystem, etc.
+        r'|^\s*this[\._]'        # this.method() or this._property
+        r'|^\s*\[this[\._]'      # [this._actor]
+        r'|^\s*function\s'       # function keyword
+    )
+
+    # ID path segments that indicate audio/sound asset containers.
+    _PLUGIN_AUDIO_ID_RE = re.compile(
+        r'BgsSettings|BgmSettings|SeSettings|AudioManager',
+        re.IGNORECASE,
+    )
+
     def _parse_plugins(self, project_dir: str) -> list:
-        """Plugin parameter extraction from plugins.js — DISABLED.
+        """Extract translatable Japanese text from plugins.js parameters.
 
-        The scan-everything approach extracted internal lookup keys, asset IDs,
-        and command identifiers alongside display text.  Translating these broke
-        games.  Plugin display text is now extracted via the whitelist approach
-        in _extract_event_commands() (codes 356/357) which only targets known-
-        safe text from known plugins.
-
-        The original scan methods are preserved below (commented out) in case
-        a curated plugins.js whitelist is ever added.
+        Uses a conservative filter: only values containing Japanese characters
+        are extracted, and asset filenames / internal IDs are skipped via key
+        name patterns and value heuristics.
         """
-        return []
+        plugins_path = self._find_plugins_file(project_dir)
+        if not plugins_path:
+            return []
+
+        # Read from backup (original JP) when available for idempotent re-load
+        backup = os.path.join(
+            os.path.dirname(plugins_path),
+            os.path.basename(plugins_path).replace("plugins.", "plugins_original."),
+        )
+        source = backup if os.path.exists(backup) else plugins_path
+
+        try:
+            plugins = self._load_plugins_js(source)
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("Failed to load plugins.js for extraction: %s", exc)
+            return []
+
+        entries = []
+        for plugin in plugins:
+            if not isinstance(plugin, dict):
+                continue
+            name = plugin.get("name", "")
+            if not name or name.startswith("---"):
+                continue  # separator row
+            params = plugin.get("parameters", {})
+            if not isinstance(params, dict):
+                continue
+
+            for key, value in params.items():
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                entry_id = f"plugins.js/{name}/{key}"
+                self._scan_plugin_value(
+                    value, key, entry_id, name, entries,
+                )
+
+        log.info("Extracted %d translatable plugin parameters", len(entries))
+        return entries
+
+    def _scan_plugin_value(self, value: str, key: str, id_prefix: str,
+                           plugin_name: str, out: list):
+        """Recursively scan a plugin parameter value for translatable text.
+
+        Handles plain strings and JSON-encoded nested arrays/objects.
+        Creates TranslationEntry items for any Japanese display text found.
+        """
+        # Try JSON parse for nested structures
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, (list, dict)):
+                self._scan_parsed_plugin(parsed, key, id_prefix,
+                                         plugin_name, out)
+                return
+            # JSON decoded to a scalar (string, number) — fall through
+            if not isinstance(parsed, str):
+                return
+            # It was a JSON string literal — use the decoded value
+            value = parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Plain string — check if translatable
+        if self._is_translatable_plugin_value(value, key, id_prefix):
+            out.append(TranslationEntry(
+                id=id_prefix,
+                file="plugins.js",
+                field=f"{plugin_name}/{key}",
+                original=value,
+            ))
+
+    def _scan_parsed_plugin(self, obj, key: str, id_prefix: str,
+                            plugin_name: str, out: list):
+        """Walk a parsed JSON structure from a plugin parameter."""
+        if isinstance(obj, list):
+            for i, item in enumerate(obj):
+                child_id = f"{id_prefix}/[{i}]"
+                if isinstance(item, str):
+                    # May be another JSON-encoded string
+                    self._scan_plugin_value(item, key, child_id,
+                                            plugin_name, out)
+                elif isinstance(item, dict):
+                    self._scan_parsed_plugin(item, key, child_id,
+                                             plugin_name, out)
+                elif isinstance(item, list):
+                    self._scan_parsed_plugin(item, key, child_id,
+                                             plugin_name, out)
+        elif isinstance(obj, dict):
+            for k, v in obj.items():
+                child_id = f"{id_prefix}/{k}"
+                if isinstance(v, str):
+                    self._scan_plugin_value(v, k, child_id,
+                                            plugin_name, out)
+                elif isinstance(v, (list, dict)):
+                    self._scan_parsed_plugin(v, k, child_id,
+                                             plugin_name, out)
+
+    def _is_translatable_plugin_value(self, value: str, key: str,
+                                       entry_id: str = "") -> bool:
+        """Decide if a plugin parameter value is translatable display text."""
+        value = value.strip()
+        if not value:
+            return False
+        # Must contain actual Japanese (hiragana/katakana/kanji),
+        # not just fullwidth Latin like ｐ
+        if not self._JP_DISPLAY_RE.search(value):
+            return False
+        # Skip section headers (#### ピクチャ1 ####)
+        if self._PLUGIN_SECTION_RE.match(value):
+            return False
+        # Skip if the key name indicates an asset reference
+        if self._PLUGIN_ASSET_KEY_RE.search(key):
+            return False
+        # Skip JavaScript code embedded in plugin parameters
+        if self._JS_CODE_RE.search(value):
+            return False
+        # Skip audio/sound asset containers
+        if entry_id and self._PLUGIN_AUDIO_ID_RE.search(entry_id):
+            return False
+        # Skip values that look like filenames (ASCII-only word chars + _ / %)
+        # but only if they're short — long Japanese sentences are never filenames
+        if len(value) < 30 and self._PLUGIN_ASSET_VALUE_RE.match(value):
+            return False
+        return True
 
     def _save_plugins(self, project_dir: str, entries: list):
         """Write translated plugin parameter values back into plugins.js."""
