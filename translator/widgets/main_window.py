@@ -351,6 +351,14 @@ class MainWindow(QMainWindow):
         self.wordwrap_action.setEnabled(False)
         translate_menu.addAction(self.wordwrap_action)
 
+        self.strip_wordwrap_action = QAction("Strip Word Wrap Tags", self)
+        self.strip_wordwrap_action.setToolTip(
+            "Remove all <WordWrap> tags from translations"
+        )
+        self.strip_wordwrap_action.triggered.connect(self._strip_wordwrap_tags)
+        self.strip_wordwrap_action.setEnabled(False)
+        translate_menu.addAction(self.strip_wordwrap_action)
+
         self.polish_action = QAction("Polish Grammar", self)
         self.polish_action.setToolTip(
             "Run all translations through the LLM for grammar and fluency cleanup"
@@ -1115,6 +1123,7 @@ class MainWindow(QMainWindow):
         self.apply_patch_action.setEnabled(True)
         self.export_zip_action.setEnabled(True)
         self.wordwrap_action.setEnabled(True)
+        self.strip_wordwrap_action.setEnabled(True)
         self.fix_codes_action.setEnabled(True)
         self.polish_action.setEnabled(True)
         self.apply_glossary_action.setEnabled(True)
@@ -2440,6 +2449,27 @@ class MainWindow(QMainWindow):
         else:
             msg += f"\nWrapped to ~{self.plugin_analyzer.chars_per_line} chars/line."
         QMessageBox.information(self, "Word Wrap Applied", msg)
+
+    def _strip_wordwrap_tags(self):
+        """Remove all <WordWrap> tags from translations."""
+        if not self.project.entries:
+            return
+        count = 0
+        for entry in self.project.entries:
+            if not entry.translation:
+                continue
+            stripped = re.sub(r'<WordWrap>', '', entry.translation, flags=re.IGNORECASE)
+            if stripped != entry.translation:
+                entry.translation = stripped
+                count += 1
+        if count:
+            self.trans_table.refresh()
+            self.plugin_analyzer.inject_wordwrap = False
+        QMessageBox.information(
+            self, "Strip Word Wrap Tags",
+            f"Removed <WordWrap> tags from {count} entries." if count
+            else "No <WordWrap> tags found."
+        )
 
     # ── Fix Missing Codes ─────────────────────────────────────────
 
