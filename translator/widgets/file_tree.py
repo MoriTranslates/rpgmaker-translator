@@ -74,6 +74,31 @@ class FileTreeWidget(QTreeWidget):
                 )
             cat_item.setExpanded(True)
 
+        # Script Strings virtual category (entries with field=script_variable)
+        script_entries = [e for e in project.entries if e.field == "script_variable"]
+        if script_entries:
+            # Group by source file
+            script_files = {}
+            for e in script_entries:
+                script_files.setdefault(e.file, [0, 0])
+                script_files[e.file][1] += 1
+                if e.status in ("translated", "reviewed"):
+                    script_files[e.file][0] += 1
+            script_translated = sum(v[0] for v in script_files.values())
+            script_total = sum(v[1] for v in script_files.values())
+            script_cat = QTreeWidgetItem(all_item, ["Script Strings", f"{script_translated}/{script_total}"])
+            script_cat.setData(0, Qt.ItemDataRole.UserRole, "__SCRIPT_ALL__")
+            script_cat.setToolTip(0,
+                "Experimental: Japanese text extracted from\n"
+                "$gameVariables.setValue() in Script commands.\n\n"
+                "Review carefully — these modify game logic."
+            )
+            for sf_name in sorted(script_files):
+                t, tot = script_files[sf_name]
+                sf_item = QTreeWidgetItem(script_cat, [sf_name, f"{t}/{tot}"])
+                sf_item.setData(0, Qt.ItemDataRole.UserRole, f"__SCRIPT__{sf_name}")
+            script_cat.setExpanded(True)
+
         # Maps category — any Map###.json files
         map_files = sorted([f for f in files if f.startswith("Map") and f not in categorized])
         if map_files:

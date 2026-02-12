@@ -141,8 +141,11 @@ _EVAL_RE = re.compile(r'\b(function|var |let |const |this\.|return |if\s*\()', r
 
 # Script command (355/655) patterns for extractable string literals
 # Matches: $gameVariables.setValue(N, "text") or $gameVariables.setValue(N, 'text')
+# Also matches: $gameVariables._data[N] = "text"
 _SCRIPT_VAR_SET_RE = re.compile(
     r'\$gameVariables\.setValue\(\s*(\d+)\s*,\s*(["\'])(.*?)\2\s*\)')
+_SCRIPT_VAR_DATA_RE = re.compile(
+    r'\$gameVariables\._data\[\s*(\d+)\s*\]\s*=\s*(["\'])(.*?)\2')
 
 
 def _is_plugin_display_text(text: str) -> bool:
@@ -1160,17 +1163,19 @@ class RPGMakerMVParser:
                     else:
                         break
                 full_script = "\n".join(script_lines)
-                for m in _SCRIPT_VAR_SET_RE.finditer(full_script):
-                    var_id, _quote, text = m.group(1), m.group(2), m.group(3)
-                    if text and _has_japanese(text):
-                        dialog_counter += 1
-                        entries.append(TranslationEntry(
-                            id=f"{filename}/{prefix}/script_var_{dialog_counter}",
-                            file=filename,
-                            field="script_variable",
-                            original=text,
-                            context=f"[SCRIPT_VAR:{var_id}:{m.group(0)}]",
-                        ))
+                # Try both patterns: .setValue(N, "text") and ._data[N] = "text"
+                for pattern in (_SCRIPT_VAR_SET_RE, _SCRIPT_VAR_DATA_RE):
+                    for m in pattern.finditer(full_script):
+                        var_id, _quote, text = m.group(1), m.group(2), m.group(3)
+                        if text and _has_japanese(text):
+                            dialog_counter += 1
+                            entries.append(TranslationEntry(
+                                id=f"{filename}/{prefix}/script_var_{dialog_counter}",
+                                file=filename,
+                                field="script_variable",
+                                original=text,
+                                context=f"[SCRIPT_VAR:{var_id}:{m.group(0)}]",
+                            ))
 
             i += 1
 

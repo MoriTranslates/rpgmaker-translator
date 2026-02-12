@@ -2069,7 +2069,16 @@ class MainWindow(QMainWindow):
 
     def _filter_by_file(self, filename: str):
         """Show only entries from a specific file."""
-        entries = self.project.get_entries_for_file(filename)
+        # Script Strings virtual category
+        if filename == "__SCRIPT_ALL__":
+            entries = [e for e in self.project.entries
+                       if e.field == "script_variable"]
+        elif filename.startswith("__SCRIPT__"):
+            real_file = filename[len("__SCRIPT__"):]
+            entries = [e for e in self.project.get_entries_for_file(real_file)
+                       if e.field == "script_variable"]
+        else:
+            entries = self.project.get_entries_for_file(filename)
         self.trans_table.filter_by_file(entries)
 
     def _show_all_entries(self):
