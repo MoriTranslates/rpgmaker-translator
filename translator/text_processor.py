@@ -271,12 +271,15 @@ class TextProcessor:
     def __init__(self, analyzer: PluginAnalyzer):
         self.analyzer = analyzer
 
-    def process_entry(self, original: str, translation: str) -> str:
+    def process_entry(self, original: str, translation: str,
+                      *, use_tag: bool = True) -> str:
         """Process a single translated text — apply word wrapping.
 
         Args:
             original: The original Japanese text (for reference on line count).
             translation: The English translation to wrap.
+            use_tag: If True and a wordwrap plugin exists, add <WordWrap> tag.
+                     If False, always use manual line breaks (for DB fields).
 
         Returns:
             The processed translation with proper line breaks.
@@ -289,13 +292,14 @@ class TextProcessor:
         orig_line_count = len(orig_lines)
 
         # If the game has a word wrap plugin (or we'll inject one),
-        # let it handle wrapping — just add the tag
-        use_plugin = ((self.analyzer.has_wordwrap_plugin or self.analyzer.inject_wordwrap)
-                      and self.analyzer.wordwrap_tag)
-        if use_plugin:
-            return self._apply_plugin_wordwrap(translation, orig_line_count)
+        # let it handle wrapping — just add the tag (dialogue only)
+        if use_tag:
+            use_plugin = ((self.analyzer.has_wordwrap_plugin or self.analyzer.inject_wordwrap)
+                          and self.analyzer.wordwrap_tag)
+            if use_plugin:
+                return self._apply_plugin_wordwrap(translation, orig_line_count)
 
-        # No word wrap plugin — we need to manually break lines
+        # No word wrap plugin or non-dialogue field — manually break lines
         return self._apply_manual_wordwrap(translation, orig_line_count)
 
     def _apply_plugin_wordwrap(self, text: str, orig_line_count: int) -> str:
@@ -384,6 +388,11 @@ class TextProcessor:
         cleaned = CONTROL_CODE_REGEX.sub("", text)
         return len(cleaned)
 
+    # Only these field types go through the message window where
+    # <WordWrap> tags are processed.  DB fields (name, description,
+    # terms, etc.) are shown in menus that don't handle the tag.
+    _WORDWRAP_FIELDS = {"dialog", "scroll_text"}
+
     def process_all(self, entries: list) -> int:
         """Process all translated entries. Returns count of modified entries."""
         count = 0
@@ -393,7 +402,10 @@ class TextProcessor:
             if not entry.translation:
                 continue
 
-            processed = self.process_entry(entry.original, entry.translation)
+            # Only add <WordWrap> tag to dialogue fields; manual wrap for all
+            use_tag = entry.field in self._WORDWRAP_FIELDS
+            processed = self.process_entry(
+                entry.original, entry.translation, use_tag=use_tag)
             if processed != entry.translation:
                 entry.translation = processed
                 count += 1
