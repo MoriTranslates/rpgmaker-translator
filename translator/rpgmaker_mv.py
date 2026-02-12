@@ -391,17 +391,18 @@ class RPGMakerMVParser:
     def export_patch_zip(self, project_dir: str, entries: list,
                          zip_path: str, game_title: str = "",
                          inject_wordwrap: bool = False):
-        """Export translated game files as a ready-to-install zip.
+        """Export a complete translated game folder as a ready-to-install zip.
 
         Zip layout::
 
-            _translation/
-                data/Actors.json
-                data/Map001.json
+            data/               (complete translated data folder)
+                Actors.json
+                Map001.json
                 ...
-                js/plugins.js       (if applicable)
-            install.bat             (backs up originals, copies translations)
-            uninstall.bat           (restores originals from backup)
+            js/plugins.js       (if applicable)
+            js/plugins/TranslatorWordWrap.js  (if word wrap injected)
+            install.bat         (renames originals, moves translations in)
+            uninstall.bat       (restores originals)
             README.txt
 
         End users extract into the game folder and run install.bat.
@@ -431,24 +432,33 @@ class RPGMakerMVParser:
         if plugins_path:
             js_rel = os.path.relpath(
                 os.path.dirname(plugins_path), project_dir
-            ).replace("\\", "/")  # e.g. "js" or "www/js"
+            ).replace("\\", "/")
 
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            # Write translated data JSON files into _translation/data/
-            for filename, file_entries in by_file.items():
-                if filename == "plugins.js":
-                    continue
+            # Include ALL data files — apply translations where we have them
+            # Stored under _translation/ so extracting the zip doesn't
+            # immediately overwrite game files — install.bat handles the swap
+            data_file_count = 0
+            for filename in sorted(os.listdir(source_dir)):
                 source_path = os.path.join(source_dir, filename)
-                if not os.path.exists(source_path):
+                if not os.path.isfile(source_path):
                     continue
+                if not filename.lower().endswith(".json"):
+                    continue
+
                 with open(source_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                self._apply_translations_fast(data, file_entries)
+
+                file_entries = by_file.get(filename, [])
+                if file_entries:
+                    self._apply_translations_fast(data, file_entries)
+
                 arc_path = f"_translation/{data_rel}/{filename}"
                 zf.writestr(arc_path,
                             json.dumps(data, ensure_ascii=False, indent=2))
+                data_file_count += 1
 
-            # Write translated plugins.js into _translation/js/
+            # Write translated plugins.js
             plugin_entries = [
                 e for e in entries
                 if e.file == "plugins.js"
@@ -493,7 +503,6 @@ class RPGMakerMVParser:
                             except (json.JSONDecodeError, ValueError):
                                 continue
 
-                    # Inject word wrap plugin entry if requested
                     if inject_wordwrap:
                         if not any(p.get("name") == self.INJECTED_PLUGIN_NAME
                                    for p in plugins):
@@ -511,19 +520,17 @@ class RPGMakerMVParser:
                 except (json.JSONDecodeError, OSError):
                     pass
 
-            # Include word wrap JS plugin file in zip
+            # Include word wrap JS plugin file
             if inject_wordwrap and js_rel:
                 from .text_processor import WORDWRAP_PLUGIN_JS
                 arc = f"_translation/{js_rel}/plugins/{self.INJECTED_PLUGIN_NAME}.js"
                 zf.writestr(arc, WORDWRAP_PLUGIN_JS.strip() + "\n")
 
-            # Count files
-            data_files = [f for f in by_file if f != "plugins.js"]
             total_entries = sum(len(v) for v in by_file.values())
 
             # install.bat
             zf.writestr("install.bat", self._build_install_bat(
-                data_rel, js_rel, data_files, has_plugins, game_title,
+                data_rel, js_rel, data_file_count, has_plugins, game_title,
                 inject_wordwrap=inject_wordwrap))
 
             # uninstall.bat
@@ -535,7 +542,7 @@ class RPGMakerMVParser:
             readme = (
                 f"English Translation — {game_title or 'RPG Maker Game'}\n"
                 f"{'=' * 50}\n\n"
-                f"Files: {len(data_files)} data file(s)"
+                f"Files: {data_file_count} data file(s)"
                 f"{' + plugins.js' if has_plugins else ''}\n"
                 f"Entries: {total_entries} translated\n\n"
                 "HOW TO INSTALL:\n"
@@ -550,13 +557,13 @@ class RPGMakerMVParser:
 
     @staticmethod
     def _build_install_bat(data_rel: str, js_rel: str,
-                           data_files: list, has_plugins: bool,
+                           n_files: int, has_plugins: bool,
                            game_title: str,
                            inject_wordwrap: bool = False) -> str:
-        """Generate install.bat: back up originals, copy translations from _translation/."""
-        dr = data_rel.replace("/", "\\")           # e.g. "data" or "www\\data"
-        tr = f"_translation\\{dr}"                  # e.g. "_translation\\data"
-        n = len(data_files)
+        """Generate install.bat: rename originals aside, move translations in."""
+        dr = data_rel.replace("/", "\\")
+        dr_base = os.path.basename(data_rel)     # e.g. "data"
+        tr = f"_translation\\{dr}"                # e.g. "_translation\\data"
         lines = [
             "@echo off",
             "chcp 65001 >nul 2>&1",
@@ -565,12 +572,12 @@ class RPGMakerMVParser:
             "echo.",
             f"echo  {game_title or 'RPG Maker Game'} — English Translation",
             "echo.",
-            f"echo  This will install the English translation ({n} files).",
+            f"echo  This will install the English translation ({n_files} files).",
             "echo  Original files will be backed up automatically.",
             "echo.",
             "pause",
             "",
-            # Sanity check — trailing backslash for directory check
+            # Sanity checks
             f'if not exist "{dr}\\" (',
             f'    echo ERROR: "{dr}\\" folder not found.',
             "    echo Make sure you extracted this zip into the game folder",
@@ -589,18 +596,20 @@ class RPGMakerMVParser:
             "",
             "set FAIL=0",
             "",
-            # Step 1: Back up originals
+            # Step 1: Rename original data/ to data_original/
             f'echo [Step 1] Backing up original files...',
             f'if not exist "{dr}_original\\" (',
-            f'    xcopy "{dr}" "{dr}_original\\" /E /I /Q /Y >nul',
+            f'    ren "{dr}" "{dr_base}_original"',
             "    if errorlevel 1 (",
-            f'        echo   ERROR: Failed to create backup of {dr}\\',
+            f'        echo   ERROR: Failed to rename {dr}\\ to {dr}_original\\',
             "        set FAIL=1",
-            "    ) else (",
-            "        echo   Created backup: %s_original\\" % dr,
+            "        goto :done",
             "    )",
+            f'    echo   Renamed {dr}\\ to {dr}_original\\',
             ") else (",
-            f'    echo   Backup already exists ({dr}_original\\), skipping.',
+            f'    echo   Backup already exists ({dr}_original\\)',
+            f'    echo   Removing current {dr}\\ to replace with translation...',
+            f'    rmdir /S /Q "{dr}"',
             ")",
             "",
         ]
@@ -609,21 +618,21 @@ class RPGMakerMVParser:
             jr = js_rel.replace("/", "\\")
             lines += [
                 f'if exist "{jr}\\plugins.js" if not exist "{jr}\\plugins_original.js" (',
-                f'    copy "{jr}\\plugins.js" "{jr}\\plugins_original.js" >nul',
-                f"    echo   Backed up {jr}\\plugins.js",
+                f'    ren "{jr}\\plugins.js" "plugins_original.js"',
+                f"    echo   Renamed {jr}\\plugins.js to plugins_original.js",
                 ")",
                 "",
             ]
 
-        # Step 2: Copy translations
+        # Step 2: Move translated folder into place
         lines += [
             f'echo [Step 2] Installing translated files...',
-            f'xcopy "{tr}" "{dr}\\" /E /I /Y',
+            f'move "{tr}" "{dr}"',
             "if errorlevel 1 (",
-            f'    echo   ERROR: Failed to copy translated files to {dr}\\',
+            f'    echo   ERROR: Failed to move translated {dr}\\ into place',
             "    set FAIL=1",
             ") else (",
-            f"    echo   Copied {n} file(s) to {dr}\\",
+            f"    echo   Installed translated {dr}\\ ({n_files} files)",
             ")",
         ]
 
@@ -632,13 +641,8 @@ class RPGMakerMVParser:
             tjr = f"_translation\\{jr}"
             lines += [
                 f'if exist "{tjr}\\plugins.js" (',
-                f'    copy /Y "{tjr}\\plugins.js" "{jr}\\plugins.js"',
-                "    if errorlevel 1 (",
-                f"        echo   ERROR: Failed to copy plugins.js",
-                "        set FAIL=1",
-                "    ) else (",
-                f"        echo   Installed translated plugins.js",
-                "    )",
+                f'    copy /Y "{tjr}\\plugins.js" "{jr}\\plugins.js" >nul',
+                f"    echo   Installed translated plugins.js",
                 ")",
             ]
 
@@ -648,23 +652,25 @@ class RPGMakerMVParser:
             lines += [
                 f'if exist "{tjr}\\plugins\\TranslatorWordWrap.js" (',
                 f'    if not exist "{jr}\\plugins\\" mkdir "{jr}\\plugins"',
-                f'    copy /Y "{tjr}\\plugins\\TranslatorWordWrap.js" "{jr}\\plugins\\TranslatorWordWrap.js"',
+                f'    copy /Y "{tjr}\\plugins\\TranslatorWordWrap.js" "{jr}\\plugins\\TranslatorWordWrap.js" >nul',
                 f"    echo   Installed word wrap plugin",
                 ")",
             ]
 
+        # Cleanup _translation folder
         lines += [
             "",
+            'if exist "_translation\\" rmdir /S /Q "_translation"',
+            "",
+            ":done",
+            "echo.",
             "if %FAIL%==1 (",
-            "    echo.",
             "    echo  Installation FAILED — see errors above.",
-            "    echo.",
             ") else (",
-            "    echo.",
             "    echo  Installation complete!",
             "    echo  To restore Japanese originals, run uninstall.bat",
-            "    echo.",
             ")",
+            "echo.",
             "pause",
             "popd",
         ]
@@ -674,8 +680,9 @@ class RPGMakerMVParser:
     def _build_uninstall_bat(data_rel: str, js_rel: str,
                              has_plugins: bool, game_title: str,
                              inject_wordwrap: bool = False) -> str:
-        """Generate uninstall.bat: restore originals from backup."""
+        """Generate uninstall.bat: remove translated data, rename originals back."""
         dr = data_rel.replace("/", "\\")
+        dr_base = os.path.basename(data_rel)
         lines = [
             "@echo off",
             "chcp 65001 >nul 2>&1",
@@ -698,10 +705,14 @@ class RPGMakerMVParser:
             "",
             "set FAIL=0",
             "",
-            f'echo Restoring {dr}\\ from {dr}_original\\...',
-            f'xcopy "{dr}_original" "{dr}\\" /E /I /Y',
+            # Remove translated data/ and rename original back
+            f'echo Removing translated {dr}\\...',
+            f'if exist "{dr}\\" rmdir /S /Q "{dr}"',
+            "",
+            f'echo Restoring {dr}_original\\ to {dr}\\...',
+            f'ren "{dr}_original" "{dr_base}"',
             "if errorlevel 1 (",
-            f'    echo   ERROR: Failed to restore {dr}\\ from backup.',
+            f'    echo   ERROR: Failed to rename {dr}_original\\ back to {dr}\\',
             "    set FAIL=1",
             ") else (",
             "    echo   Data files restored.",
@@ -711,8 +722,10 @@ class RPGMakerMVParser:
         if has_plugins and js_rel:
             jr = js_rel.replace("/", "\\")
             lines += [
+                "",
                 f'if exist "{jr}\\plugins_original.js" (',
-                f'    copy /Y "{jr}\\plugins_original.js" "{jr}\\plugins.js"',
+                f'    if exist "{jr}\\plugins.js" del "{jr}\\plugins.js"',
+                f'    ren "{jr}\\plugins_original.js" "plugins.js"',
                 "    if errorlevel 1 (",
                 "        echo   ERROR: Failed to restore plugins.js",
                 "        set FAIL=1",
@@ -725,6 +738,7 @@ class RPGMakerMVParser:
         if inject_wordwrap and js_rel:
             jr = js_rel.replace("/", "\\")
             lines += [
+                "",
                 f'if exist "{jr}\\plugins\\TranslatorWordWrap.js" (',
                 f'    del "{jr}\\plugins\\TranslatorWordWrap.js"',
                 "    echo   Removed word wrap plugin.",
@@ -733,15 +747,13 @@ class RPGMakerMVParser:
 
         lines += [
             "",
+            "echo.",
             "if %FAIL%==1 (",
-            "    echo.",
             "    echo  Restore FAILED — see errors above.",
-            "    echo.",
             ") else (",
-            "    echo.",
             "    echo  Done! Original Japanese files restored.",
-            "    echo.",
             ")",
+            "echo.",
             "pause",
             "popd",
         ]

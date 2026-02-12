@@ -3306,11 +3306,11 @@ class MainWindow(QMainWindow):
                 self.project.project_path, self.project.entries,
                 path, game_title=game_title,
                 inject_wordwrap=self.plugin_analyzer.should_inject_plugin())
-            n_files = len(set(e.file for e in translated))
             QMessageBox.information(
-                self, "Patch Zip Created",
+                self, "Install Package Created",
                 f"Saved to:\n{path}\n\n"
-                f"{len(translated)} translated entries across {n_files} file(s).\n\n"
+                f"{len(translated)} translated entries.\n"
+                f"Includes complete data folder + install/uninstall scripts.\n\n"
                 f"End users: extract into the game folder and run install.bat."
             )
         except Exception as e:
