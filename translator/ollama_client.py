@@ -9,17 +9,13 @@ import time
 
 import requests
 
+from . import CONTROL_CODE_RE, JAPANESE_RE
+
 log = logging.getLogger(__name__)
 
 
-# Regex matching RPG Maker control codes that the LLM should never touch.
-# Order matters — longer patterns first to avoid partial matches.
-_CONTROL_CODE_RE = re.compile(
-    r'\\[A-Za-z]+\[\d*\]'      # \V[1], \N[2], \C[3], \FS[24], etc.
-    r'|\\[{}$.|!><^]'           # \{, \}, \$, \., \|, \!, \>, \<, \^
-    r'|<[^>]+>'                 # HTML-like tags: <br>, <WordWrap>, <B>, etc.
-    r'|%\d+'                    # %1, %2, etc. — RPG Maker format specifiers in battle/skill messages
-)
+# Backward-compat alias — main_window.py imports this name
+_CONTROL_CODE_RE = CONTROL_CODE_RE
 
 # Japanese bracket pairs → English equivalents
 _JP_BRACKETS = {
@@ -49,15 +45,8 @@ _NOTE_STRIP_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
-# Regex to detect Japanese characters remaining in translated output.
-# Matches hiragana, katakana, and CJK kanji.
-_JAPANESE_RE = re.compile(
-    r'[\u3040-\u309F'   # Hiragana
-    r'\u30A0-\u30FF'    # Katakana
-    r'\u4E00-\u9FFF'    # CJK Unified Ideographs (kanji)
-    r'\u3400-\u4DBF'    # CJK Extension A
-    r'\uFF65-\uFF9F]'   # Halfwidth Katakana
-)
+# Alias for local usage
+_JAPANESE_RE = JAPANESE_RE
 
 
 def _to_pig_latin(text: str) -> str:
@@ -611,6 +600,76 @@ class OllamaClient:
         search_text = text + "\n" + context
         return {jp: en for jp, en in self.glossary.items() if jp in search_text}
 
+    def _build_user_message(self, clean_text: str, raw_text: str,
+                            code_map: dict, context: str = "",
+                            field: str = "",
+                            correction: str = "",
+                            old_translation: str = "") -> str:
+        """Build the user prompt prefix shared by translate/variants.
+
+        Args:
+            clean_text: Text with control codes replaced by «CODEn» placeholders.
+            raw_text: Original untransformed text (for glossary matching).
+            code_map: Placeholder→control-code mapping from _extract_codes().
+            context: Surrounding dialogue for coherence.
+            field: Entry field type (e.g. "dialog", "name").
+            correction: Optional correction hint for retranslation.
+            old_translation: The previous bad translation to fix.
+
+        Returns:
+            Complete user message string ending with the text to translate.
+        """
+        parts: list[str] = []
+        if self.actor_context:
+            parts.append(self.actor_context)
+        if context:
+            parts.append(
+                f"Context (surrounding dialogue for reference, do NOT translate this):\n{context}"
+            )
+            speaker_hint = self._build_speaker_hint(context)
+            if speaker_hint:
+                parts.append(speaker_hint)
+        if correction and old_translation:
+            parts.append(
+                f"PREVIOUS TRANSLATION (WRONG — do NOT reuse):\n{old_translation}\n\n"
+                f"CORRECTION INSTRUCTIONS: {correction}"
+            )
+        if code_map:
+            parts.append(
+                "IMPORTANT: The text contains code markers like «CODE1», «CODE2», etc. "
+                "These are internal engine formatting tags — NOT names or variables. "
+                "You MUST output them exactly as-is. Do NOT replace them with character "
+                "names or any other text."
+            )
+            code_hints = self._build_code_hints(code_map)
+            if code_hints:
+                parts.append(code_hints)
+        if field:
+            if field.startswith("terms."):
+                parts.append("Content type: menu/system term")
+            else:
+                hint = self._FIELD_HINTS.get(field, field)
+                parts.append(f"Content type: {hint}")
+        # Glossary placed last (right before text) for maximum attention
+        filtered_glossary = self._filter_glossary(raw_text, context)
+        if filtered_glossary:
+            glossary_str = "\n".join(f"  {jp} → {en}" for jp, en in filtered_glossary.items())
+            parts.append(
+                f"REQUIRED glossary — use these EXACT translations:\n{glossary_str}"
+            )
+        parts.append(f"Translate this:\n{clean_text}")
+        return "\n\n".join(parts)
+
+    def _postprocess_result(self, result: str, code_map: dict) -> str:
+        """Strip thinking/notes, apply Pig Latin, restore control codes."""
+        result = self._strip_thinking(result)
+        result = self._strip_notes(result)
+        if self.target_language == "Pig Latin":
+            result = _to_pig_latin(result)
+        if code_map:
+            result = self._restore_codes(result, code_map)
+        return result
+
     # Human-readable labels for RPG Maker entry field types
     _FIELD_HINTS = {
         "dialog": "dialogue line",
@@ -654,46 +713,11 @@ class OllamaClient:
         clean_text, code_map = self._extract_codes(text)
         clean_text = self._convert_jp_brackets(clean_text)
 
-        user_msg = ""
-        if self.actor_context:
-            user_msg += f"{self.actor_context}\n\n"
-        if context:
-            user_msg += f"Context (surrounding dialogue for reference, do NOT translate this):\n{context}\n\n"
-            # Add speaker gender hint derived from context [Speaker: name]
-            speaker_hint = self._build_speaker_hint(context)
-            if speaker_hint:
-                user_msg += speaker_hint + "\n"
-        if correction and old_translation:
-            user_msg += (
-                f"PREVIOUS TRANSLATION (WRONG — do NOT reuse):\n{old_translation}\n\n"
-                f"CORRECTION INSTRUCTIONS: {correction}\n\n"
-            )
-        if code_map:
-            user_msg += (
-                "IMPORTANT: The text contains code markers like «CODE1», «CODE2», etc. "
-                "These are internal engine formatting tags — NOT names or variables. "
-                "You MUST output them exactly as-is. Do NOT replace them with character "
-                "names or any other text.\n\n"
-            )
-            # Add actor-to-code mapping so LLM knows which codes are character names
-            code_hints = self._build_code_hints(code_map)
-            if code_hints:
-                user_msg += code_hints + "\n\n"
-        if field:
-            # For terms fields like "terms.messages[0]", label as menu/system term
-            if field.startswith("terms."):
-                user_msg += "Content type: menu/system term\n"
-            else:
-                hint = self._FIELD_HINTS.get(field, field)
-                user_msg += f"Content type: {hint}\n"
-        # Glossary placed last (right before text) for maximum attention from smaller models
-        filtered_glossary = self._filter_glossary(text, context)
-        if filtered_glossary:
-            glossary_str = "\n".join(f"  {jp} → {en}" for jp, en in filtered_glossary.items())
-            user_msg += (
-                f"REQUIRED glossary — use these EXACT translations:\n{glossary_str}\n\n"
-            )
-        user_msg += f"Translate this:\n{clean_text}"
+        user_msg = self._build_user_message(
+            clean_text, text, code_map,
+            context=context, field=field,
+            correction=correction, old_translation=old_translation,
+        )
 
         # Build messages: system → history pairs → current request
         messages = [{"role": "system", "content": self.system_prompt}]
@@ -719,15 +743,14 @@ class OllamaClient:
                     "num_ctx": num_ctx,
                 },
             )
-            result = self._strip_thinking(data.get("message", {}).get("content", "").strip())
+            result = data.get("message", {}).get("content", "").strip()
 
             # Guard: treat empty LLM output as a failure so we don't
             # silently mark entries as "translated" with blank text.
-            if not result:
+            if not self._strip_thinking(result):
                 raise ConnectionError("Ollama returned empty translation")
 
-            # Strip translator notes/commentary the LLM may have appended
-            result = self._strip_notes(result)
+            result = self._postprocess_result(result, code_map)
 
             # Auto-retry if the translation still contains Japanese characters
             if self._contains_japanese(result):
@@ -756,21 +779,11 @@ class OllamaClient:
                             "num_ctx": num_ctx,
                         },
                     )
-                    retry_result = self._strip_thinking(data2.get("message", {}).get("content", "").strip())
+                    retry_result = data2.get("message", {}).get("content", "").strip()
                     if retry_result:
-                        retry_result = self._strip_notes(retry_result)
-                        result = retry_result
-                except requests.RequestException:
-                    pass  # Keep original result on retry failure
-
-            # Pig Latin post-processing (applied before code restoration
-            # so «CODEn» placeholders are trivially skipped)
-            if self.target_language == "Pig Latin":
-                result = _to_pig_latin(result)
-
-            # Post-process: restore control codes from placeholders
-            if code_map:
-                result = self._restore_codes(result, code_map)
+                        result = self._postprocess_result(retry_result, code_map)
+                except requests.RequestException as exc:
+                    log.debug("Japanese-retry failed, keeping original: %s", exc)
 
             return result
         except requests.RequestException as e:
@@ -1107,88 +1120,43 @@ class OllamaClient:
         except ConnectionError:
             pass
 
+        # Pre-process once for all creative variants
+        clean_text, code_map = self._extract_codes(text)
+        clean_text = self._convert_jp_brackets(clean_text)
+        user_msg = self._build_user_message(clean_text, text, code_map,
+                                            context=context, field=field)
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_msg},
+        ]
+
         # Additional variants: slight temperature for creative variation
         seeds = [123, 456, 789, 1001, 2025]
         for i in range(count - 1):
             if i >= len(seeds):
                 break
             try:
-                # Pre-process same as translate()
-                clean_text, code_map = self._extract_codes(text)
-                clean_text = self._convert_jp_brackets(clean_text)
-
-                user_msg = ""
-                if self.actor_context:
-                    user_msg += f"{self.actor_context}\n\n"
-                if context:
-                    user_msg += f"Context (surrounding dialogue, do NOT translate):\n{context}\n\n"
-                if code_map:
-                    user_msg += (
-                        "IMPORTANT: Code markers like «CODE1» are engine tags. "
-                        "Output them exactly as-is.\n\n"
-                    )
-                    code_hints = self._build_code_hints(code_map)
-                    if code_hints:
-                        user_msg += code_hints + "\n\n"
-                if field:
-                    hint = self._FIELD_HINTS.get(field, field)
-                    user_msg += f"Content type: {hint}\n"
-                # Glossary last for maximum attention from smaller models
-                filtered_glossary = self._filter_glossary(text, context)
-                if filtered_glossary:
-                    glossary_str = "\n".join(
-                        f"  {jp} → {en}" for jp, en in filtered_glossary.items()
-                    )
-                    user_msg += f"REQUIRED glossary — use these EXACT translations:\n{glossary_str}\n\n"
-                user_msg += f"Translate this:\n{clean_text}"
-
                 data = self._chat(
-                    messages=[
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    timeout=120,
-                    options={
-                        "temperature": 0.5,
-                        "seed": seeds[i],
-                        "num_predict": 1024,
-                        "num_ctx": 4096,
-                    },
+                    messages=messages, timeout=120,
+                    options={"temperature": 0.5, "seed": seeds[i],
+                             "num_predict": 1024, "num_ctx": 4096},
                 )
-                result = self._strip_thinking(data.get("message", {}).get("content", "").strip())
-                result = self._strip_notes(result)
-                if self.target_language == "Pig Latin":
-                    result = _to_pig_latin(result)
-                if code_map:
-                    result = self._restore_codes(result, code_map)
-                # Only add if it's actually different
+                result = self._postprocess_result(
+                    data.get("message", {}).get("content", "").strip(), code_map)
                 if result and result not in variants:
                     variants.append(result)
                 elif result:
                     # Duplicate — try again with higher temp
                     data2 = self._chat(
-                        messages=[
-                            {"role": "system", "content": self.system_prompt},
-                            {"role": "user", "content": user_msg},
-                        ],
-                        timeout=120,
-                        options={
-                            "temperature": 0.8,
-                            "seed": seeds[i] + 100,
-                            "num_predict": 1024,
-                            "num_ctx": 4096,
-                        },
+                        messages=messages, timeout=120,
+                        options={"temperature": 0.8, "seed": seeds[i] + 100,
+                                 "num_predict": 1024, "num_ctx": 4096},
                     )
-                    result2 = self._strip_thinking(data2.get("message", {}).get("content", "").strip())
-                    result2 = self._strip_notes(result2)
-                    if self.target_language == "Pig Latin":
-                        result2 = _to_pig_latin(result2)
-                    if code_map:
-                        result2 = self._restore_codes(result2, code_map)
+                    result2 = self._postprocess_result(
+                        data2.get("message", {}).get("content", "").strip(), code_map)
                     if result2 and result2 not in variants:
                         variants.append(result2)
-                    # Skip duplicates — caller handles single-variant case
-            except requests.RequestException:
-                pass
+            except requests.RequestException as exc:
+                log.debug("Variant %d/%d failed: %s", len(variants) + 1, 3, exc)
 
         return variants

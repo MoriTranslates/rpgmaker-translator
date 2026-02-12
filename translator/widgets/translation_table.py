@@ -17,22 +17,10 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QColor, QAction, QTextCursor, QShortcut, QKeySequence
 
 from ..project_model import TranslationEntry
+from .. import CONTROL_CODE_RE, JAPANESE_RE
 
-# Same regex as ollama_client — matches RPG Maker control codes
-_CODE_RE = re.compile(
-    r'\\[A-Za-z]+\[\d*\]'
-    r'|\\[{}$.|!><^]'
-    r'|<[^>]+>'
-)
-
-# Japanese characters — hiragana, katakana, CJK kanji (for QA filter)
-_JAPANESE_RE = re.compile(
-    r'[\u3040-\u309F'   # Hiragana
-    r'\u30A0-\u30FF'    # Katakana
-    r'\u4E00-\u9FFF'    # CJK Unified Ideographs
-    r'\u3400-\u4DBF'    # CJK Extension A
-    r'\uFF65-\uFF9F]'   # Halfwidth Katakana
-)
+_CODE_RE = CONTROL_CODE_RE  # local alias
+_JAPANESE_RE = JAPANESE_RE
 
 
 # Status colors — light mode

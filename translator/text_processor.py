@@ -111,13 +111,8 @@ MESSAGE_PLUGINS = {
     },
 }
 
-# RPG Maker control codes that don't take up visual space
-CONTROL_CODE_REGEX = re.compile(
-    r'\\[VNPGCIvnpgci]\[\d+\]'  # \V[1], \N[2], \C[3], etc.
-    r'|\\[{}$.|!><^]'             # \{, \}, \$, \., \|, \!, \>, \<, \^
-    r'|\\[A-Za-z]+\[\d*\]'        # Generic \XX[n] patterns
-    r'|<[^>]+>'                    # HTML-like tags <br>, <WordWrap>, etc.
-)
+from . import CONTROL_CODE_RE
+CONTROL_CODE_REGEX = CONTROL_CODE_RE  # local alias for backward compat
 
 
 class PluginAnalyzer:
