@@ -1617,9 +1617,16 @@ class MainWindow(QMainWindow):
 
         try:
             self.parser.save_project(self.project.project_path, self.project.entries)
-            # Inject word wrap plugin if user requested it
+            # Inject word wrap plugin if requested or if <WordWrap> tags are present
             plugin_msg = ""
-            if self.plugin_analyzer.should_inject_plugin():
+            needs_inject = self.plugin_analyzer.should_inject_plugin()
+            if not needs_inject and not self.plugin_analyzer.has_wordwrap_plugin:
+                # Auto-detect: check if any translation has <WordWrap> tags
+                needs_inject = any(
+                    e.translation and "<WordWrap>" in e.translation
+                    for e in translated
+                )
+            if needs_inject:
                 self.parser.inject_wordwrap_plugin(self.project.project_path)
                 plugin_msg = "\nWord wrap plugin (TranslatorWordWrap.js) injected."
             QMessageBox.information(

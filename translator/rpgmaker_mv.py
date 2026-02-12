@@ -1720,14 +1720,11 @@ class RPGMakerMVParser:
         with open(js_path, "w", encoding="utf-8") as f:
             f.write(WORDWRAP_PLUGIN_JS.strip() + "\n")
 
-        # Add entry to $plugins array (read from backup if available)
-        backup_path = os.path.join(
-            js_dir,
-            os.path.basename(plugins_path).replace("plugins.", "plugins_original."),
-        )
-        source = backup_path if os.path.exists(backup_path) else plugins_path
+        # Read from the LIVE plugins.js (not backup) because
+        # save_project may have already written translated plugin
+        # params to it — reading from backup would overwrite those.
         try:
-            plugins = self._load_plugins_js(source)
+            plugins = self._load_plugins_js(plugins_path)
         except (json.JSONDecodeError, OSError):
             return
 
