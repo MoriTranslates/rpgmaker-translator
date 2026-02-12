@@ -270,6 +270,7 @@ class TextProcessor:
 
     def __init__(self, analyzer: PluginAnalyzer):
         self.analyzer = analyzer
+        self.overflow_entries: list[tuple[str, str]] = []  # (id, file) of overflows
 
     def process_entry(self, original: str, translation: str,
                       *, use_tag: bool = True) -> str:
@@ -288,18 +289,13 @@ class TextProcessor:
             return translation
 
         # Count original lines to know how many text boxes we have
-        orig_lines = original.split("\n")
-        orig_line_count = len(orig_lines)
+        orig_line_count = len(original.split("\n"))
 
-        # If the game has a word wrap plugin (or we'll inject one),
-        # let it handle wrapping — just add the tag (dialogue only)
-        if use_tag:
-            use_plugin = ((self.analyzer.has_wordwrap_plugin or self.analyzer.inject_wordwrap)
-                          and self.analyzer.wordwrap_tag)
-            if use_plugin:
-                return self._apply_plugin_wordwrap(translation, orig_line_count)
+        # If the game has a word wrap plugin, let it handle wrapping
+        if use_tag and self.analyzer.has_wordwrap_plugin and self.analyzer.wordwrap_tag:
+            return self._apply_plugin_wordwrap(translation, orig_line_count)
 
-        # No word wrap plugin or non-dialogue field — manually break lines
+        # Otherwise — manually redistribute text across lines
         return self._apply_manual_wordwrap(translation, orig_line_count)
 
     def _apply_plugin_wordwrap(self, text: str, orig_line_count: int) -> str:
@@ -310,9 +306,7 @@ class TextProcessor:
         lines = text.split("\n")
 
         # Ensure we don't exceed the original line count
-        # (each line = one 401 command = one line in the text box)
         if len(lines) > orig_line_count:
-            # Merge excess lines: keep first N-1 lines, join remainder into last slot
             result = lines[:orig_line_count - 1]
             result.append(" ".join(lines[orig_line_count - 1:]))
             lines = result
@@ -324,64 +318,68 @@ class TextProcessor:
         return "\n".join(lines)
 
     def _apply_manual_wordwrap(self, text: str, orig_line_count: int) -> str:
-        """For games WITHOUT word wrap plugins: manually insert line breaks."""
+        """Redistribute text across orig_line_count lines to maximize fill.
+
+        Joins all text, re-wraps to chars_per_line, then fits into the
+        available line slots.  Sets self._last_overflow if text can't fit.
+        """
         max_chars = self.analyzer.chars_per_line
+        self._last_overflow = False
 
-        # Split by newlines (each = one 401 command)
-        input_lines = text.split("\n")
+        # Strip any leftover <WordWrap> tags
+        text = re.sub(r'<[Ww]ord[Ww]rap>', '', text)
 
-        result_lines = []
-        for line in input_lines:
-            wrapped = self._wrap_line(line, max_chars)
-            result_lines.append(wrapped)
+        # Join all lines into one blob, then re-wrap properly
+        all_text = " ".join(
+            seg.strip() for seg in text.split("\n") if seg.strip()
+        )
+        if not all_text:
+            return "\n".join([""] * orig_line_count)
 
-        # Ensure we match the original line count
-        # (each \n maps to a separate 401 event command)
-        while len(result_lines) < orig_line_count:
-            result_lines.append("")
-        if len(result_lines) > orig_line_count:
-            # Merge excess into last line
-            merged = result_lines[:orig_line_count - 1]
-            merged.append(" ".join(result_lines[orig_line_count - 1:]))
-            result_lines = merged
+        # Word-wrap into a flat list of lines
+        wrapped = self._wrap_to_lines(all_text, max_chars)
 
-        return "\n".join(result_lines)
+        # Check overflow — text needs more lines than the original provides
+        if len(wrapped) > orig_line_count:
+            self._last_overflow = True
+            # Force-fit: keep first N-1 lines, merge the rest into last slot
+            fitted = wrapped[:orig_line_count - 1]
+            fitted.append(" ".join(wrapped[orig_line_count - 1:]))
+            wrapped = fitted
 
-    def _wrap_line(self, text: str, max_chars: int) -> str:
-        """Word-wrap a single line to fit within max_chars.
+        # Pad with empty lines if fewer lines than original
+        while len(wrapped) < orig_line_count:
+            wrapped.append("")
+
+        return "\n".join(wrapped)
+
+    def _wrap_to_lines(self, text: str, max_chars: int) -> list[str]:
+        """Word-wrap text into a flat list of lines, each <= max_chars.
 
         Respects control codes (which don't take visual space).
         """
         if not text:
-            return text
+            return [""]
 
-        # Calculate visual length (excluding control codes)
-        visual_len = self._visual_length(text)
-        if visual_len <= max_chars:
-            return text
-
-        # Need to wrap — split into words and rebuild
         words = text.split(" ")
-        lines = []
-        current_line = ""
+        lines: list[str] = []
+        current = ""
 
         for word in words:
-            test_line = f"{current_line} {word}".strip() if current_line else word
-            if self._visual_length(test_line) <= max_chars:
-                current_line = test_line
+            if not word:
+                continue
+            test = f"{current} {word}" if current else word
+            if self._visual_length(test) <= max_chars:
+                current = test
             else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
+                if current:
+                    lines.append(current)
+                current = word
 
-        if current_line:
-            lines.append(current_line)
+        if current:
+            lines.append(current)
 
-        # Join with \n but this creates sub-lines within a single 401 command
-        # RPG Maker doesn't support that, so use a single line with careful breaks
-        # Actually for manual wrap: just return the first line that fits
-        # and hope the text box scrolls or the user manually adjusts
-        return "\n".join(lines)
+        return lines if lines else [""]
 
     def _visual_length(self, text: str) -> int:
         """Calculate the visual character count, ignoring control codes."""
@@ -394,7 +392,13 @@ class TextProcessor:
     _WORDWRAP_FIELDS = {"dialog", "scroll_text"}
 
     def process_all(self, entries: list) -> int:
-        """Process all translated entries. Returns count of modified entries."""
+        """Process all translated entries. Returns count of modified entries.
+
+        After calling, check self.overflow_entries for entries that couldn't
+        fit within their original line count.
+        """
+        self.overflow_entries = []
+        self._last_overflow = False
         count = 0
         for entry in entries:
             if entry.status not in ("translated", "reviewed"):
@@ -402,11 +406,13 @@ class TextProcessor:
             if not entry.translation:
                 continue
 
-            # Only add <WordWrap> tag to dialogue fields; manual wrap for all
             use_tag = entry.field in self._WORDWRAP_FIELDS
+            self._last_overflow = False
             processed = self.process_entry(
                 entry.original, entry.translation, use_tag=use_tag)
             if processed != entry.translation:
                 entry.translation = processed
                 count += 1
+            if self._last_overflow:
+                self.overflow_entries.append((entry.id, entry.file))
         return count

@@ -2419,46 +2419,40 @@ class MainWindow(QMainWindow):
     # ── Word Wrap ──────────────────────────────────────────────────
 
     def _apply_wordwrap(self):
-        """Apply word wrapping to all translated entries based on plugin analysis."""
+        """Apply word wrapping to all translated entries."""
         if not self.project.entries:
             return
 
+        cpl = self.plugin_analyzer.chars_per_line
         summary = self.plugin_analyzer.get_summary()
 
-        # If no word wrap plugin, offer to inject one
-        if not self.plugin_analyzer.has_wordwrap_plugin:
-            reply = QMessageBox.question(
-                self, "Apply Word Wrap",
-                f"Detected settings:\n\n{summary}\n\n"
-                "No word wrap plugin detected.\n"
-                "Inject a word wrap plugin so the game handles wrapping at runtime?\n\n"
-                "Yes = inject plugin + use <WordWrap> tags (recommended)\n"
-                "No = manual line breaks (approximate, may break mid-word)",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self.plugin_analyzer.inject_wordwrap = True
-                self.plugin_analyzer.wordwrap_tag = "<WordWrap>"
-            # Either way, proceed to apply wrapping
-        else:
-            reply = QMessageBox.question(
-                self, "Apply Word Wrap",
-                f"Detected settings:\n\n{summary}\n\n"
-                f"Apply word wrapping to all translated entries?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+        reply = QMessageBox.question(
+            self, "Apply Word Wrap",
+            f"Detected settings:\n\n{summary}\n\n"
+            f"Redistribute text across lines (~{cpl} chars/line)?\n"
+            "Entries that overflow their text box will be flagged.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Disable plugin injection — manual breaks only
+        self.plugin_analyzer.inject_wordwrap = False
 
         count = self.text_processor.process_all(self.project.entries)
         self.trans_table.refresh()
 
-        msg = f"Modified {count} entries."
-        if self.plugin_analyzer.inject_wordwrap:
-            msg += ("\n\n<WordWrap> tags added. The word wrap plugin will be "
-                    "injected when you Export to Game.")
-        else:
-            msg += f"\nWrapped to ~{self.plugin_analyzer.chars_per_line} chars/line."
+        overflows = self.text_processor.overflow_entries
+        msg = f"Modified {count} entries.\nWrapped to ~{cpl} chars/line."
+        if overflows:
+            msg += f"\n\n{len(overflows)} entries overflow their text box"
+            msg += " and may need manual shortening."
+            # Show first few overflow files
+            files = sorted(set(f for _, f in overflows))
+            if len(files) <= 10:
+                msg += "\n\nAffected files:\n" + "\n".join(f"  {f}" for f in files)
+            else:
+                msg += f"\n\nAcross {len(files)} files."
         QMessageBox.information(self, "Word Wrap Applied", msg)
 
     def _strip_wordwrap_tags(self):
