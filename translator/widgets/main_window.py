@@ -148,6 +148,15 @@ class MainWindow(QMainWindow):
         "Enemies.json": ("name",),
         "States.json": ("name",),
     }
+    # Map displayNames are keyed by Map###.json — matched dynamically
+    _AUTO_GLOSSARY_MAP_FIELD = "displayName"
+    # Fields where each word should be capitalized (names, titles, places)
+    _CAPITALIZE_FIELDS = {"name", "nickname", "displayName"}
+    # Words to leave lowercase in title case (prepositions, articles, conjunctions)
+    _TITLE_SMALL_WORDS = {
+        "a", "an", "the", "of", "in", "on", "at", "to", "for", "and",
+        "or", "but", "nor", "by", "with", "from", "as", "is", "vs",
+    }
 
     # Settings file lives next to main.py
     _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "_settings.json")
@@ -335,6 +344,15 @@ class MainWindow(QMainWindow):
         self.apply_glossary_action.triggered.connect(self._apply_glossary)
         self.apply_glossary_action.setEnabled(False)
         translate_menu.addAction(self.apply_glossary_action)
+
+        self.consistency_action = QAction("Consistency Pass", self)
+        self.consistency_action.setShortcut("Ctrl+Shift+C")
+        self.consistency_action.setToolTip(
+            "Fix name spelling variants, capitalization, and term inconsistencies"
+        )
+        self.consistency_action.triggered.connect(self._consistency_pass)
+        self.consistency_action.setEnabled(False)
+        translate_menu.addAction(self.consistency_action)
 
         translate_menu.addSeparator()
 
@@ -765,10 +783,31 @@ class MainWindow(QMainWindow):
         for entry in self.project.entries:
             self._maybe_add_to_glossary(entry)
 
+    def _title_case(self, text: str) -> str:
+        """Title-case text, keeping prepositions/articles lowercase.
+
+        First word is always capitalized.  Uses _TITLE_SMALL_WORDS set.
+        """
+        words = text.split(" ")
+        result = []
+        for i, w in enumerate(words):
+            if not w:
+                result.append(w)
+            elif i == 0 or w.lower() not in self._TITLE_SMALL_WORDS:
+                result.append(w[0].upper() + w[1:])
+            else:
+                result.append(w.lower())
+        return " ".join(result)
+
     def _maybe_add_to_glossary(self, entry):
         """Auto-add translated DB name fields to glossary for LLM consistency."""
         fields = self._AUTO_GLOSSARY_FIELDS.get(entry.file)
-        if not fields or entry.field not in fields:
+        is_map_name = (
+            entry.file.startswith("Map")
+            and entry.file.endswith(".json")
+            and entry.field == self._AUTO_GLOSSARY_MAP_FIELD
+        )
+        if not is_map_name and (not fields or entry.field not in fields):
             return
         jp = entry.original
         en = entry.translation
@@ -996,6 +1035,7 @@ class MainWindow(QMainWindow):
         self.fix_codes_action.setEnabled(True)
         self.polish_action.setEnabled(True)
         self.apply_glossary_action.setEnabled(True)
+        self.consistency_action.setEnabled(True)
         self.find_replace_action.setEnabled(True)
         self.translate_images_action.setEnabled(True)
 
@@ -1224,6 +1264,66 @@ class MainWindow(QMainWindow):
         if codes_fixed:
             msg += f" ({codes_fixed} control codes restored)"
         self.statusbar.showMessage(msg, 8000)
+        # After DB batch, warn about name collisions (different JP → same EN)
+        mode = getattr(self, "_current_batch_mode", "all")
+        if mode in ("db", "all"):
+            self._warn_name_collisions()
+
+    def _warn_name_collisions(self):
+        """Detect different JP names that translated to the same EN text.
+
+        Shows a warning dialog listing collisions so the user can fix them
+        before proceeding to dialogue translation.
+        """
+        # Build reverse map: EN translation → list of (JP original, file, field)
+        en_to_sources: dict[str, list[tuple[str, str, str]]] = {}
+        for entry in self.project.entries:
+            if entry.status not in ("translated", "reviewed"):
+                continue
+            fields = self._AUTO_GLOSSARY_FIELDS.get(entry.file)
+            is_name = (fields and entry.field in fields) or (
+                entry.file.startswith("Map") and entry.field == self._AUTO_GLOSSARY_MAP_FIELD
+            )
+            if not is_name or not entry.translation:
+                continue
+            en = entry.translation.strip()
+            if not en:
+                continue
+            en_to_sources.setdefault(en, []).append(
+                (entry.original, entry.file, entry.field)
+            )
+
+        # Find collisions: same EN text from different JP originals
+        collisions = []
+        for en, sources in en_to_sources.items():
+            unique_jp = set(src[0] for src in sources)
+            if len(unique_jp) > 1:
+                collisions.append((en, sources))
+
+        if not collisions:
+            return
+
+        # Build readable message (limit to first 15 to avoid huge dialog)
+        lines = []
+        for en, sources in sorted(collisions)[:15]:
+            unique_sources = {}
+            for jp, file, field in sources:
+                unique_sources.setdefault(jp, []).append(f"{file}:{field}")
+            detail_parts = [f'  "{jp}" ({", ".join(locs)})' for jp, locs in unique_sources.items()]
+            lines.append(f'"{en}" ← different JP sources:\n' + "\n".join(detail_parts))
+
+        extra = ""
+        if len(collisions) > 15:
+            extra = f"\n... and {len(collisions) - 15} more collision(s)"
+
+        QMessageBox.warning(
+            self, "Name Collisions Detected",
+            f"Found {len(collisions)} name collision(s) — different Japanese "
+            f"terms translated to the same English text.\n\n"
+            f"Review these in the table and retranslate or edit as needed "
+            f"before running Batch Dialogue.\n\n"
+            + "\n\n".join(lines) + extra,
+        )
 
     def _on_checkpoint(self):
         """Auto-save during batch translation (every 25 entries)."""
@@ -1928,6 +2028,198 @@ class MainWindow(QMainWindow):
             f"({len(term_counts)} terms). Click a file or clear search to reset.", 10000
         )
 
+    # ── Consistency Pass ──────────────────────────────────────────
+
+    def _consistency_pass(self):
+        """Fix name variants, capitalization, and term inconsistencies."""
+        if not self.project.entries:
+            return
+
+        translated = sum(
+            1 for e in self.project.entries
+            if e.status in ("translated", "reviewed") and e.translation
+        )
+        if translated == 0:
+            QMessageBox.information(
+                self, "Consistency Pass", "No translated entries to check."
+            )
+            return
+
+        reply = QMessageBox.question(
+            self, "Consistency Pass",
+            f"Run consistency checks on {translated} translated entries?\n\n"
+            "This will fix:\n"
+            "  1. Name capitalization (knight \u2192 Knight)\n"
+            "  2. Duplicate-original standardization (most common wins)\n"
+            "  3. Glossary name variant spelling\n\n"
+            "Reviewed entries keep capitalization and variant fixes\n"
+            "but are excluded from duplicate standardization.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        caps, dupes, variants = self._run_consistency_fixes()
+        total = caps + dupes + variants
+
+        self.trans_table.refresh()
+        self.file_tree.refresh_stats(self.project)
+
+        if total == 0:
+            QMessageBox.information(
+                self, "Consistency Pass",
+                "No inconsistencies found \u2014 all entries look consistent."
+            )
+        else:
+            lines = []
+            if caps:
+                lines.append(f"  Capitalization fixed: {caps} entries")
+            if dupes:
+                lines.append(f"  Duplicates standardized: {dupes} entries")
+            if variants:
+                lines.append(f"  Name variants replaced: {variants} entries")
+            QMessageBox.information(
+                self, "Consistency Pass Complete",
+                f"Fixed {total} entries:\n\n" + "\n".join(lines)
+            )
+            self._autosave()
+
+    def _run_consistency_fixes(self) -> tuple:
+        """Pure-Python consistency fixes across all translated entries.
+
+        Phase 1: Capitalize name/displayName fields (skip prepositions).
+        Phase 2: Standardize entries with identical originals to most-common
+                 translation (skip reviewed entries).
+        Phase 3: Fix name spelling variants using DB name entries as canonical
+                 source (fuzzy-match, safe against substring collisions).
+
+        Returns (caps_fixed, dupes_fixed, variants_fixed).
+        """
+        from collections import Counter, defaultdict
+        from difflib import SequenceMatcher
+
+        entries = self.project.entries
+        caps_fixed = 0
+        dupes_fixed = 0
+        variants_fixed = 0
+
+        # ── Phase 1: Capitalize name fields ──
+        for entry in entries:
+            if entry.status not in ("translated", "reviewed"):
+                continue
+            if not entry.translation or entry.field not in self._CAPITALIZE_FIELDS:
+                continue
+            capped = self._title_case(entry.translation)
+            if capped != entry.translation:
+                entry.translation = capped
+                caps_fixed += 1
+
+        # ── Phase 2: Same-original standardization ──
+        # Group by original text (only "translated" entries — skip "reviewed")
+        groups: dict[str, list] = defaultdict(list)
+        for entry in entries:
+            if entry.status == "translated" and entry.translation:
+                groups[entry.original].append(entry)
+
+        for _original, group in groups.items():
+            if len(group) < 2:
+                continue
+            translations = Counter(e.translation for e in group)
+            if len(translations) < 2:
+                continue
+            canonical = translations.most_common(1)[0][0]
+            for entry in group:
+                if entry.translation != canonical:
+                    entry.translation = canonical
+                    dupes_fixed += 1
+
+        # ── Phase 3: Name variant replacement ──
+        # Build canonical names from proper-noun entries only:
+        # actor names/nicknames and map displayNames.
+        # NOT classes, items, enemies, etc. — those are common nouns that
+        # would cause false positives ("Warrior" replacing "warrior" in dialogue).
+        _PROPER_NOUN_FIELDS = {
+            "Actors.json": ("name", "nickname"),
+        }
+        name_map: dict[str, str] = {}  # JP name → EN canonical
+        for entry in entries:
+            if entry.status not in ("translated", "reviewed"):
+                continue
+            if not entry.translation:
+                continue
+            fields = _PROPER_NOUN_FIELDS.get(entry.file)
+            is_proper = (fields and entry.field in fields) or (
+                entry.file.startswith("Map")
+                and entry.field == self._AUTO_GLOSSARY_MAP_FIELD
+            )
+            if is_proper:
+                name_map[entry.original] = entry.translation
+
+        if not name_map:
+            return caps_fixed, dupes_fixed, variants_fixed
+
+        # Build set of all canonical EN names (to avoid replacing one
+        # canonical name with another — e.g. "Lilian" is NOT a variant
+        # of "Lian" even though they're similar)
+        canonical_en = set(name_map.values())
+
+        # Sort longest JP first to prevent substring collisions
+        # (リリアン before リアン)
+        sorted_names = sorted(name_map.items(), key=lambda x: -len(x[0]))
+
+        for entry in entries:
+            if entry.status not in ("translated", "reviewed"):
+                continue
+            if not entry.translation:
+                continue
+
+            modified = entry.translation
+            for jp_name, en_canonical in sorted_names:
+                if jp_name not in entry.original:
+                    continue
+                if en_canonical in modified:
+                    continue  # Already correct
+
+                # Tokenize and fuzzy-match each word
+                words = modified.split()
+                new_words = []
+                replaced = False
+                for word in words:
+                    # Strip trailing punctuation for comparison
+                    stripped = word.rstrip(".,!?;:'\")-]}")
+                    suffix = word[len(stripped):]
+
+                    # Skip if this word is itself a canonical name
+                    if stripped in canonical_en:
+                        new_words.append(word)
+                        continue
+
+                    # Only match proper-noun-like words (capitalized)
+                    if (
+                        stripped
+                        and stripped[0].isupper()
+                        and len(stripped) >= 3
+                        and abs(len(stripped) - len(en_canonical)) <= 2
+                        and stripped != en_canonical
+                        and SequenceMatcher(
+                            None, stripped.lower(), en_canonical.lower()
+                        ).ratio() > 0.75
+                    ):
+                        new_words.append(en_canonical + suffix)
+                        replaced = True
+                    else:
+                        new_words.append(word)
+
+                if replaced:
+                    modified = " ".join(new_words)
+
+            if modified != entry.translation:
+                entry.translation = modified
+                variants_fixed += 1
+
+        return caps_fixed, dupes_fixed, variants_fixed
+
     # ── Export TXT ─────────────────────────────────────────────────
 
     def _export_txt(self):
@@ -2217,6 +2509,9 @@ class MainWindow(QMainWindow):
                     f"Re-translated: was \"{old[:40]}...\" -> now \"{translation[:40]}...\"",
                     5000,
                 )
+            # Title-case name-type fields (e.g. "iron sword" → "Iron Sword")
+            if entry.field in self._CAPITALIZE_FIELDS and translation:
+                translation = self._title_case(translation)
             entry.translation = translation
             entry.status = "translated"
             # Auto-glossary: add translated DB names so the LLM
