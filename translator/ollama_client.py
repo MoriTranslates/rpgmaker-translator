@@ -426,8 +426,8 @@ class OllamaClient:
                 if any(kw in m.lower() for kw in _VISION_KEYWORDS)]
 
     def translate_name(self, text: str, hint: str = "") -> str:
-        """Translate a short string (name, title, profile) without the full
-        placeholder/glossary pipeline.  Returns original on failure.
+        """Translate a short string (name, title, profile) with glossary
+        support.  Returns original on failure.
 
         Args:
             text: The Japanese text to translate.
@@ -435,9 +435,15 @@ class OllamaClient:
         """
         if not text or not text.strip():
             return text
-        user_msg = f"Translate this:\n{text}"
+        parts: list[str] = []
         if hint:
-            user_msg = f"Context: this is a {hint} from an RPG game.\nTranslate this:\n{text}"
+            parts.append(f"Context: this is a {hint} from an RPG game.")
+        filtered_glossary = self._filter_glossary(text)
+        if filtered_glossary:
+            glossary_str = "\n".join(f"  {jp} → {en}" for jp, en in filtered_glossary.items())
+            parts.append(f"REQUIRED glossary — use these EXACT translations:\n{glossary_str}")
+        parts.append(f"Translate this:\n{text}")
+        user_msg = "\n\n".join(parts)
         try:
             data = self._chat(
                 messages=[

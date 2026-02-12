@@ -70,6 +70,18 @@ ACTS = {
     "変態": "pervert",
     "エッチ": "lewd",
     "おかず": "fap material",
+    "オナニー": "masturbation",
+    "ザーメン": "cum",
+    "勃起": "erection",
+    "膣内": "vaginal",
+    "挿入": "penetration",
+    "精液": "semen",
+    "性感帯": "erogenous zone",
+    "我慢汁": "precum",
+    "口内射精": "oral creampie",
+    "手マン": "fingering",
+    "前戯": "foreplay",
+    "ロリコン": "lolicon",
 }
 
 # ── RPG / game terms ────────────────────────────────────────────
@@ -131,6 +143,26 @@ RPG = {
     "ロード": "load",
     "ゲームオーバー": "Game Over",
     "全滅": "annihilation",
+    # Menu / UI
+    "並び替え": "Sort",
+    "最強装備": "Optimal Equipment",
+    "大事なもの": "Key Items",
+    "ゲーム終了": "Quit Game",
+    "コンティニュー": "Continue",
+    "ニューゲーム": "New Game",
+    "購入する": "Buy",
+    "売却する": "Sell",
+    "全て外す": "Unequip All",
+    "キャンセル": "Cancel",
+    "オプション": "Options",
+    "タイトルへ": "To Title",
+    "ステータス": "Status",
+    "やっぱりやめる": "Never mind",
+    # Locations
+    "避暑地": "summer resort",
+    "別荘": "villa",
+    "雑木林": "thicket",
+    "川辺": "riverbank",
 }
 
 # ── Combat / battle ──────────────────────────────────────────────
@@ -206,6 +238,11 @@ COMBAT = {
     "聖": "Holy",
     "無": "None",
     "物理": "Physical",
+    # Additional
+    "状態異常": "Status Ailment",
+    "ターン終了": "End Turn",
+    "不死身": "Immortal",
+    "激昂": "Enraged",
 }
 
 # ── Stats / parameters ───────────────────────────────────────────
@@ -268,6 +305,10 @@ EQUIPMENT = {
     "鉱石": "Ore",
     "素材": "Material",
     "レシピ": "Recipe",
+    "防具": "Armor",
+    "帽子": "Hat",
+    "服": "Clothes",
+    "指輪": "Ring",
 }
 
 # ── Eroge status / corruption ──────────────────────────────────
@@ -347,6 +388,7 @@ RACES = {
     "シスター": "sister",
     "メイド": "maid",
     "くノ一": "kunoichi",
+    "魔術師": "sorcerer",
 }
 
 # ── Clothing / attire ──────────────────────────────────────────
@@ -480,6 +522,10 @@ SPEAKERS = {
     "受付嬢": "Receptionist",
     "魔法少女": "Magical Girl",
     "ナレーション": "Narration",
+    "令嬢": "Young Lady",
+    "小悪魔": "Little Devil",
+    "付き人": "Attendant",
+    "村人たち": "Villagers",
 }
 
 # ── Common expressions ──────────────────────────────────────────
@@ -513,6 +559,25 @@ EXPRESSIONS = {
     "ガキ": "brat",
 }
 
+# ── Onomatopoeia / SFX ───────────────────────────────────────────
+ONOMATOPOEIA = {
+    "ぬるぬる": "slippery",
+    "ぷにぷに": "soft and squishy",
+    "シコシコ": "stroking",
+    "ビンビン": "rock hard",
+    "ドピュ": "spurt",
+    "ビクビク": "twitching",
+    "パンパン": "slapping",
+    "ぐちゅぐちゅ": "squelching",
+    "ズボズボ": "thrusting",
+    "つるつる": "smooth",
+    "ドクドク": "throbbing",
+    "ヌルヌル": "slippery",
+    "ピクピク": "twitching",
+    "ズブズブ": "plunging",
+    "ジュボジュボ": "slurping",
+}
+
 # ── All categories with labels ──────────────────────────────────
 CATEGORIES = {
     "Body / Anatomy": BODY,
@@ -527,6 +592,7 @@ CATEGORIES = {
     "Equipment / Items": EQUIPMENT,
     "Speaker Tags": SPEAKERS,
     "Common Expressions": EXPRESSIONS,
+    "Onomatopoeia / SFX": ONOMATOPOEIA,
 }
 
 
