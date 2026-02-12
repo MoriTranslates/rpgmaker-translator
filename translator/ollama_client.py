@@ -15,9 +15,11 @@ log = logging.getLogger(__name__)
 
 
 # Japanese bracket pairs → English equivalents
+# 「」『』 are speech/quote markers — strip them entirely since RPG Maker
+# dialogue is already in a text box (adding "" looks redundant).
 _JP_BRACKETS = {
-    '\u300c': '"', '\u300d': '"',   # 「 」 → " "
-    '\u300e': '"', '\u300f': '"',   # 『 』 → " "
+    '\u300c': '', '\u300d': '',     # 「 」 → stripped (speech markers)
+    '\u300e': '', '\u300f': '',     # 『 』 → stripped (emphasis quotes)
     '\u3010': '[', '\u3011': ']',   # 【 】 → [ ]
     '\uff08': '(', '\uff09': ')',   # （ ） → ( )
 }
@@ -661,6 +663,9 @@ class OllamaClient:
         parts.append(f"Translate this:\n{clean_text}")
         return "\n\n".join(parts)
 
+    # Fix LLM tokenizer artifacts: "I 've" → "I've", "do n't" → "don't", etc.
+    _CONTRACTION_RE = re.compile(r"\b(\w+)\s+('(?:ve|re|ll|t|s|d|m))\b", re.IGNORECASE)
+
     def _postprocess_result(self, result: str, code_map: dict) -> str:
         """Strip thinking/notes, apply Pig Latin, restore control codes."""
         result = self._strip_thinking(result)
@@ -669,6 +674,13 @@ class OllamaClient:
             result = _to_pig_latin(result)
         if code_map:
             result = self._restore_codes(result, code_map)
+        # Fix contraction spacing artifacts (I 've → I've, do n't → don't)
+        result = self._CONTRACTION_RE.sub(r"\1\2", result)
+        # Strip outer quotes if LLM wrapped the translation in them
+        first = result.find('"')
+        last = result.rfind('"')
+        if first != -1 and last > first:
+            result = result[:first] + result[first + 1:last] + result[last + 1:]
         return result
 
     # Human-readable labels for RPG Maker entry field types

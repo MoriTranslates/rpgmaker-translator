@@ -354,6 +354,14 @@ class MainWindow(QMainWindow):
         self.find_replace_action.setEnabled(False)
         translate_menu.addAction(self.find_replace_action)
 
+        self.cleanup_action = QAction("Clean Up Translations", self)
+        self.cleanup_action.setToolTip(
+            "Strip redundant dialogue quotes and fix contraction spacing (I 've → I've)"
+        )
+        self.cleanup_action.triggered.connect(self._cleanup_translations)
+        self.cleanup_action.setEnabled(False)
+        translate_menu.addAction(self.cleanup_action)
+
         translate_menu.addSeparator()
 
         # Post-Process submenu (experimental)
@@ -1145,6 +1153,7 @@ class MainWindow(QMainWindow):
         self.batch_actor_action.setEnabled(True)
         self.wordwrap_action.setEnabled(True)
         self.find_replace_action.setEnabled(True)
+        self.cleanup_action.setEnabled(True)
         self.polish_action.setEnabled(True)
         self.consistency_action.setEnabled(True)
         self.translate_images_action.setEnabled(True)
@@ -1686,7 +1695,7 @@ class MainWindow(QMainWindow):
             # JP must contain Japanese, EN must not
             if not _has_japanese(jp_text) or _has_japanese(en_text):
                 continue
-            # Filter to glossary-worthy entries: DB name fields or short text
+            # DB name fields and map names are always glossary-worthy
             is_db_field = False
             fields = self._GLOSSARY_SCAN_FIELDS.get(donor.file)
             if fields and donor.field in fields:
@@ -1695,8 +1704,7 @@ class MainWindow(QMainWindow):
                 donor.file.startswith("Map") and donor.file.endswith(".json")
                 and donor.field == "displayName"
             )
-            # Accept DB name fields, map names, or any short entry
-            if not is_db_field and not is_map_name and len(jp_text) > 40:
+            if not is_db_field and not is_map_name:
                 continue
             # Skip if already in general glossary
             if jp_text in self._general_glossary:
@@ -1755,7 +1763,7 @@ class MainWindow(QMainWindow):
                 continue
             if not _has_japanese(jp) or _has_japanese(en):
                 continue
-            # DB name fields, map names, or short text
+            # DB name fields and map names are always glossary-worthy
             is_db_field = False
             fields = self._GLOSSARY_SCAN_FIELDS.get(e.file)
             if fields and e.field in fields:
@@ -1764,7 +1772,7 @@ class MainWindow(QMainWindow):
                 e.file.startswith("Map") and e.file.endswith(".json")
                 and e.field == "displayName"
             )
-            if not is_db_field and not is_map_name and len(jp) > 40:
+            if not is_db_field and not is_map_name:
                 continue
             if jp in self._general_glossary:
                 continue
@@ -2692,6 +2700,55 @@ class MainWindow(QMainWindow):
                 msg += f"\n\nAcross {len(files)} files."
         QMessageBox.information(self, "Word Wrap Applied", msg)
 
+    # Same regex as ollama_client for fixing contraction spacing
+    _CONTRACTION_RE = re.compile(r"\b(\w+)\s+('(?:ve|re|ll|t|s|d|m))\b", re.IGNORECASE)
+
+    # Japanese speech/quote brackets that produce redundant "" in translations
+    _JP_SPEECH_BRACKETS = set('\u300c\u300d\u300e\u300f')  # 「」『』
+
+    def _cleanup_translations(self):
+        """Strip redundant dialogue quotes and fix contraction spacing."""
+        if not self.project.entries:
+            return
+
+        quotes_fixed = 0
+        contractions_fixed = 0
+        for entry in self.project.entries:
+            if not entry.translation or entry.status not in ("translated", "reviewed"):
+                continue
+            original_text = entry.translation
+
+            # Strip dialogue quotes: if original had 「」or『』, remove first/last "
+            if self._JP_SPEECH_BRACKETS & set(entry.original):
+                t = entry.translation
+                first = t.find('"')
+                last = t.rfind('"')
+                if first != -1 and last > first:
+                    entry.translation = t[:first] + t[first + 1:last] + t[last + 1:]
+
+            # Fix contraction spacing (I 've → I've, do n't → don't)
+            entry.translation = self._CONTRACTION_RE.sub(r"\1\2", entry.translation)
+
+            if entry.translation != original_text:
+                if '"' in original_text and '"' not in entry.translation:
+                    quotes_fixed += 1
+                else:
+                    contractions_fixed += 1
+
+        if quotes_fixed or contractions_fixed:
+            self.trans_table.refresh()
+
+        parts = []
+        if quotes_fixed:
+            parts.append(f"Stripped quotes from {quotes_fixed} entries")
+        if contractions_fixed:
+            parts.append(f"Fixed contractions in {contractions_fixed} entries")
+
+        QMessageBox.information(
+            self, "Clean Up Translations",
+            "\n".join(parts) if parts else "No issues found — translations are clean."
+        )
+
     def _strip_wordwrap_tags(self):
         """Remove all <WordWrap> tags from translations."""
         if not self.project.entries:
@@ -2792,18 +2849,31 @@ class MainWindow(QMainWindow):
     # ── Apply Glossary ─────────────────────────────────────────────
 
     def _apply_glossary(self):
-        """Find translated entries with glossary mismatches and offer to fix.
+        """Find translated entries with glossary mismatches and fix via replacement.
 
         For each glossary entry (JP → EN), scans translated entries where
         the original contains the JP term but the translation doesn't
-        contain the expected EN term.  Shows results and lets the user
-        apply automatic replacements.
+        contain the expected EN term.  Builds a reverse lookup of old
+        translations for each JP term and does direct string replacement.
         """
         if not self.project.entries or not self.client.glossary:
             QMessageBox.information(
                 self, "Apply Glossary", "No entries or glossary is empty."
             )
             return
+
+        # Build reverse lookup: for each glossary JP term, find what it was
+        # previously translated as (from entries where original == jp_term exactly)
+        old_translations: dict[str, set[str]] = {}  # jp_term → {old_en, ...}
+        for entry in self.project.entries:
+            if not entry.translation or entry.status not in ("translated", "reviewed"):
+                continue
+            jp = entry.original.strip()
+            if jp in self.client.glossary:
+                en = entry.translation.strip()
+                expected = self.client.glossary[jp]
+                if en and en != expected:
+                    old_translations.setdefault(jp, set()).add(en)
 
         # Build list of mismatches: (entry, jp_term, expected_en)
         mismatches = []
@@ -2826,43 +2896,117 @@ class MainWindow(QMainWindow):
 
         # Summarize by glossary term
         from collections import Counter
-        term_counts = Counter(f"{jp} \u2192 {en}" for _, jp, en in mismatches)
-        summary_lines = [f"  {term}: {count} entries"
-                         for term, count in term_counts.most_common(20)]
+        term_counts = Counter(jp for _, jp, _en in mismatches)
+        summary_lines = []
+        for jp_term, count in term_counts.most_common(20):
+            en_term = self.client.glossary[jp_term]
+            old = old_translations.get(jp_term)
+            if old:
+                old_str = ", ".join(sorted(old)[:3])
+                summary_lines.append(
+                    f"  {jp_term}: {old_str} \u2192 {en_term} ({count} entries)")
+            else:
+                summary_lines.append(
+                    f"  {jp_term} \u2192 {en_term} ({count} entries)")
         if len(term_counts) > 20:
             summary_lines.append(f"  ... and {len(term_counts) - 20} more terms")
 
-        summary = (
-            f"Found {len(mismatches)} entries with glossary mismatches:\n\n"
-            + "\n".join(summary_lines)
-            + "\n\nThis will search the translation text in these entries "
-            "and filter the table to show them.\n\n"
-            "Would you like to view the mismatched entries?"
-        )
-
-        reply = QMessageBox.question(
-            self, "Apply Glossary", summary,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        # Collect mismatch entry IDs and show them in the table
+        # Unique entries affected
         mismatch_ids = set()
         for entry, _jp, _en in mismatches:
             mismatch_ids.add(entry.id)
 
-        # Set the filter to show these entries by using a special search
-        # We'll filter in the table to show only mismatch entries
-        mismatch_entries = [e for e in self.project.entries if e.id in mismatch_ids]
-        self.trans_table._entries = mismatch_entries
-        self.trans_table._apply_filter()
-        self.file_tree.clearSelection()
+        # Build replacement map: old_en → new_en (longest first to avoid partial matches)
+        replacements: dict[str, str] = {}
+        for jp_term, en_term in self.client.glossary.items():
+            for old_en in old_translations.get(jp_term, set()):
+                replacements[old_en] = en_term
 
-        self.statusbar.showMessage(
-            f"Showing {len(mismatch_entries)} entries with glossary mismatches "
-            f"({len(term_counts)} terms). Click a file or clear search to reset.", 10000
+        can_replace = bool(replacements)
+        summary = (
+            f"Found {len(mismatch_ids)} entries with glossary mismatches "
+            f"({len(term_counts)} terms):\n\n"
+            + "\n".join(summary_lines)
         )
+        if can_replace:
+            summary += (
+                f"\n\nApply will replace old terms with glossary terms "
+                f"({len(replacements)} replacements). No LLM needed."
+            )
+        else:
+            summary += (
+                "\n\nNo old translations found to replace automatically.\n"
+                "Use Retranslate to send these entries back to the LLM."
+            )
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Apply Glossary")
+        msg.setText(summary)
+        if can_replace:
+            apply_btn = msg.addButton("Apply", QMessageBox.ButtonRole.AcceptRole)
+        else:
+            apply_btn = None
+        retranslate_btn = msg.addButton("Retranslate", QMessageBox.ButtonRole.ActionRole)
+        view_btn = msg.addButton("View Only", QMessageBox.ButtonRole.ActionRole)
+        msg.addButton(QMessageBox.StandardButton.Cancel)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked == apply_btn and can_replace:
+            # Direct string replacement — sort longest old terms first
+            sorted_replacements = sorted(
+                replacements.items(), key=lambda x: len(x[0]), reverse=True)
+            fixed = 0
+            for entry in self.project.entries:
+                if entry.id not in mismatch_ids:
+                    continue
+                original_translation = entry.translation
+                for old_en, new_en in sorted_replacements:
+                    if old_en in entry.translation:
+                        entry.translation = entry.translation.replace(old_en, new_en)
+                if entry.translation != original_translation:
+                    fixed += 1
+            self.trans_table.refresh()
+            self.file_tree.load_project(self.project)
+            # Check how many are still mismatched after replacement
+            still_mismatched = 0
+            for entry in self.project.entries:
+                if entry.id not in mismatch_ids:
+                    continue
+                for jp_term, en_term in self.client.glossary.items():
+                    if jp_term in entry.original and en_term not in entry.translation:
+                        still_mismatched += 1
+                        break
+            msg_text = f"Fixed {fixed} entries via text replacement."
+            if still_mismatched:
+                msg_text += (
+                    f"\n{still_mismatched} entries still have mismatches "
+                    f"(may need retranslation)."
+                )
+            QMessageBox.information(self, "Apply Glossary", msg_text)
+        elif clicked == retranslate_btn:
+            # Reset mismatched entries to untranslated and start batch
+            for entry in self.project.entries:
+                if entry.id in mismatch_ids:
+                    entry.status = "untranslated"
+                    entry.translation = ""
+            self.trans_table.refresh()
+            self.file_tree.load_project(self.project)
+            self.statusbar.showMessage(
+                f"Reset {len(mismatch_ids)} entries. Starting retranslation...", 3000
+            )
+            self._start_batch("all")
+        elif clicked == view_btn:
+            # Filter table to show only mismatch entries
+            mismatch_entries = [e for e in self.project.entries if e.id in mismatch_ids]
+            self.trans_table._entries = mismatch_entries
+            self.trans_table._apply_filter()
+            self.file_tree.clearSelection()
+            self.statusbar.showMessage(
+                f"Showing {len(mismatch_entries)} entries with glossary mismatches "
+                f"({len(term_counts)} terms). Click a file or clear search to reset.",
+                10000,
+            )
 
     # ── Consistency Pass ──────────────────────────────────────────
 
