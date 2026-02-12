@@ -2,6 +2,33 @@
 
 Pipeline: Qwen3-VL (OCR + bounding boxes) → Sugoi/Qwen3 (translation) → Pillow (render).
 Ollama auto-swaps models between the vision and text phases.
+
+What's built:
+- OCR with 3-attempt retry (scaled → full res → 2x upscale for small images)
+- Enhanced OCR prompt with pixel dimensions and explicit bbox rules, 20% bbox padding
+- Two-state sprite sheet detection for RPG Maker menu images (top=unselected, bottom=selected)
+- Clean rendering: white rounded boxes on black background, black/red text per state
+- Warm pixel detection for non-sprite images (pink/red = selected state)
+- Translation deduplication (same JP text translated once across regions)
+- RPGMVP encryption round-trip: decrypt to read, encrypt_to_rpgmvp() to write back
+- Export to game with img_original/ backup on first export
+- Export Text Map (.txt) for manual Photoshop reference
+- GUI tab: folder browser, image table, side-by-side preview, region editor
+- Retranslate button, Translate All (includes retry on no_text/error), Skip, Apply Changes
+
+Needs testing:
+- Two-state sprite rendering on real Command_*.rpgmvp files
+- OCR retry actually catching text missed on first scaled attempt
+- Re-encrypted .rpgmvp files loading in-game
+- Region editor round-trip (edit EN → Apply Changes → preview updates)
+- Preview scaling and render failure display
+
+Known limitations:
+- No state persistence — image regions/translations lost on app restart
+- Simplified rendering (white boxes on black) — doesn't match original art style
+- No batch cancel or progress bar during image translation
+- Single-threaded OCR (vision model can't parallelize anyway)
+- System Arial font only — no custom font support
 """
 
 import base64
