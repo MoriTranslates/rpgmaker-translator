@@ -289,6 +289,14 @@ class MainWindow(QMainWindow):
         self.scan_glossary_action.setEnabled(False)
         project_menu.addAction(self.scan_glossary_action)
 
+        self.load_vocab_action = QAction("Load Vocab File...", self)
+        self.load_vocab_action.setToolTip(
+            "Import a DazedMTL-style vocab.txt into project glossary"
+        )
+        self.load_vocab_action.triggered.connect(self._load_vocab_file)
+        self.load_vocab_action.setEnabled(False)
+        project_menu.addAction(self.load_vocab_action)
+
         # ── Translate menu ────────────────────────────────────────
         translate_menu = menubar.addMenu("Translate")
 
@@ -575,6 +583,9 @@ class MainWindow(QMainWindow):
                 self._general_glossary.update(get_all_defaults())
                 self._save_settings()
 
+        # Check for vocab.txt in project folder
+        self._check_vocab_file(path)
+
         # Rebuild merged glossary (general + project auto-glossary entries)
         self._rebuild_glossary()
 
@@ -771,6 +782,13 @@ class MainWindow(QMainWindow):
                 jp = actor.get(field_name, "")
                 if jp and en != jp and jp not in self.project.glossary:
                     self.project.glossary[jp] = en
+
+        # Apply vocab.txt gender overrides (if loaded)
+        if hasattr(self, "_vocab_genders") and self._vocab_genders:
+            for actor in actors_raw:
+                jp_name = actor.get("name", "")
+                if jp_name in self._vocab_genders:
+                    actor["auto_gender"] = self._vocab_genders[jp_name]
 
         # Show gender assignment dialog with translated names
         if actors_raw:
@@ -1070,6 +1088,7 @@ class MainWindow(QMainWindow):
         self.import_action.setEnabled(True)
         self.import_folder_action.setEnabled(True)
         self.scan_glossary_action.setEnabled(True)
+        self.load_vocab_action.setEnabled(True)
         self.txt_export_action.setEnabled(True)
         self.create_patch_action.setEnabled(True)
         self.apply_patch_action.setEnabled(True)
@@ -1219,6 +1238,148 @@ class MainWindow(QMainWindow):
         "States.json": ("name",),
         "System.json": ("terms",),
     }
+
+    # ── Vocab.txt support (DazedMTL format) ──────────────────────
+
+    _VOCAB_FILENAMES = ("vocab.txt", "Vocab.txt", "VOCAB.txt")
+
+    @staticmethod
+    def _parse_vocab_file(filepath: str) -> tuple[dict, dict]:
+        """Parse a DazedMTL-style vocab.txt.
+
+        Format: ``JP (EN)`` or ``JP (EN) - Gender``
+
+        Returns:
+            (glossary_dict, gender_dict)
+            glossary_dict: {jp_text: en_text}
+            gender_dict:   {jp_name: "female"|"male"|"unknown"}
+        """
+        import re
+        pattern = re.compile(
+            r'^(.+?)\s*\((.+?)\)(?:\s*-\s*(Female|Male))?\s*$',
+            re.IGNORECASE,
+        )
+        glossary = {}
+        genders = {}
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("```"):
+                    continue
+                # Skip description / header lines
+                if line.startswith("Here are") or line.startswith("\\N["):
+                    continue
+                m = pattern.match(line)
+                if not m:
+                    continue
+                jp = m.group(1).strip()
+                en = m.group(2).strip()
+                gender = m.group(3)
+                if jp and en:
+                    glossary[jp] = en
+                    if gender:
+                        genders[jp] = gender.lower()
+        return glossary, genders
+
+    def _check_vocab_file(self, project_path: str):
+        """Auto-detect vocab.txt in project folder and offer to import."""
+        vocab_path = None
+        for name in self._VOCAB_FILENAMES:
+            candidate = os.path.join(project_path, name)
+            if os.path.isfile(candidate):
+                vocab_path = candidate
+                break
+        if not vocab_path:
+            return
+
+        try:
+            glossary, genders = self._parse_vocab_file(vocab_path)
+        except (OSError, UnicodeDecodeError):
+            return
+
+        if not glossary:
+            return
+
+        reply = QMessageBox.question(
+            self, "Vocab File Detected",
+            f"Found {os.path.basename(vocab_path)} with {len(glossary)} terms"
+            + (f" and {len(genders)} character genders" if genders else "")
+            + ".\n\nLoad into project glossary?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        added = 0
+        for jp, en in glossary.items():
+            if jp not in self.project.glossary:
+                self.project.glossary[jp] = en
+                added += 1
+
+        # Store gender info for actor detection
+        if genders:
+            for jp_name, gender in genders.items():
+                en_name = glossary.get(jp_name, jp_name)
+                # Will be used when actor gender dialog opens
+                if not hasattr(self, "_vocab_genders"):
+                    self._vocab_genders = {}
+                self._vocab_genders[jp_name] = gender
+                self._vocab_genders[en_name] = gender
+
+        self.statusbar.showMessage(
+            f"Loaded {added} glossary terms from vocab.txt"
+            + (f" + {len(genders)} genders" if genders else ""),
+            5000,
+        )
+
+    def _load_vocab_file(self):
+        """Manually load a vocab.txt file."""
+        if not self.project:
+            return
+
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Select Vocab File", "",
+            "Text Files (*.txt);;All Files (*)"
+        )
+        if not filepath:
+            return
+
+        try:
+            glossary, genders = self._parse_vocab_file(filepath)
+        except (OSError, UnicodeDecodeError) as e:
+            QMessageBox.warning(self, "Error", f"Failed to read file:\n{e}")
+            return
+
+        if not glossary:
+            QMessageBox.information(
+                self, "No Terms Found",
+                "No glossary terms found in that file.\n"
+                "Expected format: Japanese (English) or Japanese (English) - Gender"
+            )
+            return
+
+        added = 0
+        for jp, en in glossary.items():
+            if jp not in self.project.glossary:
+                self.project.glossary[jp] = en
+                added += 1
+
+        if genders:
+            if not hasattr(self, "_vocab_genders"):
+                self._vocab_genders = {}
+            for jp_name, gender in genders.items():
+                en_name = glossary.get(jp_name, jp_name)
+                self._vocab_genders[jp_name] = gender
+                self._vocab_genders[en_name] = gender
+
+        self._rebuild_glossary()
+
+        QMessageBox.information(
+            self, "Vocab Loaded",
+            f"Added {added} terms to project glossary"
+            + (f" + {len(genders)} character genders" if genders else "")
+            + f"\n({len(glossary) - added} already existed)"
+        )
 
     def _scan_game_for_glossary(self):
         """Scan a translated game folder and harvest JP→EN pairs for glossary."""
