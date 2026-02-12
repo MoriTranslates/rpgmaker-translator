@@ -562,6 +562,7 @@ class RPGMakerMVParser:
         lines = [
             "@echo off",
             "chcp 65001 >nul 2>&1",
+            'pushd "%~dp0"',
             f"title Install English Translation",
             "echo.",
             f"echo  {game_title or 'RPG Maker Game'} — English Translation",
@@ -571,26 +572,35 @@ class RPGMakerMVParser:
             "echo.",
             "pause",
             "",
-            # Sanity check
-            f'if not exist "{dr}" (',
+            # Sanity check — trailing backslash for directory check
+            f'if not exist "{dr}\\" (',
             f'    echo ERROR: "{dr}\\" folder not found.',
             "    echo Make sure you extracted this zip into the game folder",
             "    echo  ^(the folder containing Game.exe^).",
             "    pause",
+            "    popd",
             "    exit /b 1",
             ")",
-            f'if not exist "{tr}" (',
+            f'if not exist "{tr}\\" (',
             "    echo ERROR: _translation folder not found.",
             "    echo Make sure you extracted the FULL zip, not just install.bat.",
             "    pause",
+            "    popd",
             "    exit /b 1",
             ")",
+            "",
+            "set FAIL=0",
             "",
             # Step 1: Back up originals
             f'echo [Step 1] Backing up original files...',
             f'if not exist "{dr}_original\\" (',
             f'    xcopy "{dr}" "{dr}_original\\" /E /I /Q /Y >nul',
-            "    echo   Created backup: %s_original\\" % dr,
+            "    if errorlevel 1 (",
+            f'        echo   ERROR: Failed to create backup of {dr}\\',
+            "        set FAIL=1",
+            "    ) else (",
+            "        echo   Created backup: %s_original\\" % dr,
+            "    )",
             ") else (",
             f'    echo   Backup already exists ({dr}_original\\), skipping.',
             ")",
@@ -610,8 +620,13 @@ class RPGMakerMVParser:
         # Step 2: Copy translations
         lines += [
             f'echo [Step 2] Installing translated files...',
-            f'xcopy "{tr}" "{dr}" /E /I /Q /Y >nul',
-            f"echo   Copied {n} file(s) to {dr}\\",
+            f'xcopy "{tr}" "{dr}\\" /E /I /Y',
+            "if errorlevel 1 (",
+            f'    echo   ERROR: Failed to copy translated files to {dr}\\',
+            "    set FAIL=1",
+            ") else (",
+            f"    echo   Copied {n} file(s) to {dr}\\",
+            ")",
         ]
 
         if has_plugins and js_rel:
@@ -619,8 +634,13 @@ class RPGMakerMVParser:
             tjr = f"_translation\\{jr}"
             lines += [
                 f'if exist "{tjr}\\plugins.js" (',
-                f'    copy /Y "{tjr}\\plugins.js" "{jr}\\plugins.js" >nul',
-                f"    echo   Installed translated plugins.js",
+                f'    copy /Y "{tjr}\\plugins.js" "{jr}\\plugins.js"',
+                "    if errorlevel 1 (",
+                f"        echo   ERROR: Failed to copy plugins.js",
+                "        set FAIL=1",
+                "    ) else (",
+                f"        echo   Installed translated plugins.js",
+                "    )",
                 ")",
             ]
 
@@ -630,18 +650,25 @@ class RPGMakerMVParser:
             lines += [
                 f'if exist "{tjr}\\plugins\\TranslatorWordWrap.js" (',
                 f'    if not exist "{jr}\\plugins\\" mkdir "{jr}\\plugins"',
-                f'    copy /Y "{tjr}\\plugins\\TranslatorWordWrap.js" "{jr}\\plugins\\TranslatorWordWrap.js" >nul',
+                f'    copy /Y "{tjr}\\plugins\\TranslatorWordWrap.js" "{jr}\\plugins\\TranslatorWordWrap.js"',
                 f"    echo   Installed word wrap plugin",
                 ")",
             ]
 
         lines += [
             "",
-            "echo.",
-            f"echo  Installation complete!",
-            "echo  To restore Japanese originals, run uninstall.bat",
-            "echo.",
+            "if %FAIL%==1 (",
+            "    echo.",
+            "    echo  Installation FAILED — see errors above.",
+            "    echo.",
+            ") else (",
+            "    echo.",
+            "    echo  Installation complete!",
+            "    echo  To restore Japanese originals, run uninstall.bat",
+            "    echo.",
+            ")",
             "pause",
+            "popd",
         ]
         return "\r\n".join(lines) + "\r\n"
 
@@ -654,6 +681,7 @@ class RPGMakerMVParser:
         lines = [
             "@echo off",
             "chcp 65001 >nul 2>&1",
+            'pushd "%~dp0"',
             f"title Restore Japanese — {game_title or 'RPG Maker Game'}",
             "echo.",
             f"echo  {game_title or 'RPG Maker Game'} — Restore Japanese",
@@ -666,20 +694,33 @@ class RPGMakerMVParser:
             f"    echo ERROR: No backup found ({dr}_original\\).",
             "    echo Cannot restore — the backup was never created.",
             "    pause",
+            "    popd",
             "    exit /b 1",
             ")",
             "",
+            "set FAIL=0",
+            "",
             f'echo Restoring {dr}\\ from {dr}_original\\...',
-            f'xcopy "{dr}_original" "{dr}\\" /E /I /Q /Y >nul',
-            "echo   Data files restored.",
+            f'xcopy "{dr}_original" "{dr}\\" /E /I /Y',
+            "if errorlevel 1 (",
+            f'    echo   ERROR: Failed to restore {dr}\\ from backup.',
+            "    set FAIL=1",
+            ") else (",
+            "    echo   Data files restored.",
+            ")",
         ]
 
         if has_plugins and js_rel:
             jr = js_rel.replace("/", "\\")
             lines += [
                 f'if exist "{jr}\\plugins_original.js" (',
-                f'    copy /Y "{jr}\\plugins_original.js" "{jr}\\plugins.js" >nul',
-                "    echo   plugins.js restored.",
+                f'    copy /Y "{jr}\\plugins_original.js" "{jr}\\plugins.js"',
+                "    if errorlevel 1 (",
+                "        echo   ERROR: Failed to restore plugins.js",
+                "        set FAIL=1",
+                "    ) else (",
+                "        echo   plugins.js restored.",
+                "    )",
                 ")",
             ]
 
@@ -694,10 +735,17 @@ class RPGMakerMVParser:
 
         lines += [
             "",
-            "echo.",
-            "echo  Done! Original Japanese files restored.",
-            "echo.",
+            "if %FAIL%==1 (",
+            "    echo.",
+            "    echo  Restore FAILED — see errors above.",
+            "    echo.",
+            ") else (",
+            "    echo.",
+            "    echo  Done! Original Japanese files restored.",
+            "    echo.",
+            ")",
             "pause",
+            "popd",
         ]
         return "\r\n".join(lines) + "\r\n"
 
