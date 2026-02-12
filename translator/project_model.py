@@ -158,6 +158,53 @@ class TranslationProject:
 
         return stats
 
+    def import_from_game_folder(self, donor_entries: list) -> dict:
+        """Import translations from an already-translated game folder.
+
+        The donor entries come from parsing a translated game with
+        ``RPGMakerMVParser.load_project_raw()``.  Their ``original`` field
+        contains the translated text (since the game files are already in
+        the target language).
+
+        Matching strategy:
+        1. Exact ID match — same file + JSON position.  If the donor text
+           differs from our Japanese original, the donor text is the
+           translation.
+        2. No text-based fallback (we don't know the donor's source language).
+
+        Returns:
+            Dict with stats: {"imported": int, "identical": int,
+                              "skipped": int, "new": int}
+        """
+        if not hasattr(self, "_by_id"):
+            self._build_index()
+
+        donor_by_id = {e.id: e.original for e in donor_entries}
+
+        stats = {"imported": 0, "identical": 0, "skipped": 0, "new": 0}
+
+        for entry in self.entries:
+            if entry.status != "untranslated":
+                stats["skipped"] += 1
+                continue
+
+            donor_text = donor_by_id.get(entry.id)
+            if donor_text is None:
+                stats["new"] += 1
+                continue
+
+            # Same text = untranslated in donor game (or unchanged)
+            if donor_text == entry.original:
+                stats["identical"] += 1
+                continue
+
+            # Different text at same position = translation
+            entry.translation = donor_text
+            entry.status = "translated"
+            stats["imported"] += 1
+
+        return stats
+
     def stats_for_file(self, filename: str) -> tuple:
         """Return (translated_count, total_count) for a file."""
         file_entries = self.get_entries_for_file(filename)

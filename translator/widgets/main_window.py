@@ -178,6 +178,7 @@ class MainWindow(QMainWindow):
         self._batch_start_time = 0
         self._batch_done_count = 0
         self._tm_checkpoint_count = 0
+        self._batch_all_chained = False
         self._last_save_path = ""
         self._general_glossary = {}  # persists across all projects
         self.client.vision_model = ""  # vision model for image OCR
@@ -267,6 +268,15 @@ class MainWindow(QMainWindow):
         self.import_action.triggered.connect(self._import_translations)
         self.import_action.setEnabled(False)
         project_menu.addAction(self.import_action)
+
+        self.import_folder_action = QAction("Import from Translated Game...", self)
+        self.import_folder_action.setToolTip(
+            "Import translations from an already-translated game folder "
+            "(e.g. someone else's v1.0 translation applied to your v1.2 project)"
+        )
+        self.import_folder_action.triggered.connect(self._import_from_game_folder)
+        self.import_folder_action.setEnabled(False)
+        project_menu.addAction(self.import_folder_action)
 
         # ── Translate menu ────────────────────────────────────────
         translate_menu = menubar.addMenu("Translate")
@@ -1036,6 +1046,7 @@ class MainWindow(QMainWindow):
         self.restore_action.setEnabled(has_path)
         self.rename_action.setEnabled(has_path)
         self.import_action.setEnabled(True)
+        self.import_folder_action.setEnabled(True)
         self.txt_export_action.setEnabled(True)
         self.create_patch_action.setEnabled(True)
         self.apply_patch_action.setEnabled(True)
@@ -1109,8 +1120,70 @@ class MainWindow(QMainWindow):
                if imported_glossary else "")
         )
 
+    def _import_from_game_folder(self):
+        """Import translations from an already-translated game folder."""
+        if not self.project:
+            return
+
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Translated Game Folder"
+        )
+        if not folder:
+            return
+
+        from ..rpgmaker_mv import RPGMakerMVParser
+
+        parser = RPGMakerMVParser()
+        try:
+            donor_entries = parser.load_project_raw(folder)
+        except FileNotFoundError as e:
+            QMessageBox.warning(self, "Error", str(e))
+            return
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Error", f"Failed to parse game folder:\n{e}"
+            )
+            return
+
+        if not donor_entries:
+            QMessageBox.warning(
+                self, "No Entries",
+                "No text entries found in that game folder."
+            )
+            return
+
+        current_untranslated = self.project.untranslated_count
+        reply = QMessageBox.question(
+            self, "Import from Translated Game",
+            f"Donor game: {len(donor_entries)} text entries\n"
+            f"Current project: {self.project.total} entries "
+            f"({current_untranslated} untranslated)\n\n"
+            "This will match entries by file position and import\n"
+            "translations where the text differs (i.e. was translated).\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        stats = self.project.import_from_game_folder(donor_entries)
+
+        # Refresh UI
+        self.trans_table.set_entries(self.project.entries)
+        self.file_tree.load_project(self.project)
+
+        QMessageBox.information(
+            self, "Import Complete",
+            f"Imported {stats['imported']} translations:\n"
+            f"  \u2022 {stats['imported']} matched by position (different text)\n"
+            f"  \u2022 {stats['identical']} identical (not translated in donor)\n"
+            f"  \u2022 {stats['new']} new entries in v1.2 (need translation)\n"
+            f"  \u2022 {stats['skipped']} already translated (kept)\n"
+        )
+
     def _stop_translation(self):
         """Cancel the running batch translation."""
+        self._batch_all_chained = False  # Don't auto-chain to dialogue
         self.engine.cancel()
         self.stop_action.setEnabled(False)
 
@@ -1260,6 +1333,42 @@ class MainWindow(QMainWindow):
         """Handle batch translation/polish completing."""
         # Final pass: restore any control codes the LLM dropped
         codes_fixed = self._restore_missing_codes()
+
+        mode = getattr(self, "_current_batch_mode", "all")
+        chained = getattr(self, "_batch_all_chained", False)
+
+        # Batch All: DB phase done → rebuild glossary → start dialogue phase
+        if chained and mode == "db":
+            self._batch_all_chained = False
+            self._backfill_db_glossary()
+            self._rebuild_glossary()
+            self._autosave()
+            self.file_tree.refresh_stats(self.project)
+
+            # Check if there are dialogue entries left
+            untranslated_dialogue = [
+                e for e in self.project.entries
+                if e.status == "untranslated" and e.file not in self._DB_FILES
+            ]
+            if untranslated_dialogue:
+                db_done = sum(
+                    1 for e in self.project.entries
+                    if e.file in self._DB_FILES
+                    and e.status in ("translated", "reviewed")
+                )
+                glossary_size = len(self.client.glossary)
+                self.statusbar.showMessage(
+                    f"DB phase done ({db_done} entries). "
+                    f"Glossary: {glossary_size} terms. "
+                    f"Starting dialogue phase ({len(untranslated_dialogue)} entries)...",
+                    5000,
+                )
+                # Small delay so the user sees the status message
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(500, lambda: self._start_batch(mode="dialogue"))
+                return
+            # else: no dialogue left, fall through to normal finish
+
         self.batch_db_action.setEnabled(True)
         self.batch_dialogue_action.setEnabled(True)
         self.batch_action.setEnabled(True)
@@ -1274,8 +1383,7 @@ class MainWindow(QMainWindow):
             msg += f" ({codes_fixed} control codes restored)"
         self.statusbar.showMessage(msg, 8000)
         # After DB batch, warn about name collisions (different JP → same EN)
-        mode = getattr(self, "_current_batch_mode", "all")
-        if mode in ("db", "all"):
+        if mode in ("db", "all", "dialogue"):
             self._warn_name_collisions()
 
     def _warn_name_collisions(self):
@@ -1510,8 +1618,9 @@ class MainWindow(QMainWindow):
     # ── Translation memory ─────────────────────────────────────────
 
     def _batch_translate(self):
-        """Start batch translating all untranslated entries."""
-        self._start_batch(mode="all")
+        """Batch All: DB first → auto-glossary → dialogue second."""
+        self._batch_all_chained = True
+        self._start_batch(mode="db")
 
     def _batch_translate_db(self):
         """Stage 1: Translate only DB entries (names, descriptions, terms).

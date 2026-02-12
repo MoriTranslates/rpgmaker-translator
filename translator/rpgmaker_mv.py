@@ -195,19 +195,20 @@ def _detect_gender(profile: str, note: str, nickname: str) -> str:
     return ""
 
 
-def _is_translatable(text: str) -> bool:
-    """Check if a string is worth translating."""
-    if not text or not text.strip():
-        return False
-    # Must contain at least some Japanese
-    return _has_japanese(text)
-
-
 class RPGMakerMVParser:
     """Parser for RPG Maker MV/MZ JSON data files."""
 
     def __init__(self):
         self.context_size = 3  # Number of recent dialogue entries for LLM context
+        self._require_japanese = True  # False = extract all text (for import)
+
+    def _should_extract(self, text: str) -> bool:
+        """Check if text should be extracted as a translatable entry."""
+        if not text or not text.strip():
+            return False
+        if self._require_japanese:
+            return _has_japanese(text)
+        return True
 
     def load_project(self, project_dir: str) -> list:
         """Load all translatable entries from an RPG Maker MV/MZ project.
@@ -232,6 +233,18 @@ class RPGMakerMVParser:
         entries.extend(self._parse_maps(data_dir))
         entries.extend(self._parse_plugins(project_dir))
         return entries
+
+    def load_project_raw(self, project_dir: str) -> list:
+        """Load ALL text entries regardless of language.
+
+        Used to import translations from an already-translated game folder.
+        Disables the Japanese-text filter so English entries are extracted too.
+        """
+        self._require_japanese = False
+        try:
+            return self.load_project(project_dir)
+        finally:
+            self._require_japanese = True
 
     def get_game_title(self, project_dir: str) -> str:
         """Read the raw game title from System.json (regardless of language)."""
@@ -733,7 +746,7 @@ class RPGMakerMVParser:
                 item_id = item.get("id", 0)
                 for fld in fields:
                     text = item.get(fld, "")
-                    if isinstance(text, str) and _is_translatable(text):
+                    if isinstance(text, str) and self._should_extract(text):
                         entry_id = f"{filename}/{item_id}/{fld}"
                         entries.append(TranslationEntry(
                             id=entry_id,
@@ -757,7 +770,7 @@ class RPGMakerMVParser:
 
         # Game title
         title = data.get("gameTitle", "")
-        if _is_translatable(title):
+        if self._should_extract(title):
             entries.append(TranslationEntry(
                 id="System.json/gameTitle",
                 file="System.json",
@@ -770,7 +783,7 @@ class RPGMakerMVParser:
         messages = terms.get("messages", [])
         if isinstance(messages, list):
             for i, msg in enumerate(messages):
-                if isinstance(msg, str) and _is_translatable(msg):
+                if isinstance(msg, str) and self._should_extract(msg):
                     entries.append(TranslationEntry(
                         id=f"System.json/terms/messages/{i}",
                         file="System.json",
@@ -782,7 +795,7 @@ class RPGMakerMVParser:
         commands = terms.get("commands", [])
         if isinstance(commands, list):
             for i, cmd in enumerate(commands):
-                if isinstance(cmd, str) and _is_translatable(cmd):
+                if isinstance(cmd, str) and self._should_extract(cmd):
                     entries.append(TranslationEntry(
                         id=f"System.json/terms/commands/{i}",
                         file="System.json",
@@ -834,7 +847,7 @@ class RPGMakerMVParser:
 
             # Map display name
             display_name = data.get("displayName", "")
-            if _is_translatable(display_name):
+            if self._should_extract(display_name):
                 entries.append(TranslationEntry(
                     id=f"{filename}/displayName",
                     file=filename,
@@ -910,7 +923,7 @@ class RPGMakerMVParser:
                     else:
                         break
                 full_text = "\n".join(lines)
-                if _is_translatable(full_text):
+                if self._should_extract(full_text):
                     dialog_counter += 1
                     ctx_parts = []
                     if current_speaker:
@@ -934,7 +947,7 @@ class RPGMakerMVParser:
                 choices = params[0] if isinstance(params[0], list) else []
                 ctx = "\n---\n".join(recent_ctx) if recent_ctx else ""
                 for ci, choice in enumerate(choices):
-                    if isinstance(choice, str) and _is_translatable(choice):
+                    if isinstance(choice, str) and self._should_extract(choice):
                         dialog_counter += 1
                         entries.append(TranslationEntry(
                             id=f"{filename}/{prefix}/choice_{dialog_counter}_{ci}",
@@ -957,7 +970,7 @@ class RPGMakerMVParser:
                     else:
                         break
                 full_text = "\n".join(lines)
-                if _is_translatable(full_text):
+                if self._should_extract(full_text):
                     dialog_counter += 1
                     ctx = "\n---\n".join(recent_ctx) if recent_ctx else ""
                     entries.append(TranslationEntry(
@@ -979,7 +992,7 @@ class RPGMakerMVParser:
                     CODE_CHANGE_PROFILE: "profile",
                 }
                 fld = field_map[code]
-                if isinstance(text, str) and _is_translatable(text):
+                if isinstance(text, str) and self._should_extract(text):
                     dialog_counter += 1
                     entries.append(TranslationEntry(
                         id=f"{filename}/{prefix}/change_{fld}_{dialog_counter}",
