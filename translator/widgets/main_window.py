@@ -993,6 +993,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", f"Failed to load state:\n{e}")
             return False
 
+        # If saved project_path is stale (folder renamed/moved), update it
+        # to the directory containing the save file (works for saves inside
+        # the project folder like _translation_state.json).
+        if self.project.project_path and not os.path.isdir(self.project.project_path):
+            save_dir = os.path.dirname(os.path.abspath(path))
+            if self.parser._find_data_dir(save_dir):
+                self.project.project_path = save_dir
+
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries(self.project.entries)
         self._rebuild_glossary()
