@@ -12,6 +12,7 @@ FILE_CATEGORIES = {
     "Database": [
         "Actors.json", "Classes.json", "Items.json", "Weapons.json",
         "Armors.json", "Skills.json", "States.json", "Enemies.json",
+        "Troops.json",
     ],
     "System": ["System.json"],
     "Common Events": ["CommonEvents.json"],

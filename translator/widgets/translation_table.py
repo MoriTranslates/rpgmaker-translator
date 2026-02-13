@@ -9,7 +9,8 @@ import re
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableView,
     QLineEdit, QComboBox, QLabel, QMenu, QAbstractItemView, QHeaderView,
-    QInputDialog, QTextEdit, QSplitter, QGroupBox, QCheckBox, QPushButton,
+    QInputDialog, QMessageBox, QTextEdit, QSplitter, QGroupBox, QCheckBox,
+    QPushButton,
 )
 from PyQt6.QtCore import (
     pyqtSignal, Qt, QTimer, QAbstractTableModel, QModelIndex,
@@ -194,7 +195,7 @@ class TranslationTable(QWidget):
 
         filter_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Search all entries (ignores codes)...")
+        self.search_edit.setPlaceholderText("Search (use + for AND, e.g. Alice+she)...")
         self.search_edit.textChanged.connect(self._schedule_filter)
         filter_row.addWidget(self.search_edit)
 
@@ -225,6 +226,13 @@ class TranslationTable(QWidget):
         )
         self.field_filter.currentTextChanged.connect(self._apply_filter)
         filter_row.addWidget(self.field_filter)
+
+        filter_row.addWidget(QLabel("Speaker:"))
+        self.speaker_filter = QComboBox()
+        self.speaker_filter.addItem("All Speakers")
+        self.speaker_filter.setToolTip("Filter dialogue by speaker (from event headers)")
+        self.speaker_filter.currentTextChanged.connect(self._apply_filter)
+        filter_row.addWidget(self.speaker_filter)
 
         self.jp_check = QCheckBox("JP in translation")
         self.jp_check.setToolTip("Show only entries where the translation still contains Japanese characters")
@@ -361,7 +369,30 @@ class TranslationTable(QWidget):
         """Load full project entries into the table."""
         self._all_entries = entries
         self._entries = entries
+        self._populate_speaker_filter(entries)
         self._apply_filter()
+
+    def _populate_speaker_filter(self, entries: list):
+        """Extract unique speaker names from entry contexts and populate dropdown."""
+        speakers = set()
+        for e in entries:
+            if not e.context:
+                continue
+            m = re.search(r'\[Speaker:\s*(.+?)\]', e.context)
+            if m:
+                speakers.add(m.group(1).strip())
+        self.speaker_filter.blockSignals(True)
+        current = self.speaker_filter.currentText()
+        self.speaker_filter.clear()
+        self.speaker_filter.addItem("All Speakers")
+        self.speaker_filter.addItem("(No speaker)")
+        for name in sorted(speakers):
+            self.speaker_filter.addItem(name)
+        # Restore previous selection if still valid
+        idx = self.speaker_filter.findText(current)
+        if idx >= 0:
+            self.speaker_filter.setCurrentIndex(idx)
+        self.speaker_filter.blockSignals(False)
 
     def filter_by_file(self, entries: list):
         """Show only entries from a specific file (file tree click).
@@ -398,7 +429,8 @@ class TranslationTable(QWidget):
         "Names":             {"name", "nickname", "change_name", "change_nickname"},
         "Descriptions":      {"description", "profile", "change_profile"},
         "Messages / Battle": {"message1", "message2", "message3", "message4"},
-        "System / Terms":    {"gameTitle"},     # terms.* handled via startswith
+        "System / Terms":    {"gameTitle", "elements", "skillTypes",
+                              "weaponTypes", "armorTypes", "equipTypes"},  # + terms.*
         "Plugin Commands":   {"plugin_command"},
         "Plugin Params":     {"plugin_param"},
         "Map Names":         {"displayName"},
@@ -416,9 +448,11 @@ class TranslationTable(QWidget):
         field_label = self.field_filter.currentText()
         field_set = self._FIELD_FILTER_MAP.get(field_label)
         jp_only = self.jp_check.isChecked()
+        speaker = self.speaker_filter.currentText()
+        speaker_active = speaker not in ("All Speakers", "")
 
-        # Search all entries when query, field filter, or JP filter is active
-        use_all = query or jp_only or field_set is not None
+        # Search all entries when query, field filter, speaker, or JP filter is active
+        use_all = query or jp_only or field_set is not None or speaker_active
         source = self._all_entries if use_all else self._entries
 
         self._visible_entries = []
@@ -433,10 +467,25 @@ class TranslationTable(QWidget):
                 else:
                     if e.field not in field_set:
                         continue
+            if speaker_active:
+                if speaker == "(No speaker)":
+                    # Match entries with no speaker tag in context
+                    if e.context and re.search(r'\[Speaker:', e.context):
+                        continue
+                else:
+                    # Match entries with this specific speaker
+                    if not e.context or f"[Speaker: {speaker}]" not in e.context:
+                        continue
             if query:
                 orig_clean = self._strip_codes(e.original).lower()
                 trans_clean = self._strip_codes(e.translation).lower()
-                if query not in orig_clean and query not in trans_clean:
+                # Also search raw text so control codes like \N[1] are findable
+                orig_raw = e.original.lower()
+                trans_raw = (e.translation or "").lower()
+                combined = orig_clean + " " + trans_clean + " " + orig_raw + " " + trans_raw
+                # Support + as AND separator: "\n[1]+she" matches both terms
+                terms = [t.strip() for t in query.split("+") if t.strip()]
+                if not all(t in combined for t in terms):
                     continue
             if jp_only:
                 # Only show entries where the translation contains Japanese
@@ -515,6 +564,26 @@ class TranslationTable(QWidget):
 
         menu.addSeparator()
 
+        swap_f2m = QAction("Swap Pronouns (she/her \u2192 he/him)", self)
+        swap_f2m.triggered.connect(lambda: self._swap_pronouns("f2m"))
+        menu.addAction(swap_f2m)
+
+        swap_m2f = QAction("Swap Pronouns (he/him \u2192 she/her)", self)
+        swap_m2f.triggered.connect(lambda: self._swap_pronouns("m2f"))
+        menu.addAction(swap_m2f)
+
+        menu.addSeparator()
+
+        set_speaker = QAction("Set Speaker...", self)
+        set_speaker.triggered.connect(self._set_speaker)
+        menu.addAction(set_speaker)
+
+        clear_speaker = QAction("Clear Speaker", self)
+        clear_speaker.triggered.connect(self._clear_speaker)
+        menu.addAction(clear_speaker)
+
+        menu.addSeparator()
+
         add_proj_glossary = QAction("Add to Project Glossary...", self)
         add_proj_glossary.triggered.connect(lambda: self._add_row_to_glossary("project"))
         menu.addAction(add_proj_glossary)
@@ -580,6 +649,196 @@ class TranslationTable(QWidget):
                 self._model.refresh_row(row)
         self._update_stats()
         self.status_changed.emit()
+
+    # ── Pronoun swap ───────────────────────────────────────────────
+
+    @staticmethod
+    def _apply_pronoun_swap(text: str, direction: str) -> str:
+        """Swap gendered pronouns and gendered nouns in *text*.
+
+        *direction* is ``"f2m"`` (she→he) or ``"m2f"`` (he→she).
+        Order matters: longer / compound forms are replaced first so that
+        e.g. ``herself`` isn't partially matched by the ``her`` rule.
+        """
+        if direction == "f2m":
+            # she/her → he/him  (order: compounds first)
+            text = re.sub(r'\bherself\b', 'himself', text)
+            text = re.sub(r'\bHerself\b', 'Himself', text)
+            text = re.sub(r'\bhers\b', 'his', text)
+            text = re.sub(r'\bHers\b', 'His', text)
+            text = re.sub(r"\bshe's\b", "he's", text)
+            text = re.sub(r"\bShe's\b", "He's", text)
+            # "her" before a lowercase word → possessive "his"
+            text = re.sub(r'\bher(\s+[a-z])', r'his\1', text)
+            text = re.sub(r'\bHer(\s+[a-z])', r'His\1', text)
+            # "her" in all other positions → object "him"
+            text = re.sub(r'\bher\b', 'him', text)
+            text = re.sub(r'\bHer\b', 'Him', text)
+            # Simple subject
+            text = re.sub(r'\bshe\b', 'he', text)
+            text = re.sub(r'\bShe\b', 'He', text)
+            # Gendered nouns
+            text = re.sub(r'\bgirls\b', 'guys', text)
+            text = re.sub(r'\bGirls\b', 'Guys', text)
+            text = re.sub(r'\bgirl\b', 'guy', text)
+            text = re.sub(r'\bGirl\b', 'Guy', text)
+            text = re.sub(r'\bwoman\b', 'man', text)
+            text = re.sub(r'\bWoman\b', 'Man', text)
+            text = re.sub(r'\bwomen\b', 'men', text)
+            text = re.sub(r'\bWomen\b', 'Men', text)
+            text = re.sub(r'\blady\b', 'gentleman', text)
+            text = re.sub(r'\bLady\b', 'Gentleman', text)
+            text = re.sub(r'\bmother\b', 'father', text)
+            text = re.sub(r'\bMother\b', 'Father', text)
+            text = re.sub(r'\bsister\b', 'brother', text)
+            text = re.sub(r'\bSister\b', 'Brother', text)
+            text = re.sub(r'\bdaughter\b', 'son', text)
+            text = re.sub(r'\bDaughter\b', 'Son', text)
+            text = re.sub(r'\bwife\b', 'husband', text)
+            text = re.sub(r'\bWife\b', 'Husband', text)
+            text = re.sub(r'\bheroine\b', 'hero', text)
+            text = re.sub(r'\bHeroine\b', 'Hero', text)
+        else:
+            # he/him → she/her  (order: compounds first)
+            text = re.sub(r'\bhimself\b', 'herself', text)
+            text = re.sub(r'\bHimself\b', 'Herself', text)
+            text = re.sub(r"\bhe's\b", "she's", text)
+            text = re.sub(r"\bHe's\b", "She's", text)
+            # "his" before a lowercase word → possessive "her"
+            text = re.sub(r'\bhis(\s+[a-z])', r'her\1', text)
+            text = re.sub(r'\bHis(\s+[a-z])', r'Her\1', text)
+            # "his" standalone → "hers"
+            text = re.sub(r'\bhis\b', 'hers', text)
+            text = re.sub(r'\bHis\b', 'Hers', text)
+            # "him" → "her"
+            text = re.sub(r'\bhim\b', 'her', text)
+            text = re.sub(r'\bHim\b', 'Her', text)
+            # Simple subject
+            text = re.sub(r'\bhe\b', 'she', text)
+            text = re.sub(r'\bHe\b', 'She', text)
+            # Gendered nouns
+            text = re.sub(r'\bguys\b', 'girls', text)
+            text = re.sub(r'\bGuys\b', 'Girls', text)
+            text = re.sub(r'\bguy\b', 'girl', text)
+            text = re.sub(r'\bGuy\b', 'Girl', text)
+            text = re.sub(r'\bmen\b', 'women', text)
+            text = re.sub(r'\bMen\b', 'Women', text)
+            text = re.sub(r'\bman\b', 'woman', text)
+            text = re.sub(r'\bMan\b', 'Woman', text)
+            text = re.sub(r'\bgentleman\b', 'lady', text)
+            text = re.sub(r'\bGentleman\b', 'Lady', text)
+            text = re.sub(r'\bfather\b', 'mother', text)
+            text = re.sub(r'\bFather\b', 'Mother', text)
+            text = re.sub(r'\bbrother\b', 'sister', text)
+            text = re.sub(r'\bBrother\b', 'Sister', text)
+            text = re.sub(r'\bson\b', 'daughter', text)
+            text = re.sub(r'\bSon\b', 'Daughter', text)
+            text = re.sub(r'\bhusband\b', 'wife', text)
+            text = re.sub(r'\bHusband\b', 'Wife', text)
+            text = re.sub(r'\bhero\b', 'heroine', text)
+            text = re.sub(r'\bHero\b', 'Heroine', text)
+        return text
+
+    def _swap_pronouns(self, direction: str):
+        """Swap gendered pronouns in selected rows' translations."""
+        rows = sorted(set(idx.row() for idx in self.table.selectionModel().selectedRows()))
+        changed = 0
+        for row in rows:
+            if row >= len(self._visible_entries):
+                continue
+            entry = self._visible_entries[row]
+            if not entry.translation:
+                continue
+            new_text = self._apply_pronoun_swap(entry.translation, direction)
+            if new_text != entry.translation:
+                entry.translation = new_text
+                self._model.refresh_row(row)
+                changed += 1
+        if changed:
+            self._update_stats()
+            self.status_changed.emit()
+        label = "she/her \u2192 he/him" if direction == "f2m" else "he/him \u2192 she/her"
+        QMessageBox.information(
+            self, "Pronoun Swap",
+            f"Swapped pronouns ({label}) in {changed} of {len(rows)} selected entries."
+        )
+
+    # ── Speaker tagging ──────────────────────────────────────────
+
+    def _set_speaker(self):
+        """Assign a speaker name to selected entries' context."""
+        rows = sorted(set(idx.row() for idx in self.table.selectionModel().selectedRows()))
+        if not rows:
+            return
+
+        # Collect known speakers from existing contexts
+        speakers = set()
+        for e in self._all_entries:
+            if e.context:
+                m = re.search(r'\[Speaker:\s*(.+?)\]', e.context)
+                if m:
+                    speakers.add(m.group(1).strip())
+        # Also collect actor names from DB entries (translated or original)
+        for e in self._all_entries:
+            if e.field == "name" and e.file == "Actors.json":
+                name = (e.translation or e.original).strip()
+                if name:
+                    speakers.add(name)
+
+        items = sorted(speakers)
+        name, ok = QInputDialog.getItem(
+            self, "Set Speaker",
+            f"Speaker name for {len(rows)} selected entries:",
+            items, 0, True,  # editable=True
+        )
+        if not ok or not name.strip():
+            return
+
+        name = name.strip()
+        changed = 0
+        for row in rows:
+            if row >= len(self._visible_entries):
+                continue
+            entry = self._visible_entries[row]
+            if entry.context and re.search(r'\[Speaker:', entry.context):
+                entry.context = re.sub(
+                    r'\[Speaker:\s*.+?\]', f'[Speaker: {name}]', entry.context
+                )
+            else:
+                prefix = f"[Speaker: {name}]"
+                entry.context = f"{prefix}\n{entry.context}" if entry.context else prefix
+            changed += 1
+
+        if changed:
+            self._populate_speaker_filter(self._all_entries)
+            self.status_changed.emit()
+        QMessageBox.information(
+            self, "Set Speaker",
+            f'Set speaker to "{name}" for {changed} entries.'
+        )
+
+    def _clear_speaker(self):
+        """Remove speaker tag from selected entries' context."""
+        rows = sorted(set(idx.row() for idx in self.table.selectionModel().selectedRows()))
+        if not rows:
+            return
+
+        changed = 0
+        for row in rows:
+            if row >= len(self._visible_entries):
+                continue
+            entry = self._visible_entries[row]
+            if entry.context and '[Speaker:' in entry.context:
+                entry.context = re.sub(r'\[Speaker:\s*.+?\]\n?', '', entry.context)
+                changed += 1
+
+        if changed:
+            self._populate_speaker_filter(self._all_entries)
+            self.status_changed.emit()
+        QMessageBox.information(
+            self, "Clear Speaker",
+            f"Cleared speaker from {changed} of {len(rows)} selected entries."
+        )
 
     def _add_row_to_glossary(self, glossary_type: str):
         """Add selected row's original→translation as a glossary entry."""

@@ -42,6 +42,7 @@ DATABASE_FILES = {
     "Skills.json":   ["name", "description", "message1", "message2", "note"],
     "States.json":   ["name", "message1", "message2", "message3", "message4", "note"],
     "Enemies.json":  ["name", "note"],
+    "Troops.json":   ["name"],
 }
 
 # Regex to detect Japanese characters (Hiragana, Katakana, CJK)
@@ -246,6 +247,7 @@ class RPGMakerMVParser:
         entries.extend(self._parse_database_files(data_dir))
         entries.extend(self._parse_system(data_dir))
         entries.extend(self._parse_common_events(data_dir))
+        entries.extend(self._parse_troops(data_dir))
         entries.extend(self._parse_maps(data_dir))
         entries.extend(self._parse_plugins(project_dir))
         return entries
@@ -990,6 +992,21 @@ class RPGMakerMVParser:
                         original=b,
                     ))
 
+        # Type arrays — battle menus and equipment screens
+        for arr_name in ("elements", "skillTypes", "weaponTypes",
+                         "armorTypes", "equipTypes"):
+            arr = data.get(arr_name, [])
+            if not isinstance(arr, list):
+                continue
+            for i, val in enumerate(arr):
+                if isinstance(val, str) and self._should_extract(val):
+                    entries.append(TranslationEntry(
+                        id=f"System.json/{arr_name}/{i}",
+                        file="System.json",
+                        field=arr_name,
+                        original=val,
+                    ))
+
         return entries
 
     # ── Private: CommonEvents.json ─────────────────────────────────────
@@ -1016,6 +1033,42 @@ class RPGMakerMVParser:
             entries.extend(self._extract_event_commands(
                 cmd_list, "CommonEvents.json", f"CE{event_id}({event_name})"
             ))
+
+        return entries
+
+    # ── Private: Troops (battle events) ────────────────────────────────
+
+    def _parse_troops(self, data_dir: str) -> list:
+        """Parse Troops.json for battle event dialogue."""
+        entries = []
+        filepath = os.path.join(data_dir, "Troops.json")
+        if not os.path.exists(filepath):
+            return entries
+
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, list):
+            return entries
+
+        for troop in data:
+            if not troop or not isinstance(troop, dict):
+                continue
+            troop_id = troop.get("id", 0)
+            troop_name = troop.get("name", "")
+
+            # Troop names extracted by _parse_database_files via DATABASE_FILES
+
+            # Battle event pages — same structure as map event pages
+            pages = troop.get("pages", [])
+            for page_idx, page in enumerate(pages):
+                if not page or not isinstance(page, dict):
+                    continue
+                cmd_list = page.get("list", [])
+                prefix = f"Troop{troop_id}({troop_name})/p{page_idx}"
+                entries.extend(self._extract_event_commands(
+                    cmd_list, "Troops.json", prefix
+                ))
 
         return entries
 
@@ -1522,6 +1575,13 @@ class RPGMakerMVParser:
                 basic = terms.get("basic", [])
                 if 0 <= idx < len(basic):
                     basic[idx] = entry.translation
+            # Type arrays: elements, skillTypes, weaponTypes, armorTypes, equipTypes
+            elif entry.field in ("elements", "skillTypes", "weaponTypes",
+                                 "armorTypes", "equipTypes"):
+                idx = int(parts[-1])
+                arr = data.get(entry.field, [])
+                if 0 <= idx < len(arr):
+                    arr[idx] = entry.translation
 
         # Map displayName
         elif "displayName" in entry.id and entry.field == "displayName":
@@ -1593,6 +1653,36 @@ class RPGMakerMVParser:
         elif entry.field == "scroll_text":
             self._replace_dialog_block(data, original_lines, translation_lines, code=CODE_SCROLL_TEXT)
 
+    @staticmethod
+    def _walk_event_commands(data, callback) -> bool:
+        """Walk all event command lists in *data* and call *callback(cmd_list)*.
+
+        Handles Map (dict with events→pages), CommonEvents (list with list key),
+        and Troops (list with pages key).  Returns True on first callback match.
+        """
+        if isinstance(data, dict):
+            for event in (data.get("events") or []):
+                if not event or not isinstance(event, dict):
+                    continue
+                for page in (event.get("pages") or []):
+                    if page and isinstance(page, dict):
+                        if callback(page.get("list", [])):
+                            return True
+            if "list" in data:
+                if callback(data.get("list", [])):
+                    return True
+        elif isinstance(data, list):
+            for item in data:
+                if not item or not isinstance(item, dict):
+                    continue
+                if callback(item.get("list", [])):
+                    return True
+                for page in (item.get("pages") or []):
+                    if page and isinstance(page, dict):
+                        if callback(page.get("list", [])):
+                            return True
+        return False
+
     def _replace_dialog_block(self, data, original_lines: list, translation_lines: list, code: int = CODE_SHOW_TEXT):
         """Find and replace a consecutive block of 401/405 commands."""
         def process_commands(cmd_list):
@@ -1637,26 +1727,8 @@ class RPGMakerMVParser:
                 i += 1
             return False
 
-        # Search in events (map data) or common events
-        if isinstance(data, dict):
-            # Map data
-            for event in (data.get("events") or []):
-                if not event or not isinstance(event, dict):
-                    continue
-                for page in (event.get("pages") or []):
-                    if page and isinstance(page, dict):
-                        if process_commands(page.get("list", [])):
-                            return
-            # Common event data
-            if "list" in data:
-                if process_commands(data.get("list", [])):
-                    return
-        elif isinstance(data, list):
-            # CommonEvents.json is a list
-            for event in data:
-                if event and isinstance(event, dict):
-                    if process_commands(event.get("list", [])):
-                        return
+        if self._walk_event_commands(data, process_commands):
+            return
         log.warning("Export: dialog block not found — original starts with %r",
                     original_lines[0][:60] if original_lines else "?")
 
@@ -1676,19 +1748,8 @@ class RPGMakerMVParser:
                         pass
             return False
 
-        if isinstance(data, dict):
-            for event in (data.get("events") or []):
-                if not event or not isinstance(event, dict):
-                    continue
-                for page in (event.get("pages") or []):
-                    if page and isinstance(page, dict):
-                        if process_commands(page.get("list", [])):
-                            return
-        elif isinstance(data, list):
-            for event in data:
-                if event and isinstance(event, dict):
-                    if process_commands(event.get("list", [])):
-                        return
+        if self._walk_event_commands(data, process_commands):
+            return
         log.warning("Export: command code %d not matched — original %r",
                     code, original[:60])
 
@@ -1705,22 +1766,8 @@ class RPGMakerMVParser:
                     return True
             return False
 
-        if isinstance(data, dict):
-            for event in (data.get("events") or []):
-                if not event or not isinstance(event, dict):
-                    continue
-                for page in (event.get("pages") or []):
-                    if page and isinstance(page, dict):
-                        if process_commands(page.get("list", [])):
-                            return
-            if "list" in data:
-                if process_commands(data.get("list", [])):
-                    return
-        elif isinstance(data, list):
-            for event in data:
-                if event and isinstance(event, dict):
-                    if process_commands(event.get("list", [])):
-                        return
+        if self._walk_event_commands(data, process_commands):
+            return
         log.warning("Export: single param code %d[%d] not matched — original %r",
                     code, param_idx, original[:60])
 
@@ -1754,22 +1801,8 @@ class RPGMakerMVParser:
                     return True
             return False
 
-        if isinstance(data, dict):
-            for event in (data.get("events") or []):
-                if not event or not isinstance(event, dict):
-                    continue
-                for page in (event.get("pages") or []):
-                    if page and isinstance(page, dict):
-                        if process_commands(page.get("list", [])):
-                            return
-            if "list" in data:
-                if process_commands(data.get("list", [])):
-                    return
-        elif isinstance(data, list):
-            for event in data:
-                if event and isinstance(event, dict):
-                    if process_commands(event.get("list", [])):
-                        return
+        if self._walk_event_commands(data, process_commands):
+            return
         log.warning("Export: MZ plugin %s/%s not matched — original %r",
                     plugin_name, param_key, original[:60])
 
@@ -1793,22 +1826,8 @@ class RPGMakerMVParser:
                     return True
             return False
 
-        if isinstance(data, dict):
-            for event in (data.get("events") or []):
-                if not event or not isinstance(event, dict):
-                    continue
-                for page in (event.get("pages") or []):
-                    if page and isinstance(page, dict):
-                        if process_commands(page.get("list", [])):
-                            return
-            if "list" in data:
-                if process_commands(data.get("list", [])):
-                    return
-        elif isinstance(data, list):
-            for event in data:
-                if event and isinstance(event, dict):
-                    if process_commands(event.get("list", [])):
-                        return
+        if self._walk_event_commands(data, process_commands):
+            return
         log.warning("Export: control var string not matched — original %r",
                     original[:60])
 
@@ -1845,22 +1864,8 @@ class RPGMakerMVParser:
                 i = j
             return False
 
-        if isinstance(data, dict):
-            for event in (data.get("events") or []):
-                if not event or not isinstance(event, dict):
-                    continue
-                for page in (event.get("pages") or []):
-                    if page and isinstance(page, dict):
-                        if process_commands(page.get("list", [])):
-                            return
-            if "list" in data:
-                if process_commands(data.get("list", [])):
-                    return
-        elif isinstance(data, list):
-            for event in data:
-                if event and isinstance(event, dict):
-                    if process_commands(event.get("list", [])):
-                        return
+        if self._walk_event_commands(data, process_commands):
+            return
         log.warning("Export: script string not matched — original %r",
                     original[:60])
 
