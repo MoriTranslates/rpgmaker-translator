@@ -262,6 +262,7 @@ class OllamaClient:
         self.actor_genders = {}  # {actor_id(int): "male"/"female"/"unknown"}
         self.actor_names = {}    # {actor_id(int): "name string"}
         self.glossary = {}       # JP term -> EN translation forced mappings
+        self.vision_model = ""   # Vision model for image OCR
         self._managed_proc = None  # subprocess.Popen if we started Ollama
 
     def _chat(self, *, messages: list, stream: bool = False,
