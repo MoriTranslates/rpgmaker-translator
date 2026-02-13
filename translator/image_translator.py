@@ -360,15 +360,18 @@ class ImageTranslator:
                     int(x2 * sx), int(y2 * sy),
                 )
 
-        # Clamp bboxes to image bounds
+        # Clamp bboxes to image bounds and discard invalid geometry
+        valid_regions = []
         for r in regions:
             x1, y1, x2, y2 = r.bbox
-            r.bbox = (
-                max(0, min(x1, orig_w)),
-                max(0, min(y1, orig_h)),
-                max(0, min(x2, orig_w)),
-                max(0, min(y2, orig_h)),
-            )
+            x1 = max(0, min(x1, orig_w))
+            y1 = max(0, min(y1, orig_h))
+            x2 = max(0, min(x2, orig_w))
+            y2 = max(0, min(y2, orig_h))
+            if x2 > x1 and y2 > y1:
+                r.bbox = (x1, y1, x2, y2)
+                valid_regions.append(r)
+        regions = valid_regions
 
         # Pad bboxes by 20% to ensure coverage (vision models often undersize)
         for r in regions:
@@ -608,11 +611,16 @@ class ImageTranslator:
         matched = 0
         for t, b in zip(top_only, bot_only):
             # The Japanese text should be identical (same button, two states)
-            if t.text == b.text or (t.translation and t.translation == b.translation):
+            is_match = (t.text == b.text
+                        or (t.translation and t.translation == b.translation))
+            if is_match:
                 matched += 1
             # Use translation from whichever has it
             translation = t.translation or b.translation or ""
-            merged.append((translation, t.bbox, b.bbox))
+            # Only include confirmed matching pairs to avoid pairing
+            # unrelated regions (e.g. "Start" top with "Exit" bottom)
+            if is_match:
+                merged.append((translation, t.bbox, b.bbox))
 
         # Need at least half the pairs to match text for it to be two-state
         if matched < len(top_only) * 0.5:

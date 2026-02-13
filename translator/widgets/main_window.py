@@ -1055,7 +1055,7 @@ class MainWindow(QMainWindow):
         en = entry.translation
         if jp and en and jp != en and jp not in self.client.glossary:
             self.client.glossary[jp] = en
-            self.project.glossary = self.client.glossary
+            self.project.glossary[jp] = en
 
     def _rename_project_folder(self, path: str, translated_title: str) -> str:
         """Offer to rename the project folder to 'English Title - WIP'.
@@ -1761,9 +1761,9 @@ class MainWindow(QMainWindow):
             for entry in self.project.entries:
                 if entry.file == "Actors.json" and entry.field == "name":
                     # Extract actor ID from entry.id
-                    # Format: Actors.json/[n]/name
+                    # Format: Actors.json/n/name
                     import re as _re
-                    m = _re.search(r'\[(\d+)\]', entry.id)
+                    m = _re.search(r'/(\d+)/', entry.id)
                     if m:
                         actor_id = int(m.group(1))
                         gender = self.project.actor_genders.get(actor_id)
