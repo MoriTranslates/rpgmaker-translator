@@ -3,6 +3,8 @@
 import json
 import os
 import re
+import shutil
+import subprocess
 import time
 from collections import Counter
 
@@ -535,6 +537,15 @@ class MainWindow(QMainWindow):
         self.restore_action.setEnabled(False)
         game_menu.addAction(self.restore_action)
 
+        self.open_rpgmaker_action = QAction("Open in RPG Maker", self)
+        self.open_rpgmaker_action.setShortcut("Ctrl+R")
+        self.open_rpgmaker_action.setToolTip(
+            "Create a workspace project and open the game in RPG Maker for visual QA"
+        )
+        self.open_rpgmaker_action.triggered.connect(self._open_in_rpgmaker)
+        self.open_rpgmaker_action.setEnabled(False)
+        game_menu.addAction(self.open_rpgmaker_action)
+
         game_menu.addSeparator()
 
         self.txt_export_action = QAction("Export Raw Text...", self)
@@ -802,6 +813,7 @@ class MainWindow(QMainWindow):
         self.apply_glossary_action.setEnabled(False)
         self.export_action.setEnabled(False)
         self.restore_action.setEnabled(False)
+        self.open_rpgmaker_action.setEnabled(False)
         self.txt_export_action.setEnabled(False)
         self.create_patch_action.setEnabled(False)
         self.export_zip_action.setEnabled(False)
@@ -1325,6 +1337,7 @@ class MainWindow(QMainWindow):
         # Game
         self.export_action.setEnabled(has_path)
         self.restore_action.setEnabled(has_path)
+        self.open_rpgmaker_action.setEnabled(has_path)
         self.txt_export_action.setEnabled(True)
         self.create_patch_action.setEnabled(True)
         self.export_zip_action.setEnabled(True)
@@ -2104,6 +2117,103 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Restore Complete", msg)
         except Exception as e:
             QMessageBox.critical(self, "Restore Failed", str(e))
+
+    # ── Open in RPG Maker ─────────────────────────────────────────
+
+    def _open_in_rpgmaker(self):
+        """Create a workspace project with directory junctions and open in RPG Maker."""
+        if not self.project or not self.project.project_path:
+            QMessageBox.warning(self, "Error", "No project loaded.")
+            return
+
+        project_path = self.project.project_path
+
+        # Find content root (where data/ and js/ live)
+        content_root = self.parser.find_content_root(project_path)
+        if not content_root:
+            QMessageBox.warning(
+                self, "Error",
+                "Could not find game data directory.\n"
+                "Make sure the project has a data/ folder."
+            )
+            return
+
+        # Detect MV vs MZ
+        engine = self.parser.detect_engine(project_path)
+        if not engine:
+            QMessageBox.warning(
+                self, "Error",
+                "Could not detect RPG Maker version.\n"
+                "Expected rpg_core.js (MV) or rmmz_core.js (MZ) in the js/ folder."
+            )
+            return
+
+        # Create workspace folder
+        workspace = os.path.join(project_path, "_rpgmaker_workspace")
+        os.makedirs(workspace, exist_ok=True)
+
+        # Create directory junctions for large asset folders
+        junction_dirs = ["data", "Data", "img", "audio", "js", "fonts", "icon", "movies"]
+        for dirname in junction_dirs:
+            source = os.path.join(content_root, dirname)
+            if not os.path.isdir(source):
+                continue
+            link = os.path.join(workspace, dirname)
+            if os.path.exists(link):
+                continue  # Junction already exists
+            try:
+                # mklink /J creates a directory junction (no admin needed)
+                result = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", link, source],
+                    capture_output=True, text=True, check=True,
+                )
+            except subprocess.CalledProcessError as e:
+                QMessageBox.critical(
+                    self, "Junction Error",
+                    f"Failed to create directory junction for {dirname}:\n{e.stderr}"
+                )
+                return
+
+        # Copy small files
+        for filename in ("index.html", "package.json"):
+            src = os.path.join(content_root, filename)
+            dst = os.path.join(workspace, filename)
+            if os.path.isfile(src) and not os.path.isfile(dst):
+                shutil.copy2(src, dst)
+
+        # Create MZ-specific empty dirs if needed
+        if engine == "mz":
+            for dirname in ("css", "effects"):
+                d = os.path.join(workspace, dirname)
+                if not os.path.isdir(d):
+                    os.makedirs(d, exist_ok=True)
+
+        # Create the marker file
+        if engine == "mv":
+            marker = os.path.join(workspace, "Game.rpgproject")
+            marker_content = "RPGMV 1.6.3"
+        else:
+            marker = os.path.join(workspace, "game.rmmzproject")
+            marker_content = "RPGMZ 1.10.0"
+
+        if not os.path.isfile(marker):
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write(marker_content)
+
+        # Open in RPG Maker
+        engine_label = "RPG Maker MV" if engine == "mv" else "RPG Maker MZ"
+        try:
+            os.startfile(marker)
+            self.statusbar.showMessage(
+                f"Opening in {engine_label}... Workspace: _rpgmaker_workspace/", 10000
+            )
+        except OSError:
+            QMessageBox.information(
+                self, "Open Manually",
+                f"No application is associated with .{'rpgproject' if engine == 'mv' else 'rmmzproject'} files.\n\n"
+                f"Please open this file manually in {engine_label}:\n\n"
+                f"{marker}"
+            )
 
     def _open_settings(self):
         """Open the settings dialog."""

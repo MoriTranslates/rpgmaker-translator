@@ -866,19 +866,51 @@ class RPGMakerMVParser:
             return  # Already backed up
         shutil.copytree(data_dir, backup_dir)
 
+    # ── Static helpers ────────────────────────────────────────────────
+
+    @staticmethod
+    def find_content_root(project_dir: str) -> Optional[str]:
+        """Return the folder containing data/ and js/ (handles www/ layout).
+
+        For distributed MV games the content lives under www/,
+        for MZ (and MV editor projects) it's at the project root.
+        """
+        for base in (project_dir, os.path.join(project_dir, "www")):
+            data = os.path.join(base, "data")
+            if not os.path.isdir(data):
+                data = os.path.join(base, "Data")
+            if os.path.isdir(data):
+                return base
+        return None
+
+    @staticmethod
+    def detect_engine(project_dir: str) -> Optional[str]:
+        """Detect whether a project is RPG Maker MV or MZ.
+
+        Returns ``"mv"``, ``"mz"``, or ``None``.
+        """
+        content_root = RPGMakerMVParser.find_content_root(project_dir)
+        if not content_root:
+            return None
+        js_dir = os.path.join(content_root, "js")
+        if not os.path.isdir(js_dir):
+            return None
+        if os.path.isfile(os.path.join(js_dir, "rmmz_core.js")):
+            return "mz"
+        if os.path.isfile(os.path.join(js_dir, "rpg_core.js")):
+            return "mv"
+        return None
+
     # ── Private: find data dir ─────────────────────────────────────────
 
     def _find_data_dir(self, project_dir: str) -> Optional[str]:
         """Locate the data/ directory inside the project."""
-        candidates = [
-            os.path.join(project_dir, "data"),
-            os.path.join(project_dir, "Data"),
-            os.path.join(project_dir, "www", "data"),
-            os.path.join(project_dir, "www", "Data"),
-        ]
-        for c in candidates:
-            if os.path.isdir(c):
-                return c
+        content_root = self.find_content_root(project_dir)
+        if content_root:
+            for name in ("data", "Data"):
+                d = os.path.join(content_root, name)
+                if os.path.isdir(d):
+                    return d
         return None
 
     # ── Private: database files ────────────────────────────────────────
