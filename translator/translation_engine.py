@@ -111,28 +111,31 @@ class BatchTranslationWorker(QObject):
 
     def run(self):
         """Process entries in JSON batches, falling back to single-entry on failure."""
-        # Filter entries based on mode
-        to_process = []
-        for entry in self.entries:
+        # Group into batches, re-checking status before each batch
+        # to skip entries filled by TM between checkpoints.
+        i = 0
+        while i < len(self.entries):
             if self._cancelled:
                 break
-            if self.mode == "translate":
-                if entry.status in ("translated", "reviewed", "skipped"):
-                    continue  # TM-filled at checkpoint — already counted
-                if not entry.original.strip():
-                    entry.status = "skipped"
-                    continue
-            else:
-                if not entry.translation or not entry.translation.strip():
-                    continue
-            to_process.append(entry)
 
-        # Group into batches
-        for i in range(0, len(to_process), self.batch_size):
-            if self._cancelled:
-                break
-            batch = to_process[i:i + self.batch_size]
-            self._process_batch(batch)
+            # Build next batch, skipping already-filled entries
+            batch = []
+            while i < len(self.entries) and len(batch) < self.batch_size:
+                entry = self.entries[i]
+                i += 1
+                if self.mode == "translate":
+                    if entry.status in ("translated", "reviewed", "skipped"):
+                        continue
+                    if not entry.original.strip():
+                        entry.status = "skipped"
+                        continue
+                else:
+                    if not entry.translation or not entry.translation.strip():
+                        continue
+                batch.append(entry)
+
+            if batch:
+                self._process_batch(batch)
 
         self.finished.emit()
 

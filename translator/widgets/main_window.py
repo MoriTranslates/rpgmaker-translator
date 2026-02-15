@@ -181,6 +181,7 @@ from .variant_dialog import VariantDialog
 from .image_panel import ImagePanel
 from .gpu_monitor import GPUMonitorPanel
 from .queue_panel import QueuePanel
+from .event_viewer import EventViewerPanel
 from .model_suggestion_dialog import ModelSuggestionDialog
 
 
@@ -237,6 +238,7 @@ class MainWindow(QMainWindow):
         self._batch_start_time = 0
         self._batch_done_count = 0
         self._tm_checkpoint_count = 0
+        self._batch_dupe_map = {}  # original_text -> [duplicate entries]
         self._batch_all_chained = False
         self._last_save_path = ""
         self._general_glossary = {}  # persists across all projects
@@ -300,7 +302,11 @@ class MainWindow(QMainWindow):
         self.image_panel = ImagePanel()
         self.tabs.addTab(self.image_panel, "Image Translation (Experimental)")
 
-        # Tab 3: Translation Queue
+        # Tab 3: Event Viewer
+        self.event_viewer = EventViewerPanel()
+        self.tabs.addTab(self.event_viewer, "Event Viewer")
+
+        # Tab 4: Translation Queue
         self.queue_panel = QueuePanel()
         self.tabs.addTab(self.queue_panel, "Translation Queue")
 
@@ -660,6 +666,9 @@ class MainWindow(QMainWindow):
         self.trans_table.status_changed.connect(self._on_status_changed)
         self.trans_table.glossary_add.connect(self._on_glossary_add)
 
+        # Event Viewer
+        self.event_viewer.status_changed.connect(self._on_event_viewer_status_changed)
+
         # Engine
         self.engine.progress.connect(self._on_progress)
         self.engine.entry_done.connect(self._on_entry_done)
@@ -726,6 +735,7 @@ class MainWindow(QMainWindow):
         self.project = TranslationProject(project_path=path, entries=entries)
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries(entries)
+        self.event_viewer.set_entries(entries)
 
         # Defer actor gender dialog + pre-translate to first batch start
         self._actors_ready = False
@@ -816,6 +826,7 @@ class MainWindow(QMainWindow):
         self.project = TranslationProject()
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries([])
+        self.event_viewer.set_entries([])
         self._actors_ready = False
         self._last_save_path = ""
 
@@ -1331,6 +1342,7 @@ class MainWindow(QMainWindow):
 
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries(self.project.entries)
+        self.event_viewer.set_entries(self.project.entries)
 
         # Check for vocab.txt in project folder
         if self.project.project_path:
@@ -1486,6 +1498,7 @@ class MainWindow(QMainWindow):
 
         # Refresh UI
         self.trans_table.set_entries(self.project.entries)
+        self.event_viewer.set_entries(self.project.entries)
         self.file_tree.load_project(self.project)
 
         total_imported = stats["by_id"] + stats["by_text"]
@@ -1611,6 +1624,7 @@ class MainWindow(QMainWindow):
 
         # Refresh UI
         self.trans_table.set_entries(self.project.entries)
+        self.event_viewer.set_entries(self.project.entries)
         self.file_tree.load_project(self.project)
 
         total_imported = stats['by_text'] + stats['imported']
@@ -1702,6 +1716,7 @@ class MainWindow(QMainWindow):
             # Invalidate cached index so tree view sees new file
             self.project._build_index()
             self.trans_table.set_entries(self.project.entries)
+            self.event_viewer.set_entries(self.project.entries)
             self.file_tree.load_project(self.project)
 
         msg = f"Imported {added} plugin translations."
@@ -2570,10 +2585,18 @@ class MainWindow(QMainWindow):
                 f"Translating {effective}/{total}{eta}: "
                 f"TM filled {tm_count} duplicate(s)"
             )
+        self.event_viewer.refresh_stats()
 
     def _on_status_changed(self):
-        """Handle status change from manual edits."""
+        """Handle status change from manual edits in TranslationTable."""
         self.file_tree.refresh_stats(self.project)
+        self.event_viewer.refresh_current_event()
+
+    def _on_event_viewer_status_changed(self):
+        """Handle status change from Event Viewer (mark reviewed, inline edits)."""
+        self.file_tree.refresh_stats(self.project)
+        self.trans_table._model.refresh_all()
+        self.trans_table._update_stats()
 
     # ── Dark mode ──────────────────────────────────────────────────
 
@@ -2584,6 +2607,7 @@ class MainWindow(QMainWindow):
             app.setStyleSheet(DARK_STYLESHEET)
         else:
             app.setStyleSheet("")
+        self.event_viewer.set_dark_mode(self._dark_mode)
 
     # ── Glossary merge ─────────────────────────────────────────────
 
@@ -2741,16 +2765,18 @@ class MainWindow(QMainWindow):
     def _on_progress(self, current: int, total: int, text: str):
         """Update progress bar with ETA during batch translation."""
         self._batch_done_count = current
-        # Effective progress = engine progress + TM checkpoint fills
+        # Effective progress = engine progress + instant dupe fills
         tm_offset = getattr(self, "_tm_checkpoint_count", 0)
         effective = current + tm_offset
 
+        # Progress bar max includes dupes; engine total doesn't
+        bar_total = self.progress_bar.maximum()
         self.progress_bar.setValue(effective)
 
-        # Calculate ETA based on effective progress
+        # Calculate ETA based on effective progress vs full total
         eta_str = ""
         elapsed = time.time() - self._batch_start_time
-        remaining_count = max(0, total - effective)
+        remaining_count = max(0, bar_total - effective)
         if effective > 0 and elapsed > 0:
             rate = elapsed / effective  # seconds per entry (including TM)
             remaining = remaining_count * rate
@@ -2767,7 +2793,7 @@ class MainWindow(QMainWindow):
             cost_str = f" | ${self.client.session_cost:,.4f}"
 
         self.progress_label.setText(
-            f"Translating {effective}/{total}{eta_str}{cost_str}: {text}"
+            f"Translating {effective}/{bar_total}{eta_str}{cost_str}: {text}"
         )
 
     # ── Translation memory ─────────────────────────────────────────
@@ -2892,14 +2918,14 @@ class MainWindow(QMainWindow):
             else:
                 other_dialog.append(entry)
 
-        # Sort each group for TM priority (dup seeds first, unique in order, dup copies last)
-        female_entries = self._sort_for_tm_priority(female_entries)
-        male_entries = self._sort_for_tm_priority(male_entries)
-        other_dialog = self._sort_for_tm_priority(other_dialog)
-        non_dialog = self._sort_for_tm_priority(non_dialog)
-
         # Combine: female → male → ungendered → non-dialogue
         ordered = female_entries + male_entries + other_dialog + non_dialog
+
+        # Deduplicate: only send unique text to the LLM once
+        to_translate, dupe_map = self._dedup_entries(ordered)
+        total_with_dupes = len(ordered)
+        dupe_total = total_with_dupes - len(to_translate)
+        self._batch_dupe_map = dupe_map
 
         # Build summary for confirmation
         parts = []
@@ -2911,6 +2937,8 @@ class MainWindow(QMainWindow):
             parts.append(f"  Other dialogue: {len(other_dialog)}")
         if non_dialog:
             parts.append(f"  Non-dialogue (DB/plugins): {len(non_dialog)}")
+        if dupe_total:
+            parts.append(f"  Duplicates (auto-fill): {dupe_total}")
         summary = "\n".join(parts)
 
         prefill_notes = []
@@ -2923,7 +2951,8 @@ class MainWindow(QMainWindow):
 
         reply = QMessageBox.question(
             self, "Batch by Actor",
-            f"Translating {len(ordered)} entries grouped by speaker gender:\n\n"
+            f"Translating {len(to_translate)} unique entries "
+            f"(+{dupe_total} duplicates) grouped by speaker gender:\n\n"
             f"{summary}\n\n"
             "Female speakers are translated first, then male, then the rest.\n"
             "Each entry gets explicit speaker gender hints for the LLM.\n\n"
@@ -2939,13 +2968,17 @@ class MainWindow(QMainWindow):
         self.batch_actor_action.setEnabled(False)
         self.stop_action.setEnabled(True)
         self.progress_bar.setVisible(True)
-        self.progress_bar.setMaximum(len(ordered))
+        self.progress_bar.setMaximum(total_with_dupes)
         self.progress_bar.setValue(0)
         self._batch_start_time = time.time()
         self._batch_done_count = 0
         self._tm_checkpoint_count = 0
 
-        self.engine.translate_batch(ordered)
+        # Queue panel shows unique entries only
+        self.queue_panel.load_queue(to_translate)
+        self.tabs.setCurrentWidget(self.queue_panel)
+
+        self.engine.translate_batch(to_translate)
 
     def _run_translation_memory(self) -> int:
         """Fill untranslated entries that match already-translated text.
@@ -2969,6 +3002,7 @@ class MainWindow(QMainWindow):
                 e.translation = translated_map[e.original]
                 e.status = "translated"
                 self.trans_table.update_entry(e.id, e.translation)
+                self.queue_panel.mark_prefill(e.id, e.translation, "TM")
                 self._maybe_add_to_glossary(e)
                 tm_count += 1
 
@@ -3003,6 +3037,7 @@ class MainWindow(QMainWindow):
                 e.translation = glossary[stripped]
                 e.status = "translated"
                 self.trans_table.update_entry(e.id, e.translation)
+                self.queue_panel.mark_prefill(e.id, e.translation, "Glossary")
                 self._maybe_add_to_glossary(e)
                 count += 1
 
@@ -3012,36 +3047,43 @@ class MainWindow(QMainWindow):
         return count
 
     @staticmethod
-    def _sort_for_tm_priority(entries: list) -> list:
-        """Sort entries to maximize translation memory hits at checkpoints.
+    def _dedup_entries(entries: list) -> tuple:
+        """Separate entries into unique seeds and duplicate copies.
 
-        Returns a new list ordered as:
-        1. Seeds — first copy of each duplicated text, shortest first
-           (translate one, TM fills all copies at the next checkpoint)
-        2. Unique — entries appearing only once, in original order
-           (preserves dialogue locality for the translation history window)
-        3. Dupes — remaining duplicate copies, at the end
-           (workers skip these after TM fills them)
+        Returns:
+            (to_translate, dupe_map)
+            - to_translate: list of entries to send to the LLM (one per
+              unique original text), ordered DB → CE → Troops → Maps.
+            - dupe_map: dict mapping original text → list of duplicate
+              entries (excludes the seed).  Empty list for unique text.
         """
-        dup_counts = Counter(e.original for e in entries)
-
-        seen = set()
-        seeds = []
-        unique = []
-        dupes = []
+        dupe_map: dict[str, list] = {}
+        to_translate = []
 
         for e in entries:
-            if dup_counts[e.original] > 1:
-                if e.original not in seen:
-                    seeds.append(e)
-                    seen.add(e.original)
-                else:
-                    dupes.append(e)
+            if e.original in dupe_map:
+                dupe_map[e.original].append(e)
             else:
-                unique.append(e)
+                dupe_map[e.original] = []
+                to_translate.append(e)
 
-        seeds.sort(key=lambda e: len(e.original))
-        return seeds + unique + dupes
+        # Sort: DB first, then CommonEvents, Troops, Maps/other
+        # CE often contains shared dialogue that appears in Maps,
+        # so translating CE first maximises instant dupe fills.
+        def _file_order(entry):
+            f = entry.file
+            if f in ("Actors.json", "Classes.json", "Items.json",
+                     "Weapons.json", "Armors.json", "Skills.json",
+                     "States.json", "Enemies.json", "System.json"):
+                return (0, f)
+            if f == "CommonEvents.json":
+                return (1, f)
+            if f == "Troops.json":
+                return (2, f)
+            return (3, f)
+
+        to_translate.sort(key=_file_order)
+        return to_translate, dupe_map
 
     def _start_batch(self, mode: str = "all"):
         """Shared batch translation logic.
@@ -3090,8 +3132,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Done", f"{labels[mode]} are already translated!")
             return
 
-        # Sort: duplicated short strings first → unique in order → dup copies last
-        untranslated = self._sort_for_tm_priority(untranslated)
+        # Deduplicate: only send unique text to the LLM once.
+        # Duplicates are filled instantly when their seed completes.
+        to_translate, dupe_map = self._dedup_entries(untranslated)
+        total_with_dupes = len(untranslated)
+        dupe_total = total_with_dupes - len(to_translate)
+        self._batch_dupe_map = dupe_map  # used by _on_entry_done
+
+        if dupe_total:
+            self.statusbar.showMessage(
+                f"Queuing {len(to_translate)} unique entries "
+                f"({dupe_total} duplicates will auto-fill)", 5000)
 
         self.batch_action.setEnabled(False)
         self.batch_db_action.setEnabled(False)
@@ -3099,21 +3150,21 @@ class MainWindow(QMainWindow):
         self.batch_actor_action.setEnabled(False)
         self.stop_action.setEnabled(True)
         self.progress_bar.setVisible(True)
-        self.progress_bar.setMaximum(len(untranslated))
+        self.progress_bar.setMaximum(total_with_dupes)
         self.progress_bar.setValue(0)
         self._batch_start_time = time.time()
         self._batch_done_count = 0
-        self._tm_checkpoint_count = 0  # TM fills during batch (not counted by engine)
+        self._tm_checkpoint_count = 0
 
         # Reset cost tracking for this batch
         if self.client.is_cloud:
             self.client.reset_session_cost()
 
-        # Populate the queue panel and switch to it
-        self.queue_panel.load_queue(untranslated)
+        # Populate the queue panel with unique entries only
+        self.queue_panel.load_queue(to_translate)
         self.tabs.setCurrentWidget(self.queue_panel)
 
-        self.engine.translate_batch(untranslated)
+        self.engine.translate_batch(to_translate)
 
     # ── Polish Grammar ──────────────────────────────────────────────
 
@@ -3952,6 +4003,7 @@ class MainWindow(QMainWindow):
 
         # Refresh UI
         self.trans_table.set_entries(self.project.entries)
+        self.event_viewer.set_entries(self.project.entries)
         self.file_tree.load_project(self.project)
 
         total_imported = stats["by_id"] + stats["by_text"]
@@ -4162,6 +4214,8 @@ class MainWindow(QMainWindow):
         if not entries:
             return
 
+        self._batch_dupe_map = {}  # no dupe-filling for manual retranslate
+
         # Store old translations for diff display
         self._old_translations = {e.id: e.translation for e in entries if e.translation}
 
@@ -4203,9 +4257,26 @@ class MainWindow(QMainWindow):
             # uses them consistently in subsequent dialogue entries
             self._maybe_add_to_glossary(entry)
         self.trans_table.update_entry(entry_id, translation)
-        self.file_tree.refresh_stats(self.project)
+        self.event_viewer.update_entry(entry_id, translation)
         # Update queue panel
         self.queue_panel.mark_entry_done(entry_id, translation, source="LLM")
+
+        # Instantly fill duplicates — no checkpoint delay
+        dupe_map = getattr(self, '_batch_dupe_map', {})
+        if entry and entry.original in dupe_map:
+            dupes = dupe_map[entry.original]
+            for dupe in dupes:
+                if dupe.status == "untranslated":
+                    dupe.translation = translation
+                    dupe.status = "translated"
+                    self.trans_table.update_entry(dupe.id, translation)
+                    self._maybe_add_to_glossary(dupe)
+                    self._tm_checkpoint_count += 1
+            # Update progress bar with dupe fills
+            effective = self._batch_done_count + self._tm_checkpoint_count
+            self.progress_bar.setValue(effective)
+
+        self.file_tree.refresh_stats(self.project)
 
     # ── Retranslate single entry with correction ──────────────────
 
