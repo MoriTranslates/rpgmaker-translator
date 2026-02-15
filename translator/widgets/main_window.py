@@ -237,7 +237,7 @@ class MainWindow(QMainWindow):
         self._actors_ready = False  # True after actor gender dialog has been shown/skipped
         self._batch_start_time = 0
         self._batch_done_count = 0
-        self._tm_checkpoint_count = 0
+        self._dupe_fill_count = 0
         self._batch_dupe_map = {}  # original_text -> [duplicate entries]
         self._batch_all_chained = False
         self._last_save_path = ""
@@ -2560,31 +2560,6 @@ class MainWindow(QMainWindow):
         # Auto-fix dropped control codes before saving
         self._restore_missing_codes()
         self._autosave()
-        # Run translation memory to fill duplicates from newly translated entries
-        tm_count = self._run_translation_memory()
-        if tm_count:
-            # Track TM fills separately — workers skip these silently
-            self._tm_checkpoint_count += tm_count
-            # Immediately update progress bar (workers won't emit for these)
-            effective = self._batch_done_count + self._tm_checkpoint_count
-            total = self.progress_bar.maximum()
-            self.progress_bar.setValue(effective)
-            # Recalculate ETA with TM fills counted
-            elapsed = time.time() - self._batch_start_time
-            remaining_count = max(0, total - effective)
-            if effective > 0 and elapsed > 0:
-                rate = elapsed / effective
-                remaining = remaining_count * rate
-                if remaining > 60:
-                    eta = f" | ETA: {remaining/60:.0f}m"
-                else:
-                    eta = f" | ETA: {remaining:.0f}s"
-            else:
-                eta = ""
-            self.progress_label.setText(
-                f"Translating {effective}/{total}{eta}: "
-                f"TM filled {tm_count} duplicate(s)"
-            )
         self.event_viewer.refresh_stats()
 
     def _on_status_changed(self):
@@ -2766,8 +2741,8 @@ class MainWindow(QMainWindow):
         """Update progress bar with ETA during batch translation."""
         self._batch_done_count = current
         # Effective progress = engine progress + instant dupe fills
-        tm_offset = getattr(self, "_tm_checkpoint_count", 0)
-        effective = current + tm_offset
+        dupe_offset = getattr(self, "_dupe_fill_count", 0)
+        effective = current + dupe_offset
 
         # Progress bar max includes dupes; engine total doesn't
         bar_total = self.progress_bar.maximum()
@@ -2778,7 +2753,7 @@ class MainWindow(QMainWindow):
         elapsed = time.time() - self._batch_start_time
         remaining_count = max(0, bar_total - effective)
         if effective > 0 and elapsed > 0:
-            rate = elapsed / effective  # seconds per entry (including TM)
+            rate = elapsed / effective  # seconds per entry (including dupe fills)
             remaining = remaining_count * rate
             if remaining > 3600:
                 eta_str = f" | ETA: {remaining/3600:.1f}h"
@@ -2874,10 +2849,9 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Glossary prefill + translation memory (same as _start_batch)
+        # Glossary prefill (same as _start_batch)
         self._current_batch_mode = "all"
         gp_count = self._run_glossary_prefill()
-        tm_count = self._run_translation_memory()
 
         untranslated = [e for e in self.project.entries if e.status == "untranslated"]
         if not untranslated:
@@ -2941,13 +2915,8 @@ class MainWindow(QMainWindow):
             parts.append(f"  Duplicates (auto-fill): {dupe_total}")
         summary = "\n".join(parts)
 
-        prefill_notes = []
         if gp_count:
-            prefill_notes.append(f"glossary: {gp_count}")
-        if tm_count:
-            prefill_notes.append(f"TM: {tm_count}")
-        if prefill_notes:
-            summary += f"\n\n  (Pre-filled {', '.join(prefill_notes)} entries)"
+            summary += f"\n\n  (Pre-filled glossary: {gp_count} entries)"
 
         reply = QMessageBox.question(
             self, "Batch by Actor",
@@ -2972,44 +2941,13 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self._batch_start_time = time.time()
         self._batch_done_count = 0
-        self._tm_checkpoint_count = 0
+        self._dupe_fill_count = 0
 
         # Queue panel shows unique entries only
         self.queue_panel.load_queue(to_translate)
         self.tabs.setCurrentWidget(self.queue_panel)
 
         self.engine.translate_batch(to_translate)
-
-    def _run_translation_memory(self) -> int:
-        """Fill untranslated entries that match already-translated text.
-
-        Uses self._current_batch_mode to respect db/dialogue filtering.
-        Returns the number of entries filled.
-        """
-        mode = getattr(self, "_current_batch_mode", "all")
-        translated_map = {}
-        for e in self.project.entries:
-            if e.status in ("translated", "reviewed") and e.translation:
-                translated_map[e.original] = e.translation
-
-        tm_count = 0
-        for e in self.project.entries:
-            if e.status == "untranslated" and e.original in translated_map:
-                if mode == "db" and e.file not in self._DB_FILES:
-                    continue
-                if mode == "dialogue" and e.file in self._DB_FILES:
-                    continue
-                e.translation = translated_map[e.original]
-                e.status = "translated"
-                self.trans_table.update_entry(e.id, e.translation)
-                self.queue_panel.mark_prefill(e.id, e.translation, "TM")
-                self._maybe_add_to_glossary(e)
-                tm_count += 1
-
-        if tm_count:
-            self.file_tree.refresh_stats(self.project)
-
-        return tm_count
 
     def _run_glossary_prefill(self) -> int:
         """Fill untranslated entries whose full text is an exact glossary key.
@@ -3107,18 +3045,9 @@ class MainWindow(QMainWindow):
 
         # Glossary prefill: exact-match entries skip LLM entirely
         gp_count = self._run_glossary_prefill()
-
-        # Translation memory: auto-fill exact duplicates from already-translated entries
-        tm_count = self._run_translation_memory()
-
-        prefill_parts = []
         if gp_count:
-            prefill_parts.append(f"glossary: {gp_count}")
-        if tm_count:
-            prefill_parts.append(f"TM: {tm_count}")
-        if prefill_parts:
             self.statusbar.showMessage(
-                f"Pre-filled {', '.join(prefill_parts)} entries", 3000
+                f"Pre-filled glossary: {gp_count} entries", 3000
             )
 
         untranslated = [e for e in self.project.entries if e.status == "untranslated"]
@@ -3154,7 +3083,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self._batch_start_time = time.time()
         self._batch_done_count = 0
-        self._tm_checkpoint_count = 0
+        self._dupe_fill_count = 0
 
         # Reset cost tracking for this batch
         if self.client.is_cloud:
@@ -4271,9 +4200,9 @@ class MainWindow(QMainWindow):
                     dupe.status = "translated"
                     self.trans_table.update_entry(dupe.id, translation)
                     self._maybe_add_to_glossary(dupe)
-                    self._tm_checkpoint_count += 1
+                    self._dupe_fill_count += 1
             # Update progress bar with dupe fills
-            effective = self._batch_done_count + self._tm_checkpoint_count
+            effective = self._batch_done_count + self._dupe_fill_count
             self.progress_bar.setValue(effective)
 
         self.file_tree.refresh_stats(self.project)
