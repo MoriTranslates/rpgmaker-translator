@@ -54,7 +54,30 @@ COL_FIELD = 2
 COL_ORIGINAL = 3
 COL_TRANSLATION = 4
 
-_COLUMN_HEADERS = ["", "File", "Field", "Original (JP)", "Translation (EN)"]
+_COLUMN_HEADERS = ["", "File", "Event", "Original (JP)", "Translation (EN)"]
+
+
+def _extract_event_context(entry_id: str) -> str:
+    """Extract the event context from an entry ID for display.
+
+    Examples:
+        "CommonEvents.json/CE169(リブパイズリ)/dialog_64" → "CE169"
+        "Map001.json/Ev3(EV003)/p0/dialog_5"              → "Ev3/p0"
+        "Troops.json/Troop5(ゴブリン)/p0/dialog_1"         → "Troop5/p0"
+        "Actors.json/1/name"                                → "1"
+        "Map001.json/displayName"                           → ""
+    """
+    parts = entry_id.split("/")
+    if len(parts) < 3:
+        return ""
+    # Middle parts = event context (between filename and entry type)
+    middle = parts[1:-1]
+    # Strip event names in parentheses for brevity: CE169(リブパイズリ) → CE169
+    cleaned = []
+    for part in middle:
+        paren = part.find("(")
+        cleaned.append(part[:paren] if paren > 0 else part)
+    return "/".join(cleaned)
 
 
 class TranslationTableModel(QAbstractTableModel):
@@ -95,11 +118,15 @@ class TranslationTableModel(QAbstractTableModel):
             elif col == COL_FILE:
                 return entry.file
             elif col == COL_FIELD:
-                return entry.field
+                return _extract_event_context(entry.id)
             elif col == COL_ORIGINAL:
                 return entry.original
             elif col == COL_TRANSLATION:
                 return entry.translation
+
+        elif role == Qt.ItemDataRole.ToolTipRole:
+            if col == COL_FIELD:
+                return f"{entry.field} — {entry.id}"
 
         elif role == Qt.ItemDataRole.BackgroundRole:
             return self._status_colors.get(entry.status, QColor(255, 255, 255))

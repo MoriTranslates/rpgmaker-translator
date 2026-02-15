@@ -1578,19 +1578,29 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
+        # Build structural translation map for cross-version matching
+        text_map = {}
+        try:
+            text_map = parser.build_cross_version_map(
+                folder, self.project.project_path)
+        except Exception:
+            pass  # Fall back to ID-only matching
+
         stats = self.project.import_from_game_folder(
-            donor_entries, swap=swap)
+            donor_entries, swap=swap, text_map=text_map)
 
         # Refresh UI
         self.trans_table.set_entries(self.project.entries)
         self.file_tree.load_project(self.project)
 
+        total_imported = stats['by_text'] + stats['imported']
         QMessageBox.information(
             self, "Import Complete",
-            f"Imported {stats['imported']} translations:\n"
-            f"  \u2022 {stats['imported']} matched by position (different text)\n"
+            f"Imported {total_imported} translations:\n"
+            f"  \u2022 {stats['by_text']} matched by structure (cross-version safe)\n"
+            f"  \u2022 {stats['imported']} matched by ID (database entries)\n"
             f"  \u2022 {stats['identical']} identical (not translated in donor)\n"
-            f"  \u2022 {stats['new']} new entries in v1.2 (need translation)\n"
+            f"  \u2022 {stats['new']} new entries (need translation)\n"
             f"  \u2022 {stats['skipped']} already translated (kept)\n"
         )
 

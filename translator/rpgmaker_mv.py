@@ -11,6 +11,7 @@ import re
 import shutil
 import zipfile
 from collections import deque
+from difflib import SequenceMatcher
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -1383,6 +1384,292 @@ class RPGMakerMVParser:
             i += 1
 
         return entries
+
+    # ── Cross-version structural alignment ───────────────────────────
+
+    @staticmethod
+    def _extract_structural_items(cmd_list: list) -> list:
+        """Extract a mixed sequence of structural anchors and text blocks.
+
+        Returns list of tuples:
+          ('A', fingerprint)           — structural anchor (non-text command)
+          ('D', joined_text)           — dialog block (consecutive 401/405 lines)
+          ('C', [choice1, choice2...]) — choice block (102 command)
+        """
+        items = []
+        current_text = []
+        text_code = None  # 401 or 405
+
+        for cmd in cmd_list:
+            if not isinstance(cmd, dict):
+                continue
+            code = cmd.get("code", 0)
+            params = cmd.get("parameters", [])
+            indent = cmd.get("indent", 0)
+
+            if code in (CODE_SHOW_TEXT, CODE_SCROLL_TEXT):
+                text = params[0] if params else ""
+                current_text.append(str(text))
+                text_code = code
+                continue
+
+            # Any non-text command flushes the current text block
+            if current_text:
+                items.append(("D", "\n".join(current_text)))
+                current_text = []
+                text_code = None
+
+            if code == 0:
+                continue  # null terminator, skip
+
+            if code == CODE_SHOW_TEXT_HEADER:
+                # Fingerprint: face, bg, pos — NOT speaker name (may be translated)
+                face = params[0] if len(params) > 0 else ""
+                bg = params[2] if len(params) > 2 else 0
+                pos = params[3] if len(params) > 3 else 2
+                items.append(("A", (code, indent, face, bg, pos)))
+
+            elif code == CODE_SHOW_CHOICES:
+                choices = params[0] if params and isinstance(params[0], list) else []
+                items.append(("C", [str(c) for c in choices]))
+                items.append(("A", (code, indent)))
+
+            elif code == CODE_SCROLL_TEXT_HEADER:
+                items.append(("A", (code, indent)))
+
+            else:
+                # Generic structural anchor
+                items.append(("A", (code, indent)))
+
+        # Flush trailing text
+        if current_text:
+            items.append(("D", "\n".join(current_text)))
+
+        return items
+
+    @staticmethod
+    def _make_comparable_seq(items: list) -> list:
+        """Convert structural items into a hashable sequence for SequenceMatcher.
+
+        Dialog/choice blocks are identified by their preceding anchor + position,
+        so SequenceMatcher can align them structurally even when text differs.
+        """
+        result = []
+        last_anchor = None
+        block_count = 0
+        for item in items:
+            if item[0] == "A":
+                last_anchor = item[1]
+                block_count = 0
+                result.append(("A", item[1]))
+            else:
+                block_count += 1
+                result.append(("B", last_anchor, block_count))
+        return result
+
+    @staticmethod
+    def _pair_text_blocks(items_proj: list, items_donor: list) -> list:
+        """Pair text blocks between project and donor using structural alignment.
+
+        Returns list of (project_text, donor_text) tuples.
+        """
+        # Count text blocks (D and C types)
+        proj_texts = [it for it in items_proj if it[0] in ("D", "C")]
+        donor_texts = [it for it in items_donor if it[0] in ("D", "C")]
+
+        if not proj_texts or not donor_texts:
+            return []
+
+        # Tier 1: same block count → direct 1:1 index matching
+        if len(proj_texts) == len(donor_texts):
+            return list(zip(proj_texts, donor_texts))
+
+        # Tier 2: different block count → SequenceMatcher alignment
+        seq_proj = RPGMakerMVParser._make_comparable_seq(items_proj)
+        seq_donor = RPGMakerMVParser._make_comparable_seq(items_donor)
+
+        sm = SequenceMatcher(None, seq_proj, seq_donor)
+        pairs = []
+        for op, i1, i2, j1, j2 in sm.get_opcodes():
+            if op == "equal":
+                for k in range(i2 - i1):
+                    p_item = items_proj[i1 + k]
+                    d_item = items_donor[j1 + k]
+                    if p_item[0] in ("D", "C") and d_item[0] in ("D", "C"):
+                        pairs.append((p_item, d_item))
+        return pairs
+
+    def build_cross_version_map(self, donor_dir: str, project_dir: str) -> dict:
+        """Build a {project_text: donor_text} translation map by structural alignment.
+
+        Walks raw JSON command lists from both game versions, matches events
+        by RPG Maker ID, then aligns dialogue blocks using non-text commands
+        as structural anchors.
+
+        Args:
+            donor_dir: Path to the donor (translated) game folder.
+            project_dir: Path to the project (original) game folder.
+
+        Returns:
+            Dict mapping project original text to donor translated text.
+        """
+        donor_data = self._find_data_dir(donor_dir)
+        proj_data = self._find_data_dir(project_dir)
+        if not donor_data or not proj_data:
+            return {}
+
+        text_map = {}
+
+        # Process CommonEvents
+        self._align_common_events(donor_data, proj_data, text_map)
+
+        # Process Maps
+        self._align_maps(donor_data, proj_data, text_map)
+
+        # Process Troops
+        self._align_troops(donor_data, proj_data, text_map)
+
+        return text_map
+
+    def _align_common_events(self, donor_data: str, proj_data: str,
+                             text_map: dict):
+        """Align CommonEvents.json between donor and project."""
+        donor_path = os.path.join(donor_data, "CommonEvents.json")
+        proj_path = os.path.join(proj_data, "CommonEvents.json")
+        if not os.path.exists(donor_path) or not os.path.exists(proj_path):
+            return
+
+        with open(donor_path, "r", encoding="utf-8") as f:
+            donor_events = json.load(f)
+        with open(proj_path, "r", encoding="utf-8") as f:
+            proj_events = json.load(f)
+
+        if not isinstance(donor_events, list) or not isinstance(proj_events, list):
+            return
+
+        # Match events by array index (RPG Maker event IDs)
+        for i in range(min(len(donor_events), len(proj_events))):
+            d_ev = donor_events[i]
+            p_ev = proj_events[i]
+            if not d_ev or not p_ev:
+                continue
+            if not isinstance(d_ev, dict) or not isinstance(p_ev, dict):
+                continue
+
+            d_cmds = d_ev.get("list", [])
+            p_cmds = p_ev.get("list", [])
+            if not d_cmds or not p_cmds:
+                continue
+
+            self._align_cmd_lists(d_cmds, p_cmds, text_map)
+
+    def _align_maps(self, donor_data: str, proj_data: str, text_map: dict):
+        """Align Map###.json files between donor and project."""
+        proj_maps = {f for f in os.listdir(proj_data)
+                     if re.match(r'^Map\d+\.json$', f, re.IGNORECASE)}
+        donor_maps = {f for f in os.listdir(donor_data)
+                      if re.match(r'^Map\d+\.json$', f, re.IGNORECASE)}
+
+        for mapfile in sorted(proj_maps & donor_maps):
+            with open(os.path.join(donor_data, mapfile), "r",
+                      encoding="utf-8") as f:
+                d_map = json.load(f)
+            with open(os.path.join(proj_data, mapfile), "r",
+                      encoding="utf-8") as f:
+                p_map = json.load(f)
+
+            if not isinstance(d_map, dict) or not isinstance(p_map, dict):
+                continue
+
+            # Build event lookup by ID for both
+            d_events = {}
+            for ev in d_map.get("events", []):
+                if isinstance(ev, dict):
+                    d_events[ev.get("id", 0)] = ev
+            p_events = {}
+            for ev in p_map.get("events", []):
+                if isinstance(ev, dict):
+                    p_events[ev.get("id", 0)] = ev
+
+            for eid in p_events:
+                if eid not in d_events:
+                    continue
+                d_ev = d_events[eid]
+                p_ev = p_events[eid]
+
+                d_pages = d_ev.get("pages", [])
+                p_pages = p_ev.get("pages", [])
+
+                for pi in range(min(len(d_pages), len(p_pages))):
+                    dp = d_pages[pi]
+                    pp = p_pages[pi]
+                    if not isinstance(dp, dict) or not isinstance(pp, dict):
+                        continue
+                    self._align_cmd_lists(
+                        dp.get("list", []), pp.get("list", []), text_map)
+
+    def _align_troops(self, donor_data: str, proj_data: str,
+                      text_map: dict):
+        """Align Troops.json between donor and project."""
+        donor_path = os.path.join(donor_data, "Troops.json")
+        proj_path = os.path.join(proj_data, "Troops.json")
+        if not os.path.exists(donor_path) or not os.path.exists(proj_path):
+            return
+
+        with open(donor_path, "r", encoding="utf-8") as f:
+            donor_troops = json.load(f)
+        with open(proj_path, "r", encoding="utf-8") as f:
+            proj_troops = json.load(f)
+
+        if not isinstance(donor_troops, list) or not isinstance(proj_troops, list):
+            return
+
+        # Build lookup by troop ID
+        d_by_id = {}
+        for troop in donor_troops:
+            if isinstance(troop, dict):
+                d_by_id[troop.get("id", 0)] = troop
+
+        for troop in proj_troops:
+            if not isinstance(troop, dict):
+                continue
+            tid = troop.get("id", 0)
+            d_troop = d_by_id.get(tid)
+            if not d_troop:
+                continue
+
+            d_pages = d_troop.get("pages", [])
+            p_pages = troop.get("pages", [])
+
+            for pi in range(min(len(d_pages), len(p_pages))):
+                dp = d_pages[pi]
+                pp = p_pages[pi]
+                if not isinstance(dp, dict) or not isinstance(pp, dict):
+                    continue
+                self._align_cmd_lists(
+                    dp.get("list", []), pp.get("list", []), text_map)
+
+    def _align_cmd_lists(self, donor_cmds: list, proj_cmds: list,
+                         text_map: dict):
+        """Align two command lists and add paired texts to text_map."""
+        items_donor = self._extract_structural_items(donor_cmds)
+        items_proj = self._extract_structural_items(proj_cmds)
+
+        pairs = self._pair_text_blocks(items_proj, items_donor)
+
+        for p_item, d_item in pairs:
+            if p_item[0] == "D" and d_item[0] == "D":
+                p_text = p_item[1]
+                d_text = d_item[1]
+                if p_text and d_text and p_text != d_text:
+                    text_map[p_text] = d_text
+            elif p_item[0] == "C" and d_item[0] == "C":
+                # Pair individual choices
+                p_choices = p_item[1]
+                d_choices = d_item[1]
+                for pc, dc in zip(p_choices, d_choices):
+                    if pc and dc and pc != dc:
+                        text_map[pc] = dc
 
     # ── Private: apply translation back to JSON ────────────────────────
 

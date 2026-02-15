@@ -159,7 +159,8 @@ class TranslationProject:
         return stats
 
     def import_from_game_folder(self, donor_entries: list,
-                               swap: bool = False) -> dict:
+                               swap: bool = False,
+                               text_map: dict = None) -> dict:
         """Import translations from an already-translated game folder.
 
         The donor entries come from parsing a translated game with
@@ -167,29 +168,53 @@ class TranslationProject:
         contains the translated text (since the game files are already in
         the target language).
 
+        Uses a two-tier matching strategy:
+        1. ``text_map`` (structural alignment) — matches dialogue blocks by
+           event structure rather than sequential counter IDs, handling
+           cross-version shifts when developers add/remove content.
+        2. ID matching — fallback for database entries (Actors, Items, etc.)
+           whose IDs are stable across versions.
+
         Args:
             donor_entries: Entries parsed from the donor game folder.
             swap: If True, donor text becomes the new ``original`` (JP)
                 and the project's current ``original`` becomes the
                 ``translation`` (EN).  Use when the project was opened
                 from the translated game and the donor is the JP original.
+            text_map: Optional dict mapping project original text to donor
+                translated text, built by structural alignment of raw JSON
+                command lists.  Takes priority over ID matching.
 
         Returns:
-            Dict with stats: {"imported": int, "identical": int,
-                              "skipped": int, "new": int}
+            Dict with stats: {"imported": int, "by_text": int,
+                              "identical": int, "skipped": int, "new": int}
         """
         if not hasattr(self, "_by_id"):
             self._build_index()
 
         donor_by_id = {e.id: e.original for e in donor_entries}
 
-        stats = {"imported": 0, "identical": 0, "skipped": 0, "new": 0}
+        stats = {"imported": 0, "by_text": 0, "identical": 0,
+                 "skipped": 0, "new": 0}
 
         for entry in self.entries:
             if entry.status != "untranslated":
                 stats["skipped"] += 1
                 continue
 
+            # Strategy 1: structural text_map (cross-version safe)
+            if text_map and entry.original in text_map:
+                donor_text = text_map[entry.original]
+                if swap:
+                    entry.translation = entry.original
+                    entry.original = donor_text
+                else:
+                    entry.translation = donor_text
+                entry.status = "translated"
+                stats["by_text"] += 1
+                continue
+
+            # Strategy 2: ID matching (stable for database entries)
             donor_text = donor_by_id.get(entry.id)
             if donor_text is None:
                 stats["new"] += 1
