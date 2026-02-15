@@ -37,7 +37,7 @@ class AutoTunerWorker(QObject):
     error = pyqtSignal(str)                 # error message
 
     SURVEY_STEPS = [5, 10, 15, 20, 25, 30]
-    REPS = 5               # batches per size in rounds 2 & 3
+    REPS = 3               # batches per size in rounds 2 & 3
     WARMUP_SIZE = 2         # entries used to prime KV cache
     MIN_ENTRIES = 107       # minimum for round 1 (warmup + 5+10+15+20+25+30)
 
@@ -222,9 +222,10 @@ class AutoTunerWorker(QObject):
                          size, combined[size], len(all_eps))
 
         if combined:
-            optimal = max(combined, key=combined.get)
+            # Tiebreaker: prefer larger batch (more shared context = better quality)
+            optimal = max(combined, key=lambda s: (combined[s], s))
         elif r2_avg:
-            optimal = max(r2_avg, key=r2_avg.get)
+            optimal = max(r2_avg, key=lambda s: (r2_avg[s], s))
         else:
             optimal = top3_sizes[0]
 
