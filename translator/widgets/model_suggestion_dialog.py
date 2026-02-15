@@ -76,7 +76,7 @@ def _recommend_model(vram_mb: float) -> str:
     usable = vram_gb - _VRAM_OVERHEAD_GB
     best = None
     for label, quant, file_gb, vram_needed, quality, tag in _SUGOI_MODELS:
-        if vram_needed <= vram_gb:
+        if vram_needed <= usable:
             best = tag  # keep updating — list is ordered by quality ascending
     return best or _SUGOI_MODELS[0][5]  # fallback to smallest
 
@@ -344,12 +344,16 @@ class ModelSuggestionDialog(QDialog):
 
     def _on_sugoi_selected(self):
         """Sugoi table selection — clear Qwen3 selection and update command."""
+        self._qwen_table.selectionModel().blockSignals(True)
         self._qwen_table.clearSelection()
+        self._qwen_table.selectionModel().blockSignals(False)
         self._update_command()
 
     def _on_qwen_selected(self):
         """Qwen3 table selection — clear Sugoi selection and update command."""
+        self._table.selectionModel().blockSignals(True)
         self._table.clearSelection()
+        self._table.selectionModel().blockSignals(False)
         self._update_command()
 
     def _update_command(self):

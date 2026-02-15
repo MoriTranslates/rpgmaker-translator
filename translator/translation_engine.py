@@ -255,6 +255,7 @@ class TranslationEngine(QObject):
         self._tuner_thread = None
         self._tuner_worker = None
         self._pending_entries = None
+        self._cancelled = False
 
     @property
     def is_running(self) -> bool:
@@ -279,6 +280,7 @@ class TranslationEngine(QObject):
         self._total = len(to_translate)
         self._progress_count = 0
         self._translate_count = 0
+        self._cancelled = False
 
         # Auto-tune: run calibration first if enabled
         if (self.auto_tune
@@ -317,6 +319,12 @@ class TranslationEngine(QObject):
 
         self.batch_size = optimal_batch_size
         self.calibration_done.emit(optimal_batch_size)
+
+        # If cancelled during calibration, don't start main batch
+        if self._cancelled:
+            self._pending_entries = None
+            self.finished.emit()
+            return
 
         # Remove entries already translated during calibration
         remaining = [e for e in self._pending_entries if e.status == "untranslated"]
@@ -418,6 +426,7 @@ class TranslationEngine(QObject):
 
     def cancel(self):
         """Cancel all running workers (including auto-tuner)."""
+        self._cancelled = True
         if self._tuner_worker:
             self._tuner_worker.cancel()
         for worker in self._workers:

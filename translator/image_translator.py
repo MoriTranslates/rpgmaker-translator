@@ -82,6 +82,8 @@ def decrypt_rpgmvp(file_path: str, encryption_key: str) -> bytes:
     - Remaining bytes: original PNG with first 16 bytes XOR'd with key
     """
     key_bytes = bytes.fromhex(encryption_key)
+    if len(key_bytes) < 16:
+        raise ValueError(f"Encryption key too short: {len(key_bytes)} bytes, need 16")
 
     with open(file_path, "rb") as f:
         data = f.read()
@@ -107,6 +109,8 @@ def encrypt_to_rpgmvp(png_path: str, output_path: str, encryption_key: str):
     the first 16 bytes of PNG data with the encryption key.
     """
     key_bytes = bytes.fromhex(encryption_key)
+    if len(key_bytes) < 16:
+        raise ValueError(f"Encryption key too short: {len(key_bytes)} bytes, need 16")
 
     with open(png_path, "rb") as f:
         png_data = f.read()

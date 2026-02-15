@@ -347,6 +347,15 @@ class ImagePanel(QWidget):
         if not os.path.isdir(folder):
             return
 
+        # Cancel any running worker before switching folders
+        if self._thread is not None:
+            if self._worker:
+                self._worker.cancel()
+            self._thread.quit()
+            self._thread.wait(3000)
+            self._thread = None
+            self._worker = None
+
         self._entries = []
         for fname in sorted(os.listdir(folder)):
             if fname.lower().endswith(ALL_IMAGE_EXTS):
@@ -646,6 +655,8 @@ class ImagePanel(QWidget):
 
     def _on_image_done(self, idx: int):
         """Update UI after one image is processed."""
+        if idx < 0 or idx >= len(self._entries):
+            return  # Stale signal from previous folder
         self._refresh_table()
         # If this is the currently selected image, update preview + regions
         if idx == self._selected_idx:

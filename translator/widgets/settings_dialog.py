@@ -28,10 +28,14 @@ class _ModelFetcher(QThread):
         self._url = url
 
     def run(self):
-        old_url = self._client.base_url
-        self._client.base_url = self._url
-        models = self._client.list_models()
-        self._client.base_url = old_url
+        # Fetch models without mutating the shared client
+        import requests as _req
+        try:
+            r = _req.get(f"{self._url}/api/tags", timeout=10)
+            r.raise_for_status()
+            models = [m["name"] for m in r.json().get("models", []) if "name" in m]
+        except Exception:
+            models = []
         self.done.emit(models)
 
 
@@ -586,17 +590,34 @@ class SettingsDialog(QDialog):
         self._model_fetcher.start()
 
     def _test_connection(self):
-        """Test if the translation backend is reachable."""
+        """Test if the translation backend is reachable without mutating shared client."""
+        import requests as _req
         provider = self.provider_combo.currentText()
-        # Temporarily apply settings for the test
-        old_provider = self.client.provider
-        old_key = self.client.api_key
-        old_url = self.client.base_url
-        self.client.provider = provider
-        self.client.api_key = self.api_key_edit.text().strip()
-        self.client.base_url = self.url_edit.text().strip() or "http://localhost:11434"
+        url = self.url_edit.text().strip() or "http://localhost:11434"
+        api_key = self.api_key_edit.text().strip()
 
-        if self.client.is_available():
+        ok = False
+        if provider == "Ollama (Local)":
+            try:
+                r = _req.get(f"{url}/api/tags", timeout=5)
+                ok = r.status_code == 200
+            except Exception:
+                ok = False
+        else:
+            # Cloud provider — test with a lightweight models list call
+            try:
+                import openai
+                from ..ai_client import PROVIDER_URLS
+                base = PROVIDER_URLS.get(provider)
+                if not base and provider == "Custom":
+                    base = url
+                client = openai.OpenAI(api_key=api_key, base_url=base, timeout=10)
+                client.models.list()
+                ok = True
+            except Exception:
+                ok = False
+
+        if ok:
             QMessageBox.information(
                 self, "Connection OK",
                 f"Successfully connected to {provider}!"
@@ -610,11 +631,6 @@ class SettingsDialog(QDialog):
                     "Check that your API key is correct and the service is available."
                 )
             QMessageBox.warning(self, "Connection Failed", msg)
-
-        # Restore original settings (will be applied for real on Save)
-        self.client.provider = old_provider
-        self.client.api_key = old_key
-        self.client.base_url = old_url
 
     def _suggest_model(self):
         """Show GPU-aware model recommendation dialog."""

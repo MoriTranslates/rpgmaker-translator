@@ -87,7 +87,7 @@ class GPUMonitorPanel(QWidget):
             result = subprocess.run(
                 _CMD,
                 capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if result.returncode != 0:
                 if self._available:
@@ -133,7 +133,7 @@ class GPUMonitorPanel(QWidget):
 
             self._power_label.setText(f"Power: {power:.0f}W")
 
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
             if self._available or not hasattr(self, '_init_done'):
                 self._set_unavailable()
             self._init_done = True

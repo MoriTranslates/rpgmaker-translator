@@ -6,7 +6,7 @@
 
 <p align="center">
 Translate RPG Maker MV/MZ games from Japanese to English.<br>
-<b>Local LLM</b> (Ollama + Sugoi — free, private, no content filters) or <b>Cloud API</b> (OpenAI, Gemini, DeepSeek, Anthropic — fast, pay-per-token).<br>
+<b>Local LLM</b> (Ollama + Sugoi — free, private, no content filters) or <b>Cloud API</b> (OpenAI, Gemini, DeepSeek, Anthropic — experimental, pay-per-token).<br>
 Auto-tuned to maximize GPU speed. Pronoun-aware. Glossary-driven. Batch translation with resume.<br>
 Designed by a human, coded with <a href="https://claude.ai/code">Claude Code</a>.
 Cloud API engine ported from <a href="https://github.com/dazedanon/DazedMTLTool">DazedMTLTool</a> (MIT).
@@ -26,7 +26,7 @@ Open a game folder. Hit Batch Translate. Get a playable English translation. Ope
 | | |
 |---|---|
 | **Local LLM (free)** | Ollama + [Sugoi Ultra 14B](https://huggingface.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF) on your GPU — auto-tuned for your hardware, no API keys, no content filters, no account bans. Your data never leaves your PC |
-| **Cloud API (pay-per-token)** | OpenAI, Gemini, DeepSeek, Anthropic — DazedMTL-compatible batch mode with live cost tracking |
+| **Cloud API (experimental)** | OpenAI, Gemini, DeepSeek, Anthropic — DazedMTL-compatible batch mode with live cost tracking |
 | **Pronoun system** | Actor genders, speaker detection, `\N[n]` character mapping — the LLM knows who's "he" and who's "she" |
 | **Glossary-driven** | Two-layer glossary auto-built from translated DB names — "Potion" stays "Potion" everywhere |
 | **Open in RPG Maker** | One-click workspace with directory junctions — edit and playtest translations in RPG Maker's visual editor |
@@ -129,7 +129,9 @@ For non-English targets (Chinese, Korean, Spanish, French, etc.), use **Qwen3** 
 
 ---
 
-## Cloud API Providers
+## Cloud API Providers (Experimental)
+
+> **Experimental:** Cloud API support is functional but less battle-tested than local Ollama. Expect occasional edge cases. Cloud APIs may also refuse or filter adult content — see [Local LLM note above](#no-gpu-use-cloud-apis).
 
 | Provider | Models | Pricing (per 1M tokens) |
 |---|---|---|

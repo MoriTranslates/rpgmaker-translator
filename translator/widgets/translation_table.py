@@ -903,8 +903,9 @@ class TranslationTable(QWidget):
             entry.status = "untranslated"
 
         # Sync back to the model (refreshes colors + status icon)
+        # Note: refresh_row triggers dataChanged → _on_model_data_changed → status_changed
+        # so we don't need a separate emit here
         self._model.refresh_row(row)
-        self.status_changed.emit()
 
     def _show_editor_context_menu(self, pos):
         """Right-click menu on translation editor — glossary add + insert codes."""
@@ -1059,9 +1060,9 @@ class TranslationTable(QWidget):
         if not find:
             return
 
-        # Search from current position forward through all entries
+        # Search from next position forward through all entries
         n = len(self._all_entries)
-        for offset in range(n):
+        for offset in range(1, n + 1):
             idx = (self._replace_index + offset) % n
             entry = self._all_entries[idx]
             if entry.translation and find in entry.translation:

@@ -390,7 +390,9 @@ class AIClient:
         self.vision_model = ""   # Vision model for image OCR
         self.dazed_mode = False  # DazedMTL mode toggle (batch 30, DazedMTL prompt)
         self._managed_proc = None  # subprocess.Popen if we started Ollama
-        # Cost tracking (cloud APIs only)
+        # Cost tracking (cloud APIs only) — lock protects parallel worker updates
+        import threading
+        self._token_lock = threading.Lock()
         self.session_input_tokens = 0
         self.session_output_tokens = 0
 
@@ -505,13 +507,16 @@ class AIClient:
                     log.info("Stopped model: %s", name)
                 except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
                     # Fallback to API method
-                    requests.post(
-                        f"{self.base_url}/api/generate",
-                        json={"model": name, "keep_alive": 0},
-                        timeout=10,
-                    )
-                    count += 1
-                    log.info("Unloaded model via API: %s", name)
+                    try:
+                        requests.post(
+                            f"{self.base_url}/api/generate",
+                            json={"model": name, "keep_alive": 0},
+                            timeout=10,
+                        )
+                        count += 1
+                        log.info("Unloaded model via API: %s", name)
+                    except (requests.RequestException, OSError):
+                        log.debug("Failed to unload model %s via both CLI and API", name)
             return count
         except (requests.RequestException, OSError) as exc:
             log.debug("Failed to unload models: %s", exc)
@@ -594,10 +599,11 @@ class AIClient:
         if response.choices:
             content = response.choices[0].message.content or ""
 
-        # Track token usage for cost calculation
+        # Track token usage for cost calculation (thread-safe for parallel workers)
         if hasattr(response, "usage") and response.usage:
-            self.session_input_tokens += response.usage.prompt_tokens or 0
-            self.session_output_tokens += response.usage.completion_tokens or 0
+            with self._token_lock:
+                self.session_input_tokens += response.usage.prompt_tokens or 0
+                self.session_output_tokens += response.usage.completion_tokens or 0
 
         # Return in Ollama format so all callers stay unchanged
         return {"message": {"content": content}}
@@ -793,7 +799,7 @@ class AIClient:
             if result and self.target_language == "Pig Latin":
                 result = _to_pig_latin(result)
             return result if result else text
-        except requests.RequestException:
+        except (requests.RequestException, ConnectionError):
             return text
 
     def translate_names_batch(self, items: list[tuple[str, str, str]]) -> dict[str, str]:
@@ -856,7 +862,7 @@ class AIClient:
             raw = self._strip_thinking(data.get("message", {}).get("content", "").strip())
             if not raw:
                 return {}
-        except requests.RequestException:
+        except (requests.RequestException, ConnectionError):
             return {}
 
         expected_keys = [key for key, *_ in items]
@@ -1174,6 +1180,8 @@ class AIClient:
             if not self._strip_thinking(result):
                 raise ConnectionError("Ollama returned empty translation")
 
+            # Save raw result (with «CODEn» placeholders) before restoring codes
+            raw_result = self._strip_thinking(result)
             result = self._postprocess_result(result, code_map)
 
             # Auto-retry if the translation still contains Japanese characters
@@ -1184,12 +1192,12 @@ class AIClient:
                     "You MUST translate ALL Japanese text to English. "
                     "Do not leave any hiragana, katakana, or kanji in the output. "
                     "Do not romanize Japanese words — translate them to proper English.\n\n"
-                    f"Fix this translation:\n{result}"
+                    f"Fix this translation:\n{raw_result}"
                 )
                 messages_retry = [
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": user_msg},
-                    {"role": "assistant", "content": result},
+                    {"role": "assistant", "content": raw_result},
                     {"role": "user", "content": retry_msg},
                 ]
                 try:
@@ -1206,12 +1214,12 @@ class AIClient:
                     retry_result = data2.get("message", {}).get("content", "").strip()
                     if retry_result:
                         result = self._postprocess_result(retry_result, code_map)
-                except requests.RequestException as exc:
+                except (requests.RequestException, ConnectionError) as exc:
                     log.debug("Japanese-retry failed, keeping original: %s", exc)
 
             return result
-        except requests.RequestException as e:
-            raise ConnectionError(f"Ollama API error: {e}") from e
+        except (requests.RequestException, ConnectionError) as e:
+            raise ConnectionError(f"API error: {e}") from e
 
     def polish(self, text: str) -> str:
         """Polish an existing English translation for grammar and fluency.
@@ -1255,7 +1263,7 @@ class AIClient:
                 result = self._restore_codes(result, code_map)
 
             return result
-        except requests.RequestException:
+        except (requests.RequestException, ConnectionError):
             return text  # Keep original on error
 
     # ── Batch JSON translation (DEPRECATED) ─────────────────────
@@ -1455,7 +1463,7 @@ class AIClient:
             raw = self._strip_thinking(data.get("message", {}).get("content", "").strip())
             if not raw:
                 raise ConnectionError("Empty response for batch translation")
-        except requests.RequestException as e:
+        except (requests.RequestException, ConnectionError) as e:
             raise ConnectionError(f"API error: {e}") from e
 
         parsed = self._parse_batch_response(raw, expected_keys)
@@ -1595,7 +1603,7 @@ class AIClient:
             raw = self._strip_thinking(data.get("message", {}).get("content", "").strip())
             if not raw:
                 raise ConnectionError("Empty response for batch polish")
-        except requests.RequestException as e:
+        except (requests.RequestException, ConnectionError) as e:
             raise ConnectionError(f"API error: {e}") from e
 
         parsed = self._parse_batch_response(raw, expected_keys)
@@ -1659,7 +1667,7 @@ class AIClient:
                         data2.get("message", {}).get("content", "").strip(), code_map)
                     if result2 and result2 not in variants:
                         variants.append(result2)
-            except requests.RequestException as exc:
+            except (requests.RequestException, ConnectionError) as exc:
                 log.debug("Variant %d/%d failed: %s", len(variants) + 1, 3, exc)
 
         return variants

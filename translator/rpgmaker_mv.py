@@ -186,13 +186,13 @@ def _is_plugin_display_text(text: str) -> bool:
 
 # Gender detection keywords
 _FEMALE_HINTS = re.compile(
-    r'女|姫|嬢|娘|母|姉|妹|妻|彼女|お姉|おかあ|少女|王女|巫女|メイド|'
-    r'actress|female|girl|woman|princess|queen|lady|witch|priestess|maid',
+    r'彼女|お姉|少女|王女|巫女|メイド|おかあ|女|姫|嬢|娘|母|姉|妹|妻|'
+    r'\bactress\b|\bfemale\b|\bgirl\b|\bwoman\b|\bprincess\b|\bqueen\b|\blady\b|\bwitch\b|\bpriestess\b|\bmaid\b',
     re.IGNORECASE
 )
 _MALE_HINTS = re.compile(
-    r'男|王子|父|兄|弟|夫|彼|息子|少年|勇者|騎士|おとうさん|'
-    r'actor|male|boy|man|prince|king|knight|hero|lord',
+    r'おとうさん|少年|勇者|騎士|王子|息子|男|父|兄|弟|夫|彼|'
+    r'\bactor\b|\bmale\b|\bboy\b|\bman\b|\bprince\b|\bking\b|\bknight\b|\bhero\b|\blord\b',
     re.IGNORECASE
 )
 
@@ -1346,7 +1346,7 @@ class RPGMakerMVParser:
             if self.extract_script_strings and code == CODE_SCRIPT:
                 # Collect full script: 355 line + all following 655 lines
                 script_lines = [params[0] if params and isinstance(params[0], str) else ""]
-                j = i
+                j = i + 1
                 while j < len(cmd_list):
                     c = cmd_list[j]
                     if isinstance(c, dict) and c.get("code") == CODE_SCRIPT_CONT:
@@ -1599,7 +1599,7 @@ class RPGMakerMVParser:
 
         # System.json entries
         elif filename == "System.json":
-            if "gameTitle" in entry.id and not entry.id.endswith("terms"):
+            if entry.id == "System.json/gameTitle":
                 data["gameTitle"] = entry.translation
             elif "terms/messages/" in entry.id:
                 key = parts[-1]

@@ -151,6 +151,23 @@ class FileTreeWidget(QTreeWidget):
             if filename == "__ALL__":
                 child.setText(1, f"{project.translated_count}/{project.total}")
                 self._update_item_stats(child, project)
+            elif filename == "__SCRIPT_ALL__":
+                # Script Strings category — compute from script_variable entries
+                script_entries = [e for e in project.entries if e.field == "script_variable"]
+                translated = sum(1 for e in script_entries if e.status in ("translated", "reviewed"))
+                child.setText(1, f"{translated}/{len(script_entries)}")
+                cat_translated += translated
+                cat_total += len(script_entries)
+                self._update_item_stats(child, project)
+            elif filename and filename.startswith("__SCRIPT__"):
+                # Script entries for a specific file
+                real_file = filename[len("__SCRIPT__"):]
+                script_entries = [e for e in project.entries
+                                  if e.field == "script_variable" and e.file == real_file]
+                translated = sum(1 for e in script_entries if e.status in ("translated", "reviewed"))
+                child.setText(1, f"{translated}/{len(script_entries)}")
+                cat_translated += translated
+                cat_total += len(script_entries)
             elif filename:
                 translated, total = project.stats_for_file(filename)
                 child.setText(1, f"{translated}/{total}")
