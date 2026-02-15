@@ -7,6 +7,7 @@ import requests
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from .ai_client import AIClient
+from .auto_tuner import AutoTunerWorker
 from .project_model import TranslationEntry
 
 log = logging.getLogger(__name__)
@@ -233,6 +234,8 @@ class TranslationEngine(QObject):
     finished = pyqtSignal()
     error = pyqtSignal(str, str)
     checkpoint = pyqtSignal()
+    calibrating = pyqtSignal(str)           # status message during auto-tune
+    calibration_done = pyqtSignal(int)      # optimal batch_size found
 
     CHECKPOINT_INTERVAL = 25  # auto-save every N translated entries
 
@@ -242,19 +245,28 @@ class TranslationEngine(QObject):
         self.num_workers = 2
         self.batch_size = 1  # entries per JSON batch (1 = single-entry; 30 = DazedMTL/cloud batch mode)
         self.max_history = 10  # translation history window (0 = disabled)
+        self.auto_tune = False  # auto-calibrate batch_size before batch
         self._threads = []
         self._workers = []
         self._total = 0
         self._progress_count = 0
         self._translate_count = 0
         self._finished_workers = 0
+        self._tuner_thread = None
+        self._tuner_worker = None
+        self._pending_entries = None
 
     @property
     def is_running(self) -> bool:
         return any(t.isRunning() for t in self._threads)
 
     def translate_batch(self, entries: list):
-        """Start batch translation with parallel workers."""
+        """Start batch translation with parallel workers.
+
+        If auto_tune is enabled and conditions are met (local Ollama,
+        batch_size > 1, enough entries), runs a calibration phase first
+        to find the optimal batch_size before starting the main batch.
+        """
         if self.is_running:
             return
 
@@ -267,6 +279,57 @@ class TranslationEngine(QObject):
         self._total = len(to_translate)
         self._progress_count = 0
         self._translate_count = 0
+
+        # Auto-tune: run calibration first if enabled
+        if (self.auto_tune
+                and self.batch_size > 1
+                and not getattr(self.client, 'is_cloud', False)
+                and len(to_translate) >= AutoTunerWorker.MIN_ENTRIES):
+            self._pending_entries = to_translate
+            self._start_calibration(to_translate)
+            return
+
+        self._start_workers(to_translate)
+
+    def _start_calibration(self, entries: list):
+        """Run auto-tuner in a background thread before main batch."""
+        self._tuner_thread = QThread()
+        self._tuner_worker = AutoTunerWorker(self.client, entries)
+        self._tuner_worker.moveToThread(self._tuner_thread)
+
+        self._tuner_thread.started.connect(self._tuner_worker.run)
+        self._tuner_worker.entry_done.connect(self._on_entry_done)
+        self._tuner_worker.item_processed.connect(self._on_item_processed)
+        self._tuner_worker.progress.connect(self.calibrating.emit)
+        self._tuner_worker.finished.connect(self._on_calibration_done)
+        self._tuner_worker.error.connect(lambda msg: self.error.emit("calibration", msg))
+
+        self._tuner_thread.start()
+
+    def _on_calibration_done(self, optimal_batch_size: int):
+        """Calibration finished — apply result and start main batch."""
+        # Clean up tuner thread
+        if self._tuner_thread:
+            self._tuner_thread.quit()
+            self._tuner_thread.wait()
+            self._tuner_thread = None
+            self._tuner_worker = None
+
+        self.batch_size = optimal_batch_size
+        self.calibration_done.emit(optimal_batch_size)
+
+        # Remove entries already translated during calibration
+        remaining = [e for e in self._pending_entries if e.status == "untranslated"]
+        self._pending_entries = None
+
+        if remaining:
+            self._total = len(remaining) + self._translate_count
+            self._start_workers(remaining)
+        else:
+            self.finished.emit()
+
+    def _start_workers(self, to_translate: list):
+        """Spawn parallel worker threads for the main translation batch."""
         self._finished_workers = 0
         self._threads = []
         self._workers = []
@@ -354,7 +417,9 @@ class TranslationEngine(QObject):
         )
 
     def cancel(self):
-        """Cancel all running workers."""
+        """Cancel all running workers (including auto-tuner)."""
+        if self._tuner_worker:
+            self._tuner_worker.cancel()
         for worker in self._workers:
             worker.cancel()
 

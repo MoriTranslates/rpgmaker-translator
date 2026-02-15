@@ -659,6 +659,8 @@ class MainWindow(QMainWindow):
         self.engine.error.connect(self._on_error)
         self.engine.checkpoint.connect(self._on_checkpoint)
         self.engine.finished.connect(self._on_batch_finished)
+        self.engine.calibrating.connect(self._on_calibrating)
+        self.engine.calibration_done.connect(self._on_calibration_done)
 
     # ── Actions ────────────────────────────────────────────────────
 
@@ -2588,6 +2590,8 @@ class MainWindow(QMainWindow):
             self.client._prompt_preset = cfg["prompt_preset"]
         if "dazed_mode" in cfg:
             self.client.dazed_mode = cfg["dazed_mode"]
+        if "auto_tune" in cfg:
+            self.engine.auto_tune = cfg["auto_tune"]
 
     def _save_settings(self):
         """Persist current settings to _settings.json."""
@@ -2610,6 +2614,7 @@ class MainWindow(QMainWindow):
             "vision_model": getattr(self.client, "vision_model", ""),
             "extract_script_strings": self.parser.extract_script_strings,
             "single_401_mode": self.parser.single_401_mode,
+            "auto_tune": self.engine.auto_tune,
         }
         try:
             with open(self._SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -2636,6 +2641,17 @@ class MainWindow(QMainWindow):
             self.statusbar.showMessage("Auto-saved", 2000)
         except Exception as e:
             self.statusbar.showMessage(f"Auto-save failed: {e}", 5000)
+
+    # ── Auto-tune callbacks ─────────────────────────────────────────
+
+    def _on_calibrating(self, status: str):
+        """Show auto-tune calibration status in progress label."""
+        self.progress_label.setText(f"Auto-tuning: {status}")
+
+    def _on_calibration_done(self, optimal_batch_size: int):
+        """Show calibration result in status bar."""
+        self.statusbar.showMessage(
+            f"Auto-tune complete: batch_size = {optimal_batch_size}", 8000)
 
     # ── Progress ETA ───────────────────────────────────────────────
 
