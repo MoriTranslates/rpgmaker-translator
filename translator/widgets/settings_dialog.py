@@ -15,6 +15,7 @@ from ..ai_client import (
     get_model_pricing, CLOUD_DEFAULT_WORKERS, LOCAL_DEFAULT_WORKERS,
 )
 from ..rpgmaker_mv import RPGMakerMVParser
+from .model_suggestion_dialog import ModelSuggestionDialog
 
 
 class _ModelFetcher(QThread):
@@ -91,6 +92,11 @@ class SettingsDialog(QDialog):
         self.test_btn = QPushButton("Test Connection")
         self.test_btn.clicked.connect(self._test_connection)
         model_row.addWidget(self.test_btn)
+
+        self.suggest_btn = QPushButton("Suggest Model")
+        self.suggest_btn.setToolTip("Detect your GPU and recommend the best model")
+        self.suggest_btn.clicked.connect(self._suggest_model)
+        model_row.addWidget(self.suggest_btn)
 
         conn_form.addRow("Model:", model_row)
 
@@ -609,6 +615,31 @@ class SettingsDialog(QDialog):
         self.client.provider = old_provider
         self.client.api_key = old_key
         self.client.base_url = old_url
+
+    def _suggest_model(self):
+        """Show GPU-aware model recommendation dialog."""
+        # Get currently installed models
+        installed = []
+        for i in range(self.model_combo.count()):
+            installed.append(self.model_combo.itemText(i))
+
+        dlg = ModelSuggestionDialog(
+            installed_models=installed, parent=self)
+        dlg.model_selected.connect(self._on_suggested_model_selected)
+        dlg.exec()
+
+    def _on_suggested_model_selected(self, tag: str):
+        """Apply the model selected from suggestion dialog."""
+        # Check if model is already in combo
+        for i in range(self.model_combo.count()):
+            if tag.lower() in self.model_combo.itemText(i).lower():
+                self.model_combo.setCurrentIndex(i)
+                return
+        # Not in combo — add it and select
+        self.model_combo.addItem(tag)
+        self.model_combo.setCurrentText(tag)
+        # Refresh model list to pick up newly pulled models
+        self._refresh_models()
 
     # ── Language / model auto-update ─────────────────────────────────
 

@@ -7,7 +7,7 @@
 <p align="center">
 Translate RPG Maker MV/MZ games from Japanese to English.<br>
 <b>Local LLM</b> (Ollama + Sugoi — free, private, no limits) or <b>Cloud API</b> (OpenAI, Gemini, DeepSeek, Anthropic — fast, pay-per-token).<br>
-Pronoun-aware. Glossary-driven. Batch translation with resume. Open translations in RPG Maker.<br>
+Auto-tuned to maximize GPU speed. Pronoun-aware. Glossary-driven. Batch translation with resume.<br>
 Designed by a human, coded with <a href="https://claude.ai/code">Claude Code</a>.
 Cloud API engine ported from <a href="https://github.com/dazedanon/DazedMTLTool">DazedMTLTool</a> (MIT).
 </p>
@@ -25,7 +25,7 @@ Open a game folder. Hit Batch Translate. Get a playable English translation. Ope
 
 | | |
 |---|---|
-| **Local LLM (free)** | Ollama + [Sugoi Ultra 14B](https://huggingface.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF) on your GPU — no API keys, no limits |
+| **Local LLM (free)** | Ollama + [Sugoi Ultra 14B](https://huggingface.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF) on your GPU — auto-tuned for your hardware, no API keys, no limits |
 | **Cloud API (pay-per-token)** | OpenAI, Gemini, DeepSeek, Anthropic — DazedMTL-compatible batch mode with live cost tracking |
 | **Pronoun system** | Actor genders, speaker detection, `\N[n]` character mapping — the LLM knows who's "he" and who's "she" |
 | **Glossary-driven** | Two-layer glossary auto-built from translated DB names — "Potion" stays "Potion" everywhere |
@@ -60,6 +60,7 @@ Open a game folder. Hit Batch Translate. Get a playable English translation. Ope
 - **Translation history** — Last 10 translations sent as context so the LLM maintains consistent tone and pronouns across sequential dialogue.
 - **Auto-retry** — Detects leftover Japanese in output and retries with a stronger prompt.
 - **Auto-save & checkpointing** — Saves every 25 entries during batch. Crash-proof.
+- **Auto-tune** — Tournament-style calibration finds your GPU's optimal batch size automatically. Just hit translate and it figures out the fastest settings.
 - **DazedMTL Mode** — One-click toggle: batch 30, 4 workers, DazedMTL prompt. Works with both local Sugoi and cloud APIs.
 - **Open in RPG Maker** — Creates a workspace with directory junctions so you can QA and playtest translations in RPG Maker's visual editor. Auto-detects MV vs MZ.
 - **Cloud cost tracking** — Real-time token count and USD cost during batch translation.
@@ -205,6 +206,7 @@ Project entries override general entries for the same JP term.
 | Context window | 3 | Recent dialogue lines as context (higher = better coherence) |
 | Workers | 2 | Parallel translation threads (auto-set by provider) |
 | Batch size | 1 | Lines per request (auto-set: 1 local, 30 cloud) |
+| Auto-tune batch size | Off | Tournament calibration tests batch sizes 5-30 and picks the fastest for your GPU |
 | Translation history | 10 | Recent translations sent as assistant messages |
 | Dark mode | On | Catppuccin dark theme |
 

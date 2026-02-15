@@ -180,6 +180,7 @@ from .variant_dialog import VariantDialog
 from .image_panel import ImagePanel
 from .gpu_monitor import GPUMonitorPanel
 from .queue_panel import QueuePanel
+from .model_suggestion_dialog import ModelSuggestionDialog
 
 
 class MainWindow(QMainWindow):
@@ -263,6 +264,10 @@ class MainWindow(QMainWindow):
         self._autosave_timer = QTimer(self)
         self._autosave_timer.timeout.connect(self._autosave)
         self._autosave_timer.start(120_000)
+
+        # First-launch model suggestion (deferred to after window shows)
+        if not os.path.exists(self._SETTINGS_FILE) and not self.client.is_cloud:
+            QTimer.singleShot(500, self._show_model_suggestion)
 
     # ── UI Setup ───────────────────────────────────────────────────
 
@@ -2641,6 +2646,21 @@ class MainWindow(QMainWindow):
             self.statusbar.showMessage("Auto-saved", 2000)
         except Exception as e:
             self.statusbar.showMessage(f"Auto-save failed: {e}", 5000)
+
+    # ── Model suggestion ────────────────────────────────────────────
+
+    def _show_model_suggestion(self):
+        """Show GPU-aware model recommendation dialog (first launch)."""
+        installed = self.client.list_models() if self.client.is_available() else []
+        dlg = ModelSuggestionDialog(installed_models=installed, parent=self)
+        dlg.model_selected.connect(self._on_suggested_model)
+        dlg.exec()
+
+    def _on_suggested_model(self, tag: str):
+        """Apply model from suggestion dialog."""
+        self.client.model = tag
+        self._save_settings()
+        self.statusbar.showMessage(f"Model set to {tag}", 5000)
 
     # ── Auto-tune callbacks ─────────────────────────────────────────
 
