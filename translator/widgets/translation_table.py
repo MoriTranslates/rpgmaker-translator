@@ -75,9 +75,10 @@ class TranslationTableModel(QAbstractTableModel):
     def _status_colors(self):
         return STATUS_COLORS_DARK if self._dark_mode else STATUS_COLORS_LIGHT
 
-    def set_entries(self, entries: list):
+    def set_entries(self, entries: list, dupe_counts: dict = None):
         self.beginResetModel()
         self._entries = entries
+        self._dupe_counts = dupe_counts or {}
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()):
@@ -101,7 +102,11 @@ class TranslationTableModel(QAbstractTableModel):
             elif col == COL_FILE:
                 return entry.file
             elif col == COL_FIELD:
-                return _extract_event_context(entry.id)
+                label = _extract_event_context(entry.id)
+                count = self._dupe_counts.get(entry.original, 0)
+                if count > 1:
+                    label = f"{label} (\u00d7{count})"
+                return label
             elif col == COL_ORIGINAL:
                 return entry.original
             elif col == COL_TRANSLATION:
@@ -134,6 +139,7 @@ class TranslationTableModel(QAbstractTableModel):
             entry.status = "translated"
         else:
             entry.status = "untranslated"
+        self._last_inline_edit_row = row
         # Emit change for the entire row (status icon + colors changed too)
         self.dataChanged.emit(
             self.index(row, 0), self.index(row, self.columnCount() - 1)
@@ -189,6 +195,7 @@ class TranslationTable(QWidget):
         self._all_entries = []      # full project (never file-filtered)
         self._entries = []           # current file-filtered subset (or all)
         self._visible_entries = []   # after search + status filter
+        self._dupe_counts = {}       # original_text -> count (master view)
         self._dark_mode = True  # Match main_window default
         self._speaker_lookup = {}  # JP→EN speaker name lookup
         self._filter_timer = QTimer(self)
@@ -249,6 +256,12 @@ class TranslationTable(QWidget):
         self.jp_check.setToolTip("Show only entries where the translation still contains Japanese characters")
         self.jp_check.stateChanged.connect(self._apply_filter)
         filter_row.addWidget(self.jp_check)
+
+        self.master_check = QCheckBox("Master View")
+        self.master_check.setToolTip(
+            "Show each unique text once. Edits propagate to all duplicates.")
+        self.master_check.stateChanged.connect(self._apply_filter)
+        filter_row.addWidget(self.master_check)
 
         layout.addLayout(filter_row)
 
@@ -545,13 +558,41 @@ class TranslationTable(QWidget):
                     continue
             self._visible_entries.append(e)
 
-        self._model.set_entries(self._visible_entries)
+        # Master View: show one entry per unique original text
+        self._dupe_counts = {}  # original_text -> count
+        if self.master_check.isChecked():
+            seen = {}  # original_text -> first entry
+            for e in self._visible_entries:
+                if e.original in seen:
+                    self._dupe_counts[e.original] = \
+                        self._dupe_counts.get(e.original, 1) + 1
+                else:
+                    seen[e.original] = e
+                    self._dupe_counts[e.original] = 1
+            self._visible_entries = list(seen.values())
+
+        self._model.set_entries(self._visible_entries, self._dupe_counts)
         self._update_stats()
 
     def _on_model_data_changed(self, top_left, bottom_right, roles=None):
-        """Handle edits made via the table's inline editor."""
+        """Handle edits made via the table's inline editor or refresh."""
+        # Propagate inline edits to duplicates in master view
+        row = getattr(self._model, '_last_inline_edit_row', -1)
+        if row >= 0 and self.master_check.isChecked():
+            self._model._last_inline_edit_row = -1
+            if 0 <= row < len(self._visible_entries):
+                self._propagate_to_duplicates(self._visible_entries[row])
         self._update_stats()
         self.status_changed.emit()
+
+    def _propagate_to_duplicates(self, source: TranslationEntry):
+        """Copy translation + status from source to all entries with same original."""
+        for e in self._all_entries:
+            if e is source:
+                continue
+            if e.original == source.original:
+                e.translation = source.translation
+                e.status = source.status
 
     def update_entry(self, entry_id: str, translation: str):
         """Update a specific entry's translation (called after LLM translates)."""
@@ -692,6 +733,8 @@ class TranslationTable(QWidget):
             if row < len(self._visible_entries):
                 entry = self._visible_entries[row]
                 entry.status = status
+                if self.master_check.isChecked():
+                    self._propagate_to_duplicates(entry)
                 self._model.refresh_row(row)
         self._update_stats()
         self.status_changed.emit()
@@ -1151,6 +1194,10 @@ class TranslationTable(QWidget):
             entry.status = "translated"
         else:
             entry.status = "untranslated"
+
+        # Propagate to duplicates if master view is on
+        if self.master_check.isChecked():
+            self._propagate_to_duplicates(entry)
 
         # Sync back to the model (refreshes colors + status icon)
         # Note: refresh_row triggers dataChanged → _on_model_data_changed → status_changed

@@ -1077,6 +1077,9 @@ class MainWindow(QMainWindow):
         # Rebuild glossary with any new actor name entries
         self._rebuild_glossary()
 
+        # Update speaker contexts: replace JP actor names with EN translations
+        self._update_speaker_names(actors_raw, actor_translations)
+
         # Offer to rename folder to English title (only on first run)
         if translated_title:
             new_path = self._rename_project_folder(path, translated_title)
@@ -1084,6 +1087,43 @@ class MainWindow(QMainWindow):
 
         self._actors_ready = True
         return True
+
+    def _actor_translations_from_entries(self, actors_raw):
+        """Build actor_translations dict from already-translated entries."""
+        entry_by_id = {e.id: e for e in self.project.entries}
+        actor_tl = {}
+        for actor in actors_raw:
+            aid = actor["id"]
+            for field in ("name", "nickname", "profile"):
+                entry = entry_by_id.get(f"Actors.json/{aid}/{field}")
+                if entry and entry.translation:
+                    if aid not in actor_tl:
+                        actor_tl[aid] = {}
+                    actor_tl[aid][field] = entry.translation
+        return actor_tl
+
+    def _update_speaker_names(self, actors_raw, actor_translations):
+        """Replace JP speaker names in entry contexts with EN translations."""
+        # Build JP → EN name map
+        jp_to_en = {}
+        for actor in actors_raw:
+            aid = actor["id"]
+            jp_name = actor.get("name", "")
+            en_name = actor_translations.get(aid, {}).get("name", "")
+            if jp_name and en_name and jp_name != en_name:
+                jp_to_en[jp_name] = en_name
+        if not jp_to_en:
+            return
+        for entry in self.project.entries:
+            if not entry.context or "[Speaker:" not in entry.context:
+                continue
+            m = re.search(r'\[Speaker:\s*(.+?)\]', entry.context)
+            if m and m.group(1).strip() in jp_to_en:
+                old_name = m.group(1).strip()
+                entry.context = entry.context.replace(
+                    f"[Speaker: {old_name}]",
+                    f"[Speaker: {jp_to_en[old_name]}]",
+                )
 
     def _backfill_db_glossary(self) -> int:
         """Add DB name glossary entries from already-translated entries.
@@ -1359,6 +1399,9 @@ class MainWindow(QMainWindow):
                 )
                 self.client.actor_genders = self.project.actor_genders
                 self.client.actor_names = {a["id"]: a["name"] for a in actors_raw}
+                # Update speaker contexts with translated actor names
+                actor_tl = self._actor_translations_from_entries(actors_raw)
+                self._update_speaker_names(actors_raw, actor_tl)
             self._actors_ready = True
         else:
             self._actors_ready = False

@@ -49,6 +49,12 @@ DATABASE_FILES = {
 # Regex to detect Japanese characters (Hiragana, Katakana, CJK)
 JP_REGEX = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uFF00-\uFFEF]')
 
+# Namebox: \N<name> prefix used by Lunatlazur_ActorNameWindow and similar plugins.
+# Matches \N<...> or \n<...> at start of text (case-insensitive N).
+_NAMEBOX_RE = re.compile(r'\\[Nn]<([^>]+)>')
+# Actor code inside namebox: \n[1], \N[2], etc.
+_ACTOR_CODE_RE = re.compile(r'\\[Nn]\[(\d+)\]')
+
 
 def _has_japanese(text: str) -> bool:
     """Check if text contains any Japanese characters."""
@@ -245,6 +251,9 @@ class RPGMakerMVParser:
                 "Please select an RPG Maker MV/MZ project folder."
             )
 
+        # Build actor name lookup for \n[N] resolution in namebox
+        self._actor_names = self._load_actor_names(data_dir)
+
         entries = []
         entries.extend(self._parse_database_files(data_dir))
         entries.extend(self._parse_system(data_dir))
@@ -335,6 +344,27 @@ class RPGMakerMVParser:
                 "auto_gender": auto_gender or "unknown",
             })
         return actors
+
+    @staticmethod
+    def _load_actor_names(data_dir: str) -> dict:
+        """Load {actor_id: name} from Actors.json for \\n[N] resolution."""
+        filepath = os.path.join(data_dir, "Actors.json")
+        if not os.path.exists(filepath):
+            return {}
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+        names = {}
+        if isinstance(data, list):
+            for item in data:
+                if item and isinstance(item, dict):
+                    aid = item.get("id", 0)
+                    name = item.get("name", "").strip()
+                    if aid and name:
+                        names[aid] = name
+        return names
 
     def build_actor_context(self, actors: list, genders: dict) -> str:
         """Build a character reference string with confirmed genders.
@@ -1250,6 +1280,35 @@ class RPGMakerMVParser:
                     else:
                         break
                 full_text = "\n".join(lines)
+
+                # Detect \N<name> namebox prefix on first line
+                namebox = ""
+                nb_match = _NAMEBOX_RE.match(full_text)
+                if nb_match:
+                    namebox = nb_match.group(0)       # e.g. \N<\n[1]>
+                    nb_name = nb_match.group(1)       # e.g. \n[1] or 村人1
+                    full_text = full_text[len(namebox):]
+                    # Resolve \n[N] to actor name for speaker context
+                    actor_match = _ACTOR_CODE_RE.match(nb_name)
+                    if actor_match:
+                        actor_id = int(actor_match.group(1))
+                        current_speaker = getattr(
+                            self, '_actor_names', {}).get(actor_id, nb_name)
+                    else:
+                        current_speaker = nb_name
+                    # Literal JP name → create speaker_name entry for translation
+                    if (not actor_match
+                            and self._should_extract(nb_name)
+                            and seen_speakers is not None
+                            and nb_name not in seen_speakers):
+                        seen_speakers.add(nb_name)
+                        entries.append(TranslationEntry(
+                            id=f"{filename}/speaker/{nb_name}",
+                            file=filename,
+                            field="speaker_name",
+                            original=nb_name,
+                        ))
+
                 if self._should_extract(full_text):
                     dialog_counter += 1
                     ctx_parts = []
@@ -1265,6 +1324,7 @@ class RPGMakerMVParser:
                         field="dialog",
                         original=full_text,
                         context=ctx,
+                        namebox=namebox,
                     ))
                     recent_ctx.append(full_text)
                 continue
@@ -1782,6 +1842,27 @@ class RPGMakerMVParser:
 
     # ── Private: apply translation back to JSON ────────────────────────
 
+    @staticmethod
+    def _translate_namebox(namebox: str, speaker_lookup: dict) -> str:
+        """Translate the name inside a \\N<name> prefix for export.
+
+        If the name is an actor code like \\n[1], keep as-is (game resolves
+        at runtime).  If it's a literal name like 村人1, look it up in
+        speaker_lookup and substitute the translated name.
+        """
+        m = _NAMEBOX_RE.match(namebox)
+        if not m:
+            return namebox
+        inner = m.group(1)
+        # Actor code references resolve at runtime — keep as-is
+        if _ACTOR_CODE_RE.match(inner):
+            return namebox
+        # Literal name — translate if we have a translation
+        translated = speaker_lookup.get(inner, inner)
+        # Rebuild with same case as original (\N or \n)
+        slash_n = namebox[0:2]  # e.g. \N or \n
+        return f"{slash_n}<{translated}>"
+
     def _apply_translations_fast(self, data, entries: list,
                                 global_speakers: dict = None):
         """Apply all translations for a file in a single pass.
@@ -1822,6 +1903,17 @@ class RPGMakerMVParser:
             if entry.field in ("dialog", "scroll_text"):
                 while len(trans_lines) < len(orig_lines):
                     trans_lines.append("")
+                # Restore namebox prefix for export matching & output
+                if entry.namebox:
+                    # Translate the name inside the namebox for export
+                    nb_translated = self._translate_namebox(
+                        entry.namebox, speaker_lookup)
+                    # Key must match raw 401 text (still has namebox)
+                    orig_lines = orig_lines.copy()
+                    orig_lines[0] = entry.namebox + orig_lines[0]
+                    # Prepend translated namebox to first translation line
+                    trans_lines = trans_lines.copy()
+                    trans_lines[0] = nb_translated + trans_lines[0]
                 # Allow extra lines — export inserts extra 401/405 commands
                 first = orig_lines[0] if orig_lines else ""
                 lookup = dialog_lookup if entry.field == "dialog" else scroll_lookup

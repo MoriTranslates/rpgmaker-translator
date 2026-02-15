@@ -19,6 +19,7 @@ class TranslationEntry:
     translation: str = ""  # English translation (empty until translated)
     status: str = "untranslated"  # "untranslated" | "translated" | "reviewed" | "skipped"
     context: str = ""      # Surrounding text for LLM context
+    namebox: str = ""      # \N<name> prefix stripped during parse, restored on export
 
 
 @dataclass
