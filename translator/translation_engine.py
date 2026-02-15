@@ -259,7 +259,8 @@ class TranslationEngine(QObject):
 
     @property
     def is_running(self) -> bool:
-        return any(t.isRunning() for t in self._threads)
+        return (any(t.isRunning() for t in self._threads)
+                or (self._tuner_thread is not None and self._tuner_thread.isRunning()))
 
     def translate_batch(self, entries: list):
         """Start batch translation with parallel workers.

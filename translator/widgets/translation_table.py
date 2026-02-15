@@ -1098,8 +1098,7 @@ class TranslationTable(QWidget):
                         break
                 self.status_changed.emit()
 
-        # Advance to next match
-        self._replace_index += 1
+        # Advance to next match (_replace_next starts at offset=1 from current)
         self._replace_next()
 
     def _select_entry_by_id(self, entry_id: str):

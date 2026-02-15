@@ -1095,7 +1095,8 @@ class AIClient:
         # Fix contraction spacing artifacts (I 've → I've, Couldn' t → Couldn't)
         result = self._CONTRACTION_RE.sub(r"\1\2\3", result)
         # Strip outer quotes if LLM wrapped the entire translation in them
-        if result.startswith('"') and result.endswith('"') and len(result) > 1:
+        if (result.startswith('"') and result.endswith('"')
+                and len(result) > 1 and '\n' not in result):
             result = result[1:-1]
         return result
 

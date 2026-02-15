@@ -903,7 +903,7 @@ class MainWindow(QMainWindow):
                 text = actor.get(field, "")
                 if not text:
                     continue
-                entry_id = f"Actors/{aid}/{field}"
+                entry_id = f"Actors.json/{aid}/{field}"
                 entry = entry_by_id.get(entry_id)
                 if entry and entry.status in ("translated", "reviewed") and entry.translation:
                     actor_translations[aid][field] = entry.translation
@@ -958,7 +958,7 @@ class MainWindow(QMainWindow):
                     if aid not in actor_translations:
                         actor_translations[aid] = {}
                     actor_translations[aid][field] = translated
-                    entry_id = f"Actors/{aid}/{field}"
+                    entry_id = f"Actors.json/{aid}/{field}"
                     entry = entry_by_id.get(entry_id)
                     if entry and entry.status == "untranslated":
                         entry.translation = translated
@@ -985,7 +985,7 @@ class MainWindow(QMainWindow):
                         if aid not in actor_translations:
                             actor_translations[aid] = {}
                         actor_translations[aid][field] = result
-                        entry_id = f"Actors/{aid}/{field}"
+                        entry_id = f"Actors.json/{aid}/{field}"
                         entry = entry_by_id.get(entry_id)
                         if entry and entry.status == "untranslated":
                             entry.translation = result
