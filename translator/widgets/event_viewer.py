@@ -6,9 +6,9 @@ from collections import OrderedDict
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTreeWidget,
     QTreeWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView,
-    QLabel, QPushButton, QAbstractItemView,
+    QLabel, QPushButton, QAbstractItemView, QTextEdit, QGroupBox,
 )
-from PyQt6.QtCore import Qt, pyqtSignal as Signal
+from PyQt6.QtCore import Qt, pyqtSignal as Signal, QEvent
 from PyQt6.QtGui import QColor, QFont
 
 from ..utils import event_prefix, extract_event_context
@@ -66,7 +66,7 @@ class EventViewerPanel(QWidget):
         self._tree.setColumnWidth(0, 220)
         self._tree.setColumnWidth(1, 80)
         self._tree.setIndentation(16)
-        self._tree.itemClicked.connect(self._on_tree_clicked)
+        self._tree.currentItemChanged.connect(self._on_tree_selection_changed)
         self._tree.setStyleSheet("""
             QTreeWidget {
                 background-color: #1e1e2e;
@@ -140,15 +140,17 @@ class EventViewerPanel(QWidget):
         h.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
 
-        # Behavior
+        # Behavior — read-only table, editing via panel below
         self._detail_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
+        self._detail_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
         self._detail_table.setWordWrap(True)
         self._detail_table.verticalHeader().setVisible(False)
         self._detail_table.verticalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents)
         self._detail_table.setAlternatingRowColors(False)
-        self._detail_table.cellChanged.connect(self._on_cell_changed)
+        self._detail_table.currentCellChanged.connect(self._on_row_selected)
         self._detail_table.setStyleSheet("""
             QTableWidget {
                 background-color: #1e1e2e;
@@ -173,11 +175,103 @@ class EventViewerPanel(QWidget):
                 font-size: 11px;
             }
         """)
-        detail_layout.addWidget(self._detail_table)
+
+        # Vertical splitter: table (top 70%) + editor (bottom 30%)
+        v_splitter = QSplitter(Qt.Orientation.Vertical)
+        v_splitter.addWidget(self._detail_table)
+
+        # Editor panel
+        editor_widget = QWidget()
+        editor_layout = QHBoxLayout(editor_widget)
+        editor_layout.setContentsMargins(0, 2, 0, 0)
+
+        orig_box = QGroupBox("Original (JP)")
+        orig_box.setStyleSheet("""
+            QGroupBox {
+                color: #a6adc8; font-weight: bold; font-size: 11px;
+                border: 1px solid #313244; border-radius: 4px;
+                margin-top: 6px; padding-top: 14px;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 8px; }
+        """)
+        orig_inner = QVBoxLayout(orig_box)
+        self._orig_editor = QTextEdit()
+        self._orig_editor.setReadOnly(True)
+        self._orig_editor.setAcceptRichText(False)
+        self._orig_editor.setStyleSheet("""
+            QTextEdit {
+                background-color: #181825; color: #bac2de;
+                border: 1px solid #313244; font-size: 13px;
+            }
+        """)
+        orig_inner.addWidget(self._orig_editor)
+        editor_layout.addWidget(orig_box)
+
+        trans_box = QGroupBox("Translation (EN)")
+        trans_box.setStyleSheet("""
+            QGroupBox {
+                color: #a6adc8; font-weight: bold; font-size: 11px;
+                border: 1px solid #313244; border-radius: 4px;
+                margin-top: 6px; padding-top: 14px;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 8px; }
+        """)
+        trans_inner = QVBoxLayout(trans_box)
+        self._trans_editor = QTextEdit()
+        self._trans_editor.setAcceptRichText(False)
+        self._trans_editor.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e2e; color: #cdd6f4;
+                border: 1px solid #45475a; font-size: 13px;
+            }
+        """)
+        self._trans_editor.textChanged.connect(self._on_editor_changed)
+        trans_inner.addWidget(self._trans_editor)
+        editor_layout.addWidget(trans_box)
+
+        v_splitter.addWidget(editor_widget)
+        v_splitter.setSizes([500, 200])
+
+        detail_layout.addWidget(v_splitter)
 
         splitter.addWidget(detail_widget)
         splitter.setSizes([300, 900])
         layout.addWidget(splitter)
+
+        self._selected_row = -1
+
+        # Spacebar = mark reviewed when table has focus
+        self._detail_table.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        """Intercept spacebar on detail table to toggle reviewed status."""
+        if (obj is self._detail_table
+                and event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Space):
+            self._toggle_row_reviewed()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _toggle_row_reviewed(self):
+        """Toggle reviewed status on current row (spacebar shortcut)."""
+        row = self._detail_table.currentRow()
+        if row < 0 or row >= len(self._current_entries):
+            return
+        entry = self._current_entries[row]
+        if entry.status == "reviewed":
+            # Un-review: go back to translated (or untranslated if empty)
+            entry.status = "translated" if entry.translation else "untranslated"
+        else:
+            entry.status = "reviewed"
+        # Update table
+        self._detail_table.blockSignals(True)
+        status_item = self._detail_table.item(row, 0)
+        if status_item:
+            status_item.setText(_STATUS_ICONS.get(entry.status, ""))
+        self._apply_row_colors(row, entry)
+        self._detail_table.blockSignals(False)
+        self._refresh_tree_stats()
+        self.status_changed.emit()
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -211,12 +305,23 @@ class EventViewerPanel(QWidget):
                     trans_item.setText(translation)
                 self._apply_row_colors(row, entry)
                 self._detail_table.blockSignals(False)
+                # Update editor panel if this row is selected
+                if row == self._selected_row:
+                    self._trans_editor.blockSignals(True)
+                    self._trans_editor.setPlainText(translation)
+                    self._trans_editor.blockSignals(False)
                 break
 
     def refresh_current_event(self):
         """Re-render the current event detail (called after external edits)."""
         if self._current_prefix:
+            # Preserve scroll and selection
+            saved_row = self._selected_row
+            scroll_val = self._detail_table.verticalScrollBar().value()
             self._show_event(self._current_prefix)
+            if 0 <= saved_row < len(self._current_entries):
+                self._detail_table.setCurrentCell(saved_row, 0)
+            self._detail_table.verticalScrollBar().setValue(scroll_val)
         self._refresh_tree_stats()
 
     def refresh_stats(self):
@@ -385,9 +490,12 @@ class EventViewerPanel(QWidget):
 
     # ── Internal: event detail display ───────────────────────────────
 
-    def _on_tree_clicked(self, item: QTreeWidgetItem, column: int):
-        """Handle tree item click — show event detail."""
-        prefix = item.data(0, Qt.ItemDataRole.UserRole)
+    def _on_tree_selection_changed(self, current: QTreeWidgetItem,
+                                    previous: QTreeWidgetItem):
+        """Handle tree selection change (click or arrow keys)."""
+        if not current:
+            return
+        prefix = current.data(0, Qt.ItemDataRole.UserRole)
         if prefix:
             self._show_event(prefix)
 
@@ -447,14 +555,15 @@ class EventViewerPanel(QWidget):
                 Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
             self._detail_table.setItem(row, 2, orig_item)
 
-            # Translation (editable)
+            # Translation (read-only in table, edit via panel below)
             trans_item = QTableWidgetItem(e.translation or "")
+            trans_item.setFlags(
+                Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
             self._detail_table.setItem(row, 3, trans_item)
 
             self._apply_row_colors(row, e)
 
         self._detail_table.blockSignals(False)
-        self._detail_table.scrollToTop()
 
     def _apply_row_colors(self, row: int, entry):
         """Apply Catppuccin colors to a detail table row."""
@@ -505,23 +614,42 @@ class EventViewerPanel(QWidget):
 
     # ── Internal: editing & review ───────────────────────────────────
 
-    def _on_cell_changed(self, row: int, column: int):
-        """Sync translation edits back to the project entry."""
-        if column != 3:  # Only translation column
+    def _on_row_selected(self, row: int, col: int, prev_row: int, prev_col: int):
+        """Update editor panel when a row is selected."""
+        if row < 0 or row >= len(self._current_entries):
+            self._orig_editor.clear()
+            self._trans_editor.blockSignals(True)
+            self._trans_editor.clear()
+            self._trans_editor.blockSignals(False)
+            self._selected_row = -1
             return
+
+        self._selected_row = row
+        entry = self._current_entries[row]
+        self._orig_editor.setPlainText(entry.original)
+        self._trans_editor.blockSignals(True)
+        self._trans_editor.setPlainText(entry.translation or "")
+        self._trans_editor.blockSignals(False)
+
+    def _on_editor_changed(self):
+        """Sync translation edits from editor panel back to entry + table."""
+        row = self._selected_row
         if row < 0 or row >= len(self._current_entries):
             return
 
         entry = self._current_entries[row]
-        new_text = self._detail_table.item(row, 3).text()
+        new_text = self._trans_editor.toPlainText()
         entry.translation = new_text
         entry.status = "translated" if new_text.strip() else "untranslated"
 
-        # Update status icon
+        # Update table row
         self._detail_table.blockSignals(True)
         status_item = self._detail_table.item(row, 0)
         if status_item:
             status_item.setText(_STATUS_ICONS.get(entry.status, ""))
+        trans_item = self._detail_table.item(row, 3)
+        if trans_item:
+            trans_item.setText(new_text)
         self._apply_row_colors(row, entry)
         self._detail_table.blockSignals(False)
 
