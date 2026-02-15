@@ -43,11 +43,13 @@ class SettingsDialog(QDialog):
     """Dialog for configuring translation provider, model, prompt, and options."""
 
     def __init__(self, client: AIClient, parent=None, parser: RPGMakerMVParser = None,
-                 dark_mode: bool = True, plugin_analyzer=None, engine=None):
+                 dark_mode: bool = True, plugin_analyzer=None, engine=None,
+                 export_review_file: bool = False):
         super().__init__(parent)
         self.client = client
         self.parser = parser
         self.dark_mode = dark_mode
+        self.export_review_file = export_review_file
         self.plugin_analyzer = plugin_analyzer
         self.engine = engine
         self.setWindowTitle("Settings")
@@ -271,6 +273,16 @@ class SettingsDialog(QDialog):
         )
         opts_form.addRow(self.single_401_check)
 
+        self.review_file_check = QCheckBox("Export review file after batch translation")
+        self.review_file_check.setToolTip(
+            "Automatically saves a side-by-side review TXT file\n"
+            "after each batch translation completes.\n\n"
+            "Named: Review_{Provider}_{Model}_{Date}.txt\n"
+            "Includes cost/token summary and all JP/EN pairs.\n"
+            "Share with reviewers who don't have the tool installed."
+        )
+        opts_form.addRow(self.review_file_check)
+
         layout.addWidget(opts_group)
 
         # Appearance
@@ -354,6 +366,7 @@ class SettingsDialog(QDialog):
             self.wordwrap_spin.setValue(0)
         self.single_401_check.setChecked(
             self.parser.single_401_mode if self.parser else False)
+        self.review_file_check.setChecked(self.export_review_file)
         self.dark_mode_check.setChecked(self.dark_mode)
         self.dazed_mode_check.setChecked(getattr(self.client, "dazed_mode", False))
         self.script_strings_check.setChecked(
@@ -752,6 +765,7 @@ class SettingsDialog(QDialog):
             if manual > 0:
                 self.plugin_analyzer.chars_per_line = manual
         self.dark_mode = self.dark_mode_check.isChecked()
+        self.export_review_file = self.review_file_check.isChecked()
         self.client.dazed_mode = self.dazed_mode_check.isChecked()
         if self.parser:
             self.parser.extract_script_strings = self.script_strings_check.isChecked()

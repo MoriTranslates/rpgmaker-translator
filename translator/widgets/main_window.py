@@ -231,6 +231,7 @@ class MainWindow(QMainWindow):
         self.plugin_analyzer = PluginAnalyzer()
         self.text_processor = TextProcessor(self.plugin_analyzer)
         self._dark_mode = True
+        self._export_review_file = False
         self._actors_ready = False  # True after actor gender dialog has been shown/skipped
         self._batch_start_time = 0
         self._batch_done_count = 0
@@ -2327,6 +2328,7 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(
             self.client, self, parser=self.parser, dark_mode=self._dark_mode,
             plugin_analyzer=self.plugin_analyzer, engine=self.engine,
+            export_review_file=self._export_review_file,
         )
         if dlg.exec():
             # Apply dark mode if changed
@@ -2334,6 +2336,7 @@ class MainWindow(QMainWindow):
                 self._dark_mode = dlg.dark_mode
                 self._apply_dark_mode()
                 self.trans_table.set_dark_mode(self._dark_mode)
+            self._export_review_file = dlg.export_review_file
             self._save_settings()
             # Preload model into VRAM if model changed (avoids cold-start delay)
             if not self.client.is_cloud:
@@ -2436,6 +2439,9 @@ class MainWindow(QMainWindow):
         # After DB batch, warn about name collisions (different JP → same EN)
         if mode in ("db", "all", "dialogue"):
             self._warn_name_collisions()
+        # Auto-export review file if enabled
+        if self._export_review_file:
+            self._auto_export_review()
 
     def _warn_name_collisions(self):
         """Detect different JP names that translated to the same EN text.
@@ -2610,6 +2616,8 @@ class MainWindow(QMainWindow):
             self.client.dazed_mode = cfg["dazed_mode"]
         if "auto_tune" in cfg:
             self.engine.auto_tune = cfg["auto_tune"]
+        if "export_review_file" in cfg:
+            self._export_review_file = cfg["export_review_file"]
 
     def _save_settings(self):
         """Persist current settings to _settings.json."""
@@ -2633,6 +2641,7 @@ class MainWindow(QMainWindow):
             "extract_script_strings": self.parser.extract_script_strings,
             "single_401_mode": self.parser.single_401_mode,
             "auto_tune": self.engine.auto_tune,
+            "export_review_file": self._export_review_file,
         }
         try:
             with open(self._SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -3725,6 +3734,59 @@ class MainWindow(QMainWindow):
             self, "Export Complete",
             f"Exported {len(translated)} translations to:\n{path}"
         )
+
+    def _auto_export_review(self):
+        """Auto-export a review TXT file after batch translation.
+
+        File is named: Review_{Provider}_{Model}_{Date}.txt
+        Saved next to the project state file.
+        """
+        if not self.project.entries or not self.project.project_path:
+            return
+        from datetime import datetime
+
+        # Build filename: Review_DeepSeek_deepseek-chat_2026-02-15.txt
+        provider = self.client.provider.replace(" ", "").replace("(", "").replace(")", "")
+        model = self.client.model.replace("/", "-").replace(":", "-")
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        filename = f"Review_{provider}_{model}_{date_str}.txt"
+        path = os.path.join(self.project.project_path, filename)
+
+        translated = [e for e in self.project.entries
+                      if e.status in ("translated", "reviewed")]
+        if not translated:
+            return
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"# Translation Review\n")
+                f.write(f"# Project: {self.project.project_path}\n")
+                f.write(f"# Provider: {self.client.provider}\n")
+                f.write(f"# Model: {self.client.model}\n")
+                f.write(f"# Date: {date_str}\n")
+                cost_str = self.client.format_session_cost()
+                if cost_str:
+                    f.write(f"# {cost_str}\n")
+                f.write(f"# Entries: {len(translated)} translated"
+                        f" / {self.project.total} total\n\n")
+
+                current_file = ""
+                for entry in translated:
+                    if entry.file != current_file:
+                        current_file = entry.file
+                        f.write(f"\n{'='*60}\n")
+                        f.write(f"# File: {current_file}\n")
+                        f.write(f"{'='*60}\n\n")
+
+                    f.write(f"[{entry.id}]\n")
+                    f.write(f"  JP: {entry.original}\n")
+                    f.write(f"  EN: {entry.translation}\n\n")
+
+            self.statusbar.showMessage(
+                f"Review file saved: {filename}", 8000)
+        except OSError as e:
+            self.statusbar.showMessage(
+                f"Review file export failed: {e}", 5000)
 
     # ── Translation patch create / apply ─────────────────────────
 
