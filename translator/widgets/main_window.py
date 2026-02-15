@@ -2490,13 +2490,36 @@ class MainWindow(QMainWindow):
         if len(collisions) > 15:
             extra = f"\n... and {len(collisions) - 15} more collision(s)"
 
+        # Save collisions to file for later review
+        if self.project.project_path:
+            col_path = os.path.join(
+                self.project.project_path, "_name_collisions.txt")
+            try:
+                with open(col_path, "w", encoding="utf-8") as f:
+                    f.write(f"# Name Collisions Report\n")
+                    f.write(f"# {len(collisions)} collision(s) found\n")
+                    f.write(f"# Different JP terms translated to the same EN text.\n")
+                    f.write(f"# Fix these before running Batch Dialogue.\n\n")
+                    for en, sources in sorted(collisions):
+                        f.write(f'EN: "{en}"\n')
+                        unique_sources: dict[str, list[str]] = {}
+                        for jp, file, field in sources:
+                            unique_sources.setdefault(jp, []).append(
+                                f"{file}:{field}")
+                        for jp, locs in unique_sources.items():
+                            f.write(f'  JP: "{jp}" ({", ".join(locs)})\n')
+                        f.write("\n")
+            except OSError:
+                pass
+
         QMessageBox.warning(
             self, "Name Collisions Detected",
             f"Found {len(collisions)} name collision(s) — different Japanese "
             f"terms translated to the same English text.\n\n"
             f"Review these in the table and retranslate or edit as needed "
             f"before running Batch Dialogue.\n\n"
-            + "\n\n".join(lines) + extra,
+            + "\n\n".join(lines) + extra
+            + "\n\nFull list saved to _name_collisions.txt",
         )
 
     def _on_checkpoint(self):
