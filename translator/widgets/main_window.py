@@ -456,6 +456,15 @@ class MainWindow(QMainWindow):
         self.cleanup_action.setEnabled(False)
         translate_menu.addAction(self.cleanup_action)
 
+        self.strip_actor_codes_action = QAction("Strip Duplicate Actor Codes", self)
+        self.strip_actor_codes_action.setToolTip(
+            "Remove leading \\n[N] from translations where speaker/namebox\n"
+            "already shows the name (prevents double name display in-game)"
+        )
+        self.strip_actor_codes_action.triggered.connect(self._strip_duplicate_actor_codes)
+        self.strip_actor_codes_action.setEnabled(False)
+        translate_menu.addAction(self.strip_actor_codes_action)
+
         translate_menu.addSeparator()
 
         # Post-Process submenu (experimental)
@@ -850,6 +859,7 @@ class MainWindow(QMainWindow):
         self.wordwrap_action.setEnabled(False)
         self.find_replace_action.setEnabled(False)
         self.cleanup_action.setEnabled(False)
+        self.strip_actor_codes_action.setEnabled(False)
         self.polish_action.setEnabled(False)
         self.consistency_action.setEnabled(False)
         self.translate_images_action.setEnabled(False)
@@ -1456,6 +1466,7 @@ class MainWindow(QMainWindow):
         self.wordwrap_action.setEnabled(True)
         self.find_replace_action.setEnabled(True)
         self.cleanup_action.setEnabled(True)
+        self.strip_actor_codes_action.setEnabled(True)
         self.polish_action.setEnabled(True)
         self.consistency_action.setEnabled(True)
         self.translate_images_action.setEnabled(True)
@@ -3371,6 +3382,57 @@ class MainWindow(QMainWindow):
             self, "Strip Word Wrap Tags",
             f"Removed <WordWrap> tags from {count} entries." if count
             else "No <WordWrap> tags found."
+        )
+
+    # ── Strip Duplicate Actor Codes ────────────────────────────────
+
+    # Matches leading \n[N] or \N[N], optionally wrapped in \c[N]...\c[0]
+    # Captures the actor ID in group 1
+    _LEADING_ACTOR_CODE_RE = re.compile(
+        r'^(?:\\[Cc]\[\d+\])?\\[Nn]\[(\d+)\](?:\\[Cc]\[0\])?'
+    )
+    # Extract actor ID from a namebox string like \n[1] or \N<\n[1]>
+    _NAMEBOX_ACTOR_ID_RE = re.compile(r'\\[Nn]\[(\d+)\]')
+
+    def _strip_duplicate_actor_codes(self):
+        """Strip leading \\n[N] from translations where namebox has the same actor.
+
+        Only strips when the entry's namebox contains \\n[N] with the SAME
+        actor ID as the leading code in the translation.  This avoids stripping
+        cases where Speaker A mentions Speaker B by name (different actor ID).
+        Also handles colored variants like \\c[27]\\n[1]\\c[0].
+        """
+        if not self.project.entries:
+            return
+        count = 0
+        for entry in self.project.entries:
+            if not entry.translation or entry.status not in ("translated", "reviewed"):
+                continue
+            if entry.field not in ("dialog", "scroll_text"):
+                continue
+            # Only strip when namebox identifies the same actor
+            if not entry.namebox:
+                continue
+            nb_match = self._NAMEBOX_ACTOR_ID_RE.search(entry.namebox)
+            if not nb_match:
+                continue
+            namebox_actor_id = nb_match.group(1)
+            # Check first line of translation for matching actor code
+            lines = entry.translation.split("\n")
+            m = self._LEADING_ACTOR_CODE_RE.match(lines[0])
+            if m and m.group(1) == namebox_actor_id:
+                lines[0] = lines[0][m.end():]
+                entry.translation = "\n".join(lines)
+                count += 1
+
+        if count:
+            self.trans_table.refresh()
+            self.file_tree.refresh_stats(self.project)
+
+        QMessageBox.information(
+            self, "Strip Duplicate Actor Codes",
+            f"Stripped leading \\n[N] from {count} entries."
+            if count else "No duplicate actor codes found."
         )
 
     # ── Fix Missing Codes ─────────────────────────────────────────
