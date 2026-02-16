@@ -2177,6 +2177,20 @@ class MainWindow(QMainWindow):
         self.engine.cancel()
         self.stop_action.setEnabled(False)
 
+    def _check_unwrapped_entries(self, translated: list) -> int:
+        """Count dialog entries with lines exceeding chars_per_line."""
+        max_chars = self.plugin_analyzer.chars_per_line
+        count = 0
+        for entry in translated:
+            if entry.field not in ("dialog", "scroll_text"):
+                continue
+            for line in entry.translation.split("\n"):
+                vis_len = self.text_processor._visual_length(line)
+                if vis_len > max_chars:
+                    count += 1
+                    break  # count each entry once
+        return count
+
     def _export_to_game(self):
         """Write translations back to the game's JSON files."""
         if not self.project.project_path:
@@ -2187,6 +2201,27 @@ class MainWindow(QMainWindow):
         if not translated:
             QMessageBox.information(self, "Nothing to Export", "No translated entries to export.")
             return
+
+        # Check for unwrapped lines that would overflow in-game
+        unwrapped = self._check_unwrapped_entries(translated)
+        if unwrapped > 0:
+            result = QMessageBox.warning(
+                self, "Lines May Overflow",
+                f"{unwrapped} dialogue entries have lines longer than "
+                f"{self.plugin_analyzer.chars_per_line} characters and may "
+                f"overflow the text box in-game.\n\n"
+                f"Apply word wrap before exporting?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+            )
+            if result == QMessageBox.StandardButton.Cancel:
+                return
+            if result == QMessageBox.StandardButton.Yes:
+                count = self.text_processor.process_all(self.project.entries)
+                self.table_widget.refresh_table()
+                self.statusBar().showMessage(
+                    f"Word wrap applied to {count} entries.", 5000)
 
         # Confirmation dialog with checkbox
         dlg = QDialog(self)
@@ -4031,6 +4066,27 @@ class MainWindow(QMainWindow):
                 "No translated entries to export."
             )
             return
+
+        # Check for unwrapped lines that would overflow in-game
+        unwrapped = self._check_unwrapped_entries(translated)
+        if unwrapped > 0:
+            result = QMessageBox.warning(
+                self, "Lines May Overflow",
+                f"{unwrapped} dialogue entries have lines longer than "
+                f"{self.plugin_analyzer.chars_per_line} characters and may "
+                f"overflow the text box in-game.\n\n"
+                f"Apply word wrap before exporting?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+            )
+            if result == QMessageBox.StandardButton.Cancel:
+                return
+            if result == QMessageBox.StandardButton.Yes:
+                count = self.text_processor.process_all(self.project.entries)
+                self.table_widget.refresh_table()
+                self.statusBar().showMessage(
+                    f"Word wrap applied to {count} entries.", 5000)
 
         # Get game title
         game_title = ""
