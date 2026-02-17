@@ -2230,7 +2230,7 @@ class MainWindow(QMainWindow):
                 return
             if result == QMessageBox.StandardButton.Yes:
                 count = self.text_processor.process_all(self.project.entries)
-                self.table_widget.refresh_table()
+                self.trans_table.refresh()
                 self.statusBar().showMessage(
                     f"Word wrap applied to {count} entries.", 5000)
 
@@ -4146,7 +4146,7 @@ class MainWindow(QMainWindow):
                 return
             if result == QMessageBox.StandardButton.Yes:
                 count = self.text_processor.process_all(self.project.entries)
-                self.table_widget.refresh_table()
+                self.trans_table.refresh()
                 self.statusBar().showMessage(
                     f"Word wrap applied to {count} entries.", 5000)
 
