@@ -475,7 +475,7 @@ class TranslationWizard(QDialog):
         for entry in self.mw.project.entries:
             if not entry.translation or entry.status not in ("translated", "reviewed"):
                 continue
-            if "dialog" not in entry.field and "choice" not in entry.field:
+            if "dialog" not in entry.field and "scroll" not in entry.field:
                 continue
             new_text = processor.process_entry(entry.original, entry.translation)
             if new_text != entry.translation:
