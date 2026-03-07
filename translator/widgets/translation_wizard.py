@@ -280,7 +280,7 @@ class TranslationWizard(QDialog):
             except (TypeError, RuntimeError):
                 pass
 
-    def _on_progress(self, done: int, total: int):
+    def _on_progress(self, done: int, total: int, text: str = ""):
         """Live progress update from batch engine."""
         if not getattr(self.mw, '_wizard_active', False):
             return
@@ -289,13 +289,14 @@ class TranslationWizard(QDialog):
         if total > 0:
             self.progress_bar.setRange(0, total)
             self.progress_bar.setValue(done)
+            pct = int(done / total * 100)
             step = self._current_step
             if step == WizardStep.TRANSLATE_DB:
-                self.detail_label.setText(f"Database: {done}/{total} entries...")
+                self.detail_label.setText(f"Database: {done}/{total} ({pct}%)")
             elif step == WizardStep.TRANSLATE_DIALOGUE:
-                self.detail_label.setText(f"Dialogue: {done}/{total} entries...")
+                self.detail_label.setText(f"Dialogue: {done}/{total} ({pct}%)")
             elif step == WizardStep.RETRANSLATE:
-                self.detail_label.setText(f"Fixing: {done}/{total} entries...")
+                self.detail_label.setText(f"Fixing: {done}/{total} ({pct}%)")
 
     def _run_next_step(self):
         """Execute the next step in the pipeline."""
@@ -379,7 +380,9 @@ class TranslationWizard(QDialog):
 
     def _start_batch_step(self, mode: str):
         """Start a batch and advance if nothing to translate."""
+        log.info("Wizard: starting batch step mode=%s", mode)
         started = self.mw._start_batch(mode=mode)
+        log.info("Wizard: _start_batch returned %s", started)
         if not started:
             # Nothing to translate — skip to next step
             self.mw._wizard_active = False
@@ -391,6 +394,8 @@ class TranslationWizard(QDialog):
 
     def _on_batch_step_finished(self):
         """Called when a batch translate step finishes."""
+        log.info("Wizard: _on_batch_step_finished called, _wizard_active=%s, step=%s",
+                 getattr(self.mw, '_wizard_active', None), self._current_step)
         if not getattr(self.mw, '_wizard_active', False):
             return
         self.mw._wizard_active = False

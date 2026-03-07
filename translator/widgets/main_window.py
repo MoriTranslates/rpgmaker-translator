@@ -3266,6 +3266,7 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.queue_panel)
 
         self.engine.translate_batch(to_translate)
+        return True
 
     # ── Polish Grammar ──────────────────────────────────────────────
 
