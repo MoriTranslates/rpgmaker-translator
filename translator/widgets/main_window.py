@@ -241,6 +241,7 @@ class MainWindow(QMainWindow):
         self._dupe_fill_count = 0
         self._batch_dupe_map = {}  # original_text -> [duplicate entries]
         self._batch_all_chained = False
+        self._wizard_active = False
         self._last_save_path = ""
         self._general_glossary = {}  # persists across all projects
         self.client.vision_model = ""  # vision model for image OCR
@@ -734,6 +735,9 @@ class MainWindow(QMainWindow):
                     # Preload model into VRAM
                     if not self.client.is_cloud:
                         self._preload_model()
+                    # Offer wizard if there are untranslated entries
+                    if self.project.translated_count < self.project.total:
+                        self._show_wizard_choice()
                     return
                 # Fall through to fresh project on load failure
 
@@ -811,6 +815,18 @@ class MainWindow(QMainWindow):
         # Preload model into VRAM so it's ready for translation
         if not self.client.is_cloud:
             self._preload_model()
+
+        # Offer wizard vs manual mode for new projects
+        self._show_wizard_choice()
+
+    def _show_wizard_choice(self):
+        """Show wizard vs manual mode choice after opening a project."""
+        from .translation_wizard import WizardChoiceDialog, TranslationWizard
+
+        dlg = WizardChoiceDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.choice == WizardChoiceDialog.WIZARD:
+            wizard = TranslationWizard(self)
+            wizard.exec()
 
     @staticmethod
     def _pick_newest_save(*paths: str) -> str | None:
@@ -2528,6 +2544,10 @@ class MainWindow(QMainWindow):
 
     def _on_batch_finished(self):
         """Handle batch translation/polish completing."""
+        # When wizard controls the pipeline, let it handle progression
+        if self._wizard_active:
+            return
+
         # Final pass: restore any control codes the LLM dropped
         codes_fixed = self._restore_missing_codes()
 
@@ -3170,23 +3190,27 @@ class MainWindow(QMainWindow):
         to_translate.sort(key=_file_order)
         return to_translate, dupe_map
 
-    def _start_batch(self, mode: str = "all"):
+    def _start_batch(self, mode: str = "all") -> bool:
         """Shared batch translation logic.
 
         Args:
             mode: "all" = everything, "db" = DB/System only,
                   "dialogue" = non-DB only (maps, events, plugins).
+
+        Returns:
+            True if batch was started, False if skipped/cancelled.
         """
         if not self.client.is_available():
-            QMessageBox.warning(
-                self, "Ollama Not Available",
-                "Cannot connect to Ollama. Make sure it's running:\n  ollama serve"
-            )
-            return
+            if not self._wizard_active:
+                QMessageBox.warning(
+                    self, "Ollama Not Available",
+                    "Cannot connect to Ollama. Make sure it's running:\n  ollama serve"
+                )
+            return False
 
         # First batch: run actor pre-translate + gender dialog
         if not self._ensure_actors_ready():
-            return
+            return False
 
         self._current_batch_mode = mode
 
@@ -3204,9 +3228,10 @@ class MainWindow(QMainWindow):
             untranslated = [e for e in untranslated if e.file not in self._DB_FILES]
 
         if not untranslated:
-            labels = {"all": "All entries", "db": "DB entries", "dialogue": "Dialogue entries"}
-            QMessageBox.information(self, "Done", f"{labels[mode]} are already translated!")
-            return
+            if not self._wizard_active:
+                labels = {"all": "All entries", "db": "DB entries", "dialogue": "Dialogue entries"}
+                QMessageBox.information(self, "Done", f"{labels[mode]} are already translated!")
+            return False
 
         # Deduplicate: only send unique text to the LLM once.
         # Duplicates are filled instantly when their seed completes.
