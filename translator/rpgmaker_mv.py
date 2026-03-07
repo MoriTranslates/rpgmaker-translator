@@ -491,6 +491,9 @@ class RPGMakerMVParser:
         # Export plugin translations (plugins.js is outside data/)
         self._save_plugins(project_dir, entries)
 
+        # Swap game font to Consolas for English readability
+        self._swap_gamefont(project_dir)
+
     def export_patch_zip(self, project_dir: str, entries: list,
                          zip_path: str, game_title: str = "",
                          inject_wordwrap: bool = False):
@@ -645,19 +648,26 @@ class RPGMakerMVParser:
                 except (json.JSONDecodeError, OSError):
                     pass
 
-            # Include word wrap JS plugin file + font swap
+            # Include word wrap JS plugin file
             if inject_wordwrap and js_rel:
                 from .text_processor import WORDWRAP_PLUGIN_JS
                 arc = f"_translation/{js_rel}/plugins/{self.INJECTED_PLUGIN_NAME}.js"
                 zf.writestr(arc, WORDWRAP_PLUGIN_JS.strip() + "\n")
-                # Include Consolas gamefont.css
-                fonts_rel = js_rel.rsplit("/", 1)[0] + "/fonts"  # e.g. www/fonts
-                zf.writestr(f"_translation/{fonts_rel}/gamefont.css",
-                    '@font-face {\n'
-                    '    font-family: GameFont;\n'
-                    '    src: local("Consolas"), local("Courier New");\n'
-                    '}\n'
-                )
+
+            # Always include Consolas gamefont.css for English readability
+            if js_rel:
+                fonts_rel = js_rel.rsplit("/", 1)[0] + "/fonts"
+                font_src = os.path.join(
+                    os.path.dirname(__file__), "resources", "gamefont.css")
+                if os.path.isfile(font_src):
+                    zf.write(font_src, f"_translation/{fonts_rel}/gamefont.css")
+                else:
+                    zf.writestr(f"_translation/{fonts_rel}/gamefont.css",
+                        '@font-face {\n'
+                        '    font-family: GameFont;\n'
+                        '    src: local("Consolas"), local("Courier New");\n'
+                        '}\n'
+                    )
 
             total_entries = sum(len(v) for v in by_file.values())
 
@@ -862,16 +872,20 @@ class RPGMakerMVParser:
         if inject_wordwrap and js_rel:
             jr = js_rel.replace("/", "\\")
             tjr = f"_translation\\{jr}"
-            # fonts dir is sibling of js/ (e.g. www/fonts)
-            fr = jr.rsplit("\\", 1)[0] + "\\fonts"
-            tfr = f"_translation\\{fr}"
             lines += [
                 f'if exist "{tjr}\\plugins\\TranslatorWordWrap.js" (',
                 f'    if not exist "{jr}\\plugins\\" mkdir "{jr}\\plugins"',
                 f'    copy /Y "{tjr}\\plugins\\TranslatorWordWrap.js" "{jr}\\plugins\\TranslatorWordWrap.js" >nul',
                 f"    echo   Installed word wrap plugin",
                 ")",
-                # Swap font to Consolas
+            ]
+
+        # Always swap font to Consolas for English readability
+        if js_rel:
+            jr = js_rel.replace("/", "\\")
+            fr = jr.rsplit("\\", 1)[0] + "\\fonts"
+            tfr = f"_translation\\{fr}"
+            lines += [
                 f'if exist "{tfr}\\gamefont.css" (',
                 f'    if exist "{fr}\\gamefont.css" if not exist "{fr}\\gamefont_original.css" (',
                 f'        copy /Y "{fr}\\gamefont.css" "{fr}\\gamefont_original.css" >nul',
@@ -961,14 +975,20 @@ class RPGMakerMVParser:
 
         if inject_wordwrap and js_rel:
             jr = js_rel.replace("/", "\\")
-            fr = jr.rsplit("\\", 1)[0] + "\\fonts"
             lines += [
                 "",
                 f'if exist "{jr}\\plugins\\TranslatorWordWrap.js" (',
                 f'    del "{jr}\\plugins\\TranslatorWordWrap.js"',
                 "    echo   Removed word wrap plugin.",
                 ")",
-                # Restore original font
+            ]
+
+        # Always restore original font if backed up
+        if js_rel:
+            jr = js_rel.replace("/", "\\")
+            fr = jr.rsplit("\\", 1)[0] + "\\fonts"
+            lines += [
+                "",
                 f'if exist "{fr}\\gamefont_original.css" (',
                 f'    if exist "{fr}\\gamefont.css" del "{fr}\\gamefont.css"',
                 f'    ren "{fr}\\gamefont_original.css" "gamefont.css"',
@@ -997,6 +1017,32 @@ class RPGMakerMVParser:
         if os.path.isdir(backup_dir):
             return  # Already backed up
         shutil.copytree(data_dir, backup_dir)
+
+    @staticmethod
+    def _swap_gamefont(project_dir: str):
+        """Replace gamefont.css with Consolas for English readability.
+
+        Backs up the original as gamefont_original.css on first call.
+        Uses the bundled CSS from translator/resources/.
+        """
+        content_root = RPGMakerMVParser.find_content_root(project_dir)
+        if not content_root:
+            return
+        fonts_dir = os.path.join(content_root, "fonts")
+        if not os.path.isdir(fonts_dir):
+            return
+        target = os.path.join(fonts_dir, "gamefont.css")
+        backup = os.path.join(fonts_dir, "gamefont_original.css")
+        if not os.path.isfile(target):
+            return
+        # Back up original
+        if not os.path.isfile(backup):
+            shutil.copy2(target, backup)
+        # Copy bundled font CSS
+        src = os.path.join(os.path.dirname(__file__), "resources", "gamefont.css")
+        if os.path.isfile(src):
+            shutil.copy2(src, target)
+            log.info("Swapped gamefont.css to Consolas")
 
     # ── Static helpers ────────────────────────────────────────────────
 
