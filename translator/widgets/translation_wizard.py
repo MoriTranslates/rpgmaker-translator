@@ -477,8 +477,7 @@ class TranslationWizard(QDialog):
                 continue
             if "dialog" not in entry.field and "choice" not in entry.field:
                 continue
-            orig_lines = entry.original.count('\n') + 1
-            new_text = processor.process_entry(entry.translation, orig_lines)
+            new_text = processor.process_entry(entry.original, entry.translation)
             if new_text != entry.translation:
                 entry.translation = new_text
                 count += 1

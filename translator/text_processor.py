@@ -302,7 +302,7 @@ class TextProcessor:
         Returns:
             The processed translation with proper line breaks.
         """
-        if not translation or not translation.strip():
+        if not translation or not isinstance(translation, str) or not translation.strip():
             return translation
 
         # Count original lines to know how many text boxes we have
