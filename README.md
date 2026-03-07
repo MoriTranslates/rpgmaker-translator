@@ -100,9 +100,18 @@ python main.py
 
 ## Recommended Models
 
-### Sugoi Ultra 14B — JP→EN (Recommended)
+### Qwen3.5:9b — JP→EN (Recommended)
 
-Fine-tuned on visual novel, RPG, and manga JP→EN data. Handles honorifics, adult content, and RPG Maker control codes natively.
+Multimodal model with 262K native context window. Excellent JP→EN translation quality, handles honorifics, adult content, and RPG Maker control codes. Also used for image OCR. Only ~6.6GB VRAM (Q4_K_M).
+
+| GPU VRAM | Quantization | Command |
+|---|---|---|
+| **6GB** | Q4_K_M (default) | `ollama pull qwen3.5:9b` |
+| **10GB** | Q8_0 | `ollama pull qwen3.5:9b-q8_0` |
+
+### Sugoi Ultra 14B — JP→EN (Alternative)
+
+Fine-tuned on visual novel, RPG, and manga JP→EN data. Specialized for the domain but has a smaller context window than Qwen3.5.
 
 | GPU VRAM | Quantization | Command |
 |---|---|---|

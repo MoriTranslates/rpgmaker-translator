@@ -116,8 +116,9 @@ class SettingsDialog(QDialog):
         self.vision_combo.setEditable(True)
         self.vision_combo.setMinimumWidth(250)
         self.vision_combo.setToolTip(
-            "Vision model for image OCR (e.g. qwen3-vl:8b).\n"
+            "Model for image OCR (e.g. qwen3.5:9b, qwen3-vl:8b).\n"
             "Used by Translate Images to detect Japanese text in game images.\n"
+            "Any multimodal model that accepts images will work.\n"
             "Leave empty to disable image translation.\n"
             "(Ollama only)"
         )
@@ -127,7 +128,7 @@ class SettingsDialog(QDialog):
         self.vision_refresh_btn.clicked.connect(self._refresh_vision_models)
         vision_row.addWidget(self.vision_refresh_btn)
 
-        self._vision_label = QLabel("Vision Model:")
+        self._vision_label = QLabel("Image OCR Model:")
         conn_form.addRow(self._vision_label, vision_row)
 
         self.status_label = QLabel("")
@@ -216,12 +217,11 @@ class SettingsDialog(QDialog):
         self.batch_spin.setSpecialValueText("Disabled (single-entry)")
         self.batch_spin.setToolTip(
             "Number of entries sent per LLM request as a JSON batch.\n"
-            "1 = single-entry mode (recommended for local Ollama).\n"
+            "1 = single-entry mode (one line per request).\n"
+            "5-10 = good for local models with large context (Qwen3.5, etc.).\n"
             "30 = cloud APIs (DazedMTL default — reduces round trips).\n\n"
-            "For local LLMs, batching does NOT improve speed\n"
-            "(GPU generates the same tokens either way).\n"
-            "It's mainly useful for cloud APIs where per-request\n"
-            "latency and rate limits are the bottleneck.\n\n"
+            "Batching reduces round-trip overhead and can improve\n"
+            "context consistency across sequential dialogue lines.\n\n"
             "If the LLM returns invalid JSON, entries automatically\n"
             "fall back to single-entry translation."
         )
@@ -449,7 +449,7 @@ class SettingsDialog(QDialog):
                 self.batch_spin.setValue(config.get("batch_size", 10))
                 self.workers_spin.setValue(CLOUD_DEFAULT_WORKERS)
             elif is_ollama:
-                self.batch_spin.setValue(1)
+                self.batch_spin.setValue(5)
                 self.workers_spin.setValue(LOCAL_DEFAULT_WORKERS)
 
     def _on_preset_changed(self, preset_name: str):
@@ -533,7 +533,7 @@ class SettingsDialog(QDialog):
             # Restore defaults based on current provider
             provider = self.provider_combo.currentText()
             if provider == "Ollama (Local)":
-                self.batch_spin.setValue(1)
+                self.batch_spin.setValue(5)
                 self.workers_spin.setValue(LOCAL_DEFAULT_WORKERS)
             else:
                 model = self.model_combo.currentText()
@@ -552,9 +552,7 @@ class SettingsDialog(QDialog):
 
     def _populate_vision_combo(self, all_models: list):
         """Populate the vision model combo from an already-fetched model list."""
-        _VISION_KEYWORDS = ("vl", "vision", "llava", "minicpm-v", "bakllava")
-        models = [m for m in all_models
-                  if any(kw in m.lower() for kw in _VISION_KEYWORDS)]
+        models = list(all_models)
         current = self.vision_combo.currentText()
         self.vision_combo.blockSignals(True)
         self.vision_combo.clear()

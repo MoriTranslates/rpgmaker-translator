@@ -1,13 +1,14 @@
 # RPG Maker Translator — Local LLM (Ollama + PyQt6)
 
 ## Project Overview
-A local LLM-powered translation tool for RPG Maker MV/MZ games, including adult (18+) content. Uses Ollama with Qwen3-14B (optimized for 4070 Ti 12GB VRAM + 64GB RAM). Features a PyQt6 desktop GUI with batch translation, pronoun-aware gender hints, two-stage workflow (DB → dialogue), actor-by-actor mode, grammar polish, plugin parameter extraction, side-by-side review/editing, two-layer glossary, translation variants, event viewer with editor panel, master view for bulk duplicate editing, inline namebox speaker detection, and project save/resume.
+A local LLM-powered translation tool for RPG Maker MV/MZ games, including adult (18+) content. Uses Ollama with Qwen3.5-9B or Sugoi Ultra 14B (optimized for 4070 Ti 12GB VRAM + 64GB RAM). Features a PyQt6 desktop GUI with batch translation, pronoun-aware gender hints, two-stage workflow (DB → dialogue), actor-by-actor mode, grammar polish, plugin parameter extraction, side-by-side review/editing, two-layer glossary, translation variants, event viewer with editor panel, master view for bulk duplicate editing, inline namebox speaker detection, and project save/resume.
 
 ## Tech Stack
 - **Python 3.14** (Windows)
 - **PyQt6** — Desktop GUI framework
 - **Ollama** — Local LLM inference server (REST API)
-- **Qwen3:14b** — Recommended model (best JP comprehension for 12GB VRAM)
+- **Qwen3.5:9b** — Recommended model (262K context, multimodal, ~6.6GB VRAM)
+- **Sugoi Ultra 14B** — Alternative JP→EN specialist (fine-tuned for VN/RPG)
 - **requests** — HTTP client for Ollama API
 
 ## Project Structure
@@ -316,9 +317,9 @@ All pushed to master. Recent commits (newest first):
 - [x] Inline namebox detection (`\N<name>`) — strips from dialogue, populates speaker, restores on export
 - [x] Batch dedup — replaces translation memory; copies existing translations to duplicates before batch start
 - [x] English speaker names — `_update_speaker_names()` translates JP speaker names on project open and load state
+- [x] Batch JSON translation — `translate_batch()` / `polish_batch()` sends multiple entries per LLM request as JSON. Default batch_size=5 for local, 30 for cloud. Falls back to single-entry on JSON parse failure. Works well with Qwen3.5 (262K context) and cloud APIs.
 
 ### Declined After Testing
-- [~] Batch JSON translation — `translate_batch()` / `polish_batch()` code exists but quality degrades on local 14B models (Sugoi, Qwen3). Small context windows (~4K tokens) can't handle system prompt + glossary + N entries well. Single-entry (`batch_size=1`) produces better results. Code kept in case larger cloud models make it viable.
 - [~] plugins.js parameter scan — `_parse_plugins()` disabled, `_scan_plugin_param()` / `_scan_parsed_value()` commented out. Over-extracted internal identifiers, config keys, and command keywords that broke games. Plugin display text now handled via event command whitelists (356/357) instead.
 - [~] Plugin script text extraction (code 355/655) — too dangerous. Inline JavaScript in events; translating code strings breaks game logic. DazedMTL also has it OFF by default.
 - [~] Longest-first replacement in export — not needed, export uses entry ID position in JSON tree, not substring replacement

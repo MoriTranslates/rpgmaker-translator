@@ -246,7 +246,7 @@ class TranslationEngine(QObject):
         super().__init__(parent)
         self.client = client
         self.num_workers = 2
-        self.batch_size = 1  # entries per JSON batch (1 = single-entry; 30 = DazedMTL/cloud batch mode)
+        self.batch_size = 5  # entries per JSON batch (5 = local default; 30 = DazedMTL/cloud)
         self.max_history = 10  # translation history window (0 = disabled)
         self.auto_tune = False  # auto-calibrate batch_size before batch
         self._threads = []

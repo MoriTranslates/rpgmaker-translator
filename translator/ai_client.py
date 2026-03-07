@@ -1295,13 +1295,7 @@ class AIClient:
         except (requests.RequestException, ConnectionError):
             return text  # Keep original on error
 
-    # ── Batch JSON translation (DEPRECATED) ─────────────────────
-    # Tested with Sugoi Ultra 14B and Qwen3-14B — quality degrades noticeably
-    # when packing multiple lines into one request.  Local 14B models have
-    # tight context windows (~4096 tokens) and lose per-line nuance when
-    # sharing system prompt / glossary / actor context across N entries.
-    # Single-entry translation (batch_size=1) produces consistently better
-    # results.  Code kept for potential future use with larger cloud models.
+    # ── Batch JSON translation ──────────────────────────────────
 
     # Regex for extracting a JSON object from LLM response that may have
     # markdown fences or preamble text around it.
@@ -1467,15 +1461,14 @@ class AIClient:
                 },
             }
 
-        # Scale context window to fit input + output, but cap for local models
-        # Typical batch of 30 short dialogue lines: ~2000 tokens total
-        # System prompt + glossary: ~1000-1500 tokens
-        # Allow ~100 tokens per entry for input + output
-        num_predict = min(100 * len(entries), 8192)
-        num_ctx = max(4096, 1500 + 100 * len(entries) + num_predict)
+        # Scale output budget to fit all translated entries as JSON.
+        # Each entry needs key + quotes + translated text (~200 tokens for
+        # long dialogue lines) plus JSON framing overhead (~100 tokens).
+        # Minimum 2048 prevents truncation on small batches with long lines.
+        num_predict = max(2048, min(256 * len(entries), 8192))
+        num_ctx = max(4096, 2000 + 256 * len(entries) + num_predict)
         if not self.is_cloud:
-            # Local models (Sugoi etc) degrade past 8K; cap to avoid VRAM bloat
-            num_ctx = min(num_ctx, 8192)
+            num_ctx = min(num_ctx, 16384)
             num_predict = min(num_predict, 4096)
 
         try:
@@ -1609,10 +1602,10 @@ class AIClient:
                 },
             }
 
-        num_predict = min(100 * len(entries), 8192)
-        num_ctx = max(4096, 1500 + 100 * len(entries) + num_predict)
+        num_predict = max(2048, min(256 * len(entries), 8192))
+        num_ctx = max(4096, 2000 + 256 * len(entries) + num_predict)
         if not self.is_cloud:
-            num_ctx = min(num_ctx, 8192)
+            num_ctx = min(num_ctx, 16384)
             num_predict = min(num_predict, 4096)
 
         try:

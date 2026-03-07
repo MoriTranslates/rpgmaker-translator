@@ -27,3 +27,6 @@ _reference/
 
 # Settings (contains API keys)
 _settings.json
+
+# Benchmark
+benchmark/
