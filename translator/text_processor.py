@@ -291,8 +291,9 @@ class TextProcessor:
         # Count original lines to know how many text boxes we have
         orig_line_count = len(original.split("\n"))
 
-        # If the game has a word wrap plugin, let it handle wrapping
-        if use_tag and self.analyzer.has_wordwrap_plugin and self.analyzer.wordwrap_tag:
+        # If the game has a word wrap plugin (or we're injecting one), use tags
+        has_plugin = self.analyzer.has_wordwrap_plugin or self.analyzer.inject_wordwrap
+        if use_tag and has_plugin:
             return self._apply_plugin_wordwrap(translation, orig_line_count)
 
         # Otherwise — manually redistribute text across lines
@@ -307,7 +308,7 @@ class TextProcessor:
         the original, merge overflow into the last slot — the plugin
         re-wraps it at the message window width.
         """
-        tag = self.analyzer.wordwrap_tag
+        tag = self.analyzer.wordwrap_tag or "<WordWrap>"
 
         # Split by existing newlines (which map to 401 command boundaries)
         lines = text.split("\n")
