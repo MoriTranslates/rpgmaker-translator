@@ -477,6 +477,12 @@ class RPGMakerMVParser:
             self._apply_translations_fast(
                 data, file_entries, global_speakers=global_speakers)
 
+            # Switch locale so name input shows Latin alphabet instead of kana
+            if filename == "System.json" and isinstance(data, dict):
+                loc = data.get("locale", "")
+                if isinstance(loc, str) and loc.startswith("ja"):
+                    data["locale"] = ""
+
             # Always write to the live data/ directory
             out_path = os.path.join(data_dir, filename)
             with open(out_path, "w", encoding="utf-8") as f:
@@ -556,6 +562,12 @@ class RPGMakerMVParser:
                     self._apply_translations_fast(
                         data, file_entries,
                         global_speakers=global_speakers)
+
+                # Switch locale so name input shows Latin alphabet
+                if filename == "System.json" and isinstance(data, dict):
+                    loc = data.get("locale", "")
+                    if isinstance(loc, str) and loc.startswith("ja"):
+                        data["locale"] = ""
 
                 arc_path = f"_translation/{data_rel}/{filename}"
                 zf.writestr(arc_path,
