@@ -11,9 +11,11 @@ from enum import Enum, auto
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QProgressBar,
     QPushButton,
@@ -73,6 +75,27 @@ class TranslationWizard(QDialog):
             note.setAlignment(Qt.AlignmentFlag.AlignCenter)
             note.setWordWrap(True)
             layout.addWidget(note)
+
+        layout.addSpacing(10)
+
+        # Model selector
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Model:"))
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setMinimumWidth(250)
+        # Populate with available models
+        current_model = self.mw.client.model
+        try:
+            models = self.mw.client.list_models()
+        except Exception:
+            models = []
+        if models:
+            self.model_combo.addItems(models)
+        if current_model:
+            self.model_combo.setCurrentText(current_model)
+        model_row.addStretch()
+        layout.addLayout(model_row)
 
         layout.addSpacing(10)
 
@@ -167,11 +190,17 @@ class TranslationWizard(QDialog):
 
     def _on_start(self):
         """Begin the wizard pipeline."""
+        # Apply selected model
+        selected_model = self.model_combo.currentText().strip()
+        if selected_model:
+            self.mw.client.model = selected_model
+
         self._current_step = WizardStep.IDLE
         self.progress_widget.setVisible(True)
         self._update_state()
 
-        # Disable all checkboxes while running
+        # Disable all checkboxes and model selector while running
+        self.model_combo.setEnabled(False)
         for cb in [self.cb_db, self.cb_dialogue, self.cb_cleanup,
                     self.cb_retranslate, self.cb_wordwrap, self.cb_export,
                     self.cb_patch]:
