@@ -1461,15 +1461,15 @@ class AIClient:
                 },
             }
 
-        # Scale output budget to fit all translated entries as JSON.
-        # Each entry needs key + quotes + translated text (~200 tokens for
-        # long dialogue lines) plus JSON framing overhead (~100 tokens).
-        # Minimum 2048 prevents truncation on small batches with long lines.
-        num_predict = max(2048, min(256 * len(entries), 8192))
-        num_ctx = max(4096, 2000 + 256 * len(entries) + num_predict)
-        if not self.is_cloud:
-            num_ctx = min(num_ctx, 16384)
-            num_predict = min(num_predict, 4096)
+        # For cloud APIs, set explicit token budgets.
+        # For local Ollama, omit num_predict/num_ctx so the model uses its
+        # own defaults (Qwen3.5 has 262K context — no need to constrain).
+        opts = {"temperature": 0, "seed": 42}
+        if self.is_cloud:
+            num_predict = max(2048, min(256 * len(entries), 8192))
+            num_ctx = max(4096, 2000 + 256 * len(entries) + num_predict)
+            opts["num_predict"] = num_predict
+            opts["num_ctx"] = num_ctx
 
         try:
             data = self._chat(
@@ -1477,12 +1477,7 @@ class AIClient:
                 timeout=120 + 30 * len(entries),
                 format="json",
                 json_schema=json_schema,
-                options={
-                    "temperature": 0,
-                    "seed": 42,
-                    "num_predict": num_predict,
-                    "num_ctx": num_ctx,
-                },
+                options=opts,
             )
             raw = self._strip_thinking(data.get("message", {}).get("content", "").strip())
             if not raw:
@@ -1602,11 +1597,12 @@ class AIClient:
                 },
             }
 
-        num_predict = max(2048, min(256 * len(entries), 8192))
-        num_ctx = max(4096, 2000 + 256 * len(entries) + num_predict)
-        if not self.is_cloud:
-            num_ctx = min(num_ctx, 16384)
-            num_predict = min(num_predict, 4096)
+        opts = {"temperature": 0, "seed": 42}
+        if self.is_cloud:
+            num_predict = max(2048, min(256 * len(entries), 8192))
+            num_ctx = max(4096, 2000 + 256 * len(entries) + num_predict)
+            opts["num_predict"] = num_predict
+            opts["num_ctx"] = num_ctx
 
         try:
             data = self._chat(
@@ -1617,12 +1613,7 @@ class AIClient:
                 timeout=120 + 30 * len(entries),
                 format="json",
                 json_schema=json_schema,
-                options={
-                    "temperature": 0,
-                    "seed": 42,
-                    "num_predict": num_predict,
-                    "num_ctx": num_ctx,
-                },
+                options=opts,
             )
             raw = self._strip_thinking(data.get("message", {}).get("content", "").strip())
             if not raw:
