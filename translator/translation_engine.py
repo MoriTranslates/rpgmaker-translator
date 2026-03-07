@@ -94,7 +94,7 @@ class BatchTranslationWorker(QObject):
 
     MAX_RETRIES = 2
 
-    COOLDOWN_ENTRIES = 5  # Single-entry cooldown after batch failure
+    RECOVER_AFTER = 50  # Successes before trying to restore original batch size
 
     def __init__(self, client: AIClient, entries: list,
                  mode: str = "translate", batch_size: int = 5,
@@ -108,29 +108,21 @@ class BatchTranslationWorker(QObject):
         self.max_history = max_history
         self._cancelled = False
         self._history: list[tuple[str, str]] = []
-        self._cooldown_remaining = 0  # Entries to process single before retrying batch
+        self._successes_since_fail = 0  # Track consecutive successes for recovery
 
     def cancel(self):
         self._cancelled = True
 
     def run(self):
-        """Process entries in JSON batches, falling back to single-entry on failure."""
-        # Group into batches, re-checking status before each batch
-        # to skip entries filled by TM between checkpoints.
+        """Process entries in JSON batches, halving batch size on failure."""
         i = 0
         while i < len(self.entries):
             if self._cancelled:
                 break
 
-            # Determine effective batch size (1 during cooldown, normal otherwise)
-            if self._cooldown_remaining > 0:
-                effective_size = 1
-            else:
-                effective_size = self.batch_size
-
             # Build next batch, skipping already-filled entries
             batch = []
-            while i < len(self.entries) and len(batch) < effective_size:
+            while i < len(self.entries) and len(batch) < self.batch_size:
                 entry = self.entries[i]
                 i += 1
                 if self.mode == "translate":
@@ -146,12 +138,6 @@ class BatchTranslationWorker(QObject):
 
             if batch:
                 self._process_batch(batch)
-                if self._cooldown_remaining > 0:
-                    self._cooldown_remaining -= len(batch)
-                    if self._cooldown_remaining <= 0:
-                        self._cooldown_remaining = 0
-                        log.info("Cooldown ended, resuming batch_size=%d",
-                                 self.batch_size)
 
         self.finished.emit()
 
@@ -206,19 +192,29 @@ class BatchTranslationWorker(QObject):
                     log.warning("Batch returned %d/%d entries, falling back for %d missing",
                                 len(got_keys), len(batch), len(missing))
                     self._fallback_single(missing)
+
+                # Track successes for batch size recovery
+                self._successes_since_fail += len(batch)
+                if (self.batch_size < self._target_batch_size
+                        and self._successes_since_fail >= self.RECOVER_AFTER):
+                    self.batch_size = self._target_batch_size
+                    self._successes_since_fail = 0
+                    log.info("Batch recovered to original size %d after %d successes",
+                             self.batch_size, self.RECOVER_AFTER)
                 return  # Done with this batch
 
             except (ConnectionError, ValueError, OSError) as e:
                 log.warning("Batch attempt %d failed: %s", attempt + 1, e)
                 if attempt < self.MAX_RETRIES - 1:
                     continue  # Retry
-                # All retries exhausted — fall back to single-entry for this batch
-                # and enter cooldown (process next N entries single before retrying batch)
-                log.warning("Batch failed after %d attempts, falling back to single-entry "
-                            "with %d-entry cooldown",
-                            self.MAX_RETRIES, self.COOLDOWN_ENTRIES)
+                # All retries exhausted — halve batch size and fall back for this batch
+                old_size = self.batch_size
+                self.batch_size = max(1, self.batch_size // 2)
+                self._successes_since_fail = 0
+                log.warning("Batch of %d failed after %d attempts, "
+                            "halving to %d. Falling back for this batch.",
+                            old_size, self.MAX_RETRIES, self.batch_size)
                 self._fallback_single(batch)
-                self._cooldown_remaining = self.COOLDOWN_ENTRIES
 
     def _fallback_single(self, entries: list):
         """Translate entries one at a time (fallback when batch fails)."""
