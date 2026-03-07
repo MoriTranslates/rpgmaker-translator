@@ -1080,7 +1080,12 @@ class RPGMakerMVParser:
     # ── Private: System.json ───────────────────────────────────────────
 
     def _parse_system(self, data_dir: str) -> list:
-        """Parse System.json for game title and terms."""
+        """Parse System.json for game title and terms.
+
+        System terms (menu labels, battle messages, stat names) are always
+        extracted regardless of ``_require_japanese`` — they are short UI
+        strings that the user always wants control over.
+        """
         entries = []
         filepath = os.path.join(data_dir, "System.json")
         if not os.path.exists(filepath):
@@ -1089,9 +1094,13 @@ class RPGMakerMVParser:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
 
+        def _ok(text):
+            """Accept any non-empty string (skip Japanese filter for System)."""
+            return isinstance(text, str) and text.strip()
+
         # Game title
         title = data.get("gameTitle", "")
-        if self._should_extract(title):
+        if _ok(title):
             entries.append(TranslationEntry(
                 id="System.json/gameTitle",
                 file="System.json",
@@ -1104,7 +1113,7 @@ class RPGMakerMVParser:
         messages = terms.get("messages", {})
         if isinstance(messages, list):
             for i, msg in enumerate(messages):
-                if isinstance(msg, str) and self._should_extract(msg):
+                if _ok(msg):
                     entries.append(TranslationEntry(
                         id=f"System.json/terms/messages/{i}",
                         file="System.json",
@@ -1113,7 +1122,7 @@ class RPGMakerMVParser:
                     ))
         elif isinstance(messages, dict):
             for key, msg in messages.items():
-                if isinstance(msg, str) and self._should_extract(msg):
+                if _ok(msg):
                     entries.append(TranslationEntry(
                         id=f"System.json/terms/messages/{key}",
                         file="System.json",
@@ -1125,7 +1134,7 @@ class RPGMakerMVParser:
         commands = terms.get("commands", [])
         if isinstance(commands, list):
             for i, cmd in enumerate(commands):
-                if isinstance(cmd, str) and self._should_extract(cmd):
+                if _ok(cmd):
                     entries.append(TranslationEntry(
                         id=f"System.json/terms/commands/{i}",
                         file="System.json",
@@ -1137,7 +1146,7 @@ class RPGMakerMVParser:
         params = terms.get("params", [])
         if isinstance(params, list):
             for i, param in enumerate(params):
-                if isinstance(param, str) and self._should_extract(param):
+                if _ok(param):
                     entries.append(TranslationEntry(
                         id=f"System.json/terms/params/{i}",
                         file="System.json",
@@ -1149,7 +1158,7 @@ class RPGMakerMVParser:
         basic = terms.get("basic", [])
         if isinstance(basic, list):
             for i, b in enumerate(basic):
-                if isinstance(b, str) and self._should_extract(b):
+                if _ok(b):
                     entries.append(TranslationEntry(
                         id=f"System.json/terms/basic/{i}",
                         file="System.json",
