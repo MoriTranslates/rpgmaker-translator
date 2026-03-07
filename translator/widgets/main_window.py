@@ -732,12 +732,14 @@ class MainWindow(QMainWindow):
                     )
                     folder = os.path.basename(path)
                     self.setWindowTitle(f"RPG Maker Translator \u2014 {folder}")
-                    # Preload model into VRAM
-                    if not self.client.is_cloud:
-                        self._preload_model()
                     # Offer wizard if there are untranslated entries
+                    # Show choice BEFORE preloading so dialog appears instantly
+                    wizard_chosen = False
                     if self.project.translated_count < self.project.total:
-                        self._show_wizard_choice()
+                        wizard_chosen = self._show_wizard_choice()
+                    # Preload model into VRAM (wizard handles its own Ollama calls)
+                    if not wizard_chosen and not self.client.is_cloud:
+                        self._preload_model()
                     return
                 # Fall through to fresh project on load failure
 
@@ -812,21 +814,27 @@ class MainWindow(QMainWindow):
         folder = os.path.basename(path)
         self.setWindowTitle(f"RPG Maker Translator \u2014 {folder}")
 
-        # Preload model into VRAM so it's ready for translation
-        if not self.client.is_cloud:
+        # Offer wizard vs manual mode for new projects
+        # Show choice BEFORE preloading model so dialog appears instantly
+        wizard_chosen = self._show_wizard_choice()
+
+        # Preload model into VRAM (wizard handles its own Ollama calls)
+        if not wizard_chosen and not self.client.is_cloud:
             self._preload_model()
 
-        # Offer wizard vs manual mode for new projects
-        self._show_wizard_choice()
+    def _show_wizard_choice(self) -> bool:
+        """Show wizard vs manual mode choice after opening a project.
 
-    def _show_wizard_choice(self):
-        """Show wizard vs manual mode choice after opening a project."""
+        Returns True if wizard mode was chosen and executed.
+        """
         from .translation_wizard import WizardChoiceDialog, TranslationWizard
 
         dlg = WizardChoiceDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.choice == WizardChoiceDialog.WIZARD:
             wizard = TranslationWizard(self)
             wizard.exec()
+            return True
+        return False
 
     @staticmethod
     def _pick_newest_save(*paths: str) -> str | None:
