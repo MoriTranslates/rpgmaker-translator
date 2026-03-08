@@ -3216,12 +3216,13 @@ class RPGMakerMVParser:
         if not os.path.isdir(fonts_dir):
             fonts_dir = os.path.join(os.path.dirname(www_dir), "fonts")
         gamefont_css = os.path.join(fonts_dir, "gamefont.css")
-        if os.path.isfile(gamefont_css):
-            # Backup original
-            backup_css = os.path.join(fonts_dir, "gamefont_original.css")
-            if not os.path.exists(backup_css):
-                import shutil
-                shutil.copy2(gamefont_css, backup_css)
+        if os.path.isdir(fonts_dir):
+            # Backup original if it exists
+            if os.path.isfile(gamefont_css):
+                backup_css = os.path.join(fonts_dir, "gamefont_original.css")
+                if not os.path.exists(backup_css):
+                    import shutil
+                    shutil.copy2(gamefont_css, backup_css)
             with open(gamefont_css, "w", encoding="utf-8") as f:
                 f.write(
                     '@font-face {\n'
@@ -3229,7 +3230,7 @@ class RPGMakerMVParser:
                     '    src: local("Consolas"), local("Courier New");\n'
                     '}\n'
                 )
-            log.info("inject_wordwrap_plugin: swapped gamefont.css to Consolas")
+            log.info("inject_wordwrap_plugin: wrote gamefont.css with Consolas")
 
         # Read from the LIVE plugins.js (not backup) because
         # save_project may have already written translated plugin
