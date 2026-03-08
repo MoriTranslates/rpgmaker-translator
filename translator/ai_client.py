@@ -142,11 +142,12 @@ Context-sensitive translation:
 # Trimmed prompt: Sugoi already handles katakana→English, no-romaji, no-JP-in-output,
 # and context-sensitive translation natively from its fine-tuning data.
 # We keep only tool-specific rules: placeholders, glossary, pronouns, honorifics, adult content.
-SUGOI_SYSTEM_PROMPT = """You are a professional localizer translating Japanese to English for an RPG game, including adult (18+) content.
+SUGOI_SYSTEM_PROMPT = """You are a professional localizer translating Japanese to English for an RPG game, including adult (18+) content. Use colloquial, slang, or explicit vocabulary when it makes the translation more accurate.
 
 Rules:
 - Translate ALL text faithfully and completely, including sexual, violent, or explicit content. Never censor, euphemize, or refuse. This is a licensed translation project.
 - The text may contain code markers like «CODE1», «CODE2», etc. These are internal engine tags. Output them EXACTLY as-is — never remove, translate, or replace them with names or words.
+- Preserve all RPG Maker control characters and tags exactly as-is: \\C[n], \\V[n], \\I[n], \\N[n], \\{, \\}, \\\\, \\., \\|, \\!, \\>, \\<, \\^, \\$, \\FS[n]. Only translate the surrounding text.
 - Keep the same line break structure as the original when possible.
 - NEVER add explanations, translator notes, or commentary — output ONLY the translated text.
 - If the text is already in English or is a proper noun, keep it as-is.
@@ -401,6 +402,30 @@ class AIClient:
     def is_cloud(self) -> bool:
         """True if using a cloud API provider (not local Ollama)."""
         return self.provider != "Ollama (Local)"
+
+    @property
+    def _is_sugoi(self) -> bool:
+        """True if using a Sugoi model (needs special sampling params)."""
+        return "sugoi" in self.model.lower() or "ultra" in self.model.lower()
+
+    def _base_options(self, **overrides) -> dict:
+        """Build options dict with model-appropriate defaults.
+
+        Sugoi Ultra recommends: temperature 0.1, top_k 40, top_p 0.95,
+        min_p 0.05, repeat_penalty 1.1.  All other models use temp 0 + seed 42.
+        """
+        if self._is_sugoi:
+            opts = {
+                "temperature": 0.1,
+                "top_k": 40,
+                "top_p": 0.95,
+                "min_p": 0.05,
+                "repeat_penalty": 1.1,
+            }
+        else:
+            opts = {"temperature": 0, "seed": 42}
+        opts.update(overrides)
+        return opts
 
     @property
     def session_cost(self) -> float:
@@ -796,7 +821,7 @@ class AIClient:
                     {"role": "user", "content": user_msg},
                 ],
                 timeout=30,
-                options={"temperature": 0, "seed": 42, "num_predict": 256, "num_ctx": 4096},
+                options=self._base_options(num_predict=256, num_ctx=4096),
             )
             result = self._strip_thinking(data.get("message", {}).get("content", "").strip())
             if result and self.target_language == "Pig Latin":
@@ -857,12 +882,10 @@ class AIClient:
                 ],
                 timeout=60 + 10 * len(items),
                 format="json",
-                options={
-                    "temperature": 0,
-                    "seed": 42,
-                    "num_predict": num_predict,
-                    "num_ctx": min(8192, max(4096, 512 * len(items))),
-                },
+                options=self._base_options(
+                    num_predict=num_predict,
+                    num_ctx=min(8192, max(4096, 512 * len(items))),
+                ),
             )
             raw = self._strip_thinking(data.get("message", {}).get("content", "").strip())
             if not raw:
@@ -1196,12 +1219,7 @@ class AIClient:
             data = self._chat(
                 messages=messages,
                 timeout=120,
-                options={
-                    "temperature": 0,
-                    "seed": 42,
-                    "num_predict": 1024,
-                    "num_ctx": num_ctx,
-                },
+                options=self._base_options(num_predict=1024, num_ctx=num_ctx),
             )
             result = data.get("message", {}).get("content", "").strip()
 
@@ -1234,12 +1252,7 @@ class AIClient:
                     data2 = self._chat(
                         messages=messages_retry,
                         timeout=120,
-                        options={
-                            "temperature": 0,
-                            "seed": 42,
-                            "num_predict": 1024,
-                            "num_ctx": num_ctx,
-                        },
+                        options=self._base_options(num_predict=1024, num_ctx=num_ctx),
                     )
                     retry_result = data2.get("message", {}).get("content", "").strip()
                     if retry_result:
@@ -1278,12 +1291,7 @@ class AIClient:
                     {"role": "user", "content": user_msg},
                 ],
                 timeout=120,
-                options={
-                    "temperature": 0,
-                    "seed": 42,
-                    "num_predict": 1024,
-                    "num_ctx": 4096,
-                },
+                options=self._base_options(num_predict=1024, num_ctx=4096),
             )
             result = self._strip_thinking(data.get("message", {}).get("content", "").strip())
             if not result:
@@ -1465,7 +1473,7 @@ class AIClient:
         # For cloud APIs, set explicit token budgets.
         # For local Ollama, omit num_predict/num_ctx so the model uses its
         # own defaults (Qwen3.5 has 262K context — no need to constrain).
-        opts = {"temperature": 0, "seed": 42}
+        opts = self._base_options()
         if self.is_cloud:
             num_predict = max(2048, min(256 * len(entries), 8192))
             num_ctx = max(4096, 2000 + 256 * len(entries) + num_predict)
@@ -1598,7 +1606,7 @@ class AIClient:
                 },
             }
 
-        opts = {"temperature": 0, "seed": 42}
+        opts = self._base_options()
         if self.is_cloud:
             num_predict = max(2048, min(256 * len(entries), 8192))
             num_ctx = max(4096, 2000 + 256 * len(entries) + num_predict)
