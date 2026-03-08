@@ -3141,7 +3141,8 @@ class RPGMakerMVParser:
     # ── Splash screen removal ─────────────────────────────────────
 
     _SPLASH_PLUGIN_NAMES = {"MadeWithMv", "MadeWithMz",
-                            "SplashScreen", "Splash"}
+                            "SplashScreen", "Splash",
+                            "MOG_TitleSplashScreen"}
 
     def disable_splash_plugin(self, project_dir: str) -> bool:
         """Disable the 'Made with RPG Maker' splash plugin in plugins.js.

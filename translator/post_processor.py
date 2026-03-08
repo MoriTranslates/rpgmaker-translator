@@ -317,14 +317,15 @@ def _fix_space_after_name_code(entry) -> bool:
 
 
 def _fix_skill_message_space(entry) -> bool:
-    """Add leading space to skill message1/message2 fields.
+    """Add leading space to skill/state message fields.
 
     RPG Maker concatenates ActorName + message directly, so
     "released Curse!" becomes "Novalreleased Curse!" without a space.
+    Applies to Skills.json and States.json message1-4 fields.
     """
-    if entry.file != "Skills.json":
+    if entry.file not in ("Skills.json", "States.json"):
         return False
-    if entry.field not in ("message1", "message2"):
+    if entry.field not in ("message1", "message2", "message3", "message4"):
         return False
     trans = entry.translation
     if not trans or trans.startswith(' '):
