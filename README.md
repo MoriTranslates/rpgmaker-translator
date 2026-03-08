@@ -100,43 +100,25 @@ python main.py
 
 ---
 
-## Recommended Models
+## Recommended Model — Qwen 3.5
 
-### Qwen 3.5:9b — JP→EN (Recommended)
+Best JP→EN model available locally. 262K native context window, multimodal (also used for image OCR), handles honorifics, adult content, and RPG Maker control codes. Works for all 24 supported target languages.
 
-Best overall JP→EN model. 262K native context window, multimodal (also used for image OCR), handles honorifics, adult content, and RPG Maker control codes. Only ~6.6GB VRAM at Q4_K_M.
-
-| GPU VRAM | Quantization | Command |
+| GPU VRAM | Model | Command |
 |---|---|---|
-| **6GB** | Q4_K_M (default) | `ollama pull qwen3.5:9b` |
-| **10GB** | Q8_0 | `ollama pull qwen3.5:9b-q8_0` |
+| **6GB** | Qwen 3.5:9b Q4_K_M | `ollama pull qwen3.5:9b` |
+| **10GB** | Qwen 3.5:9b Q8_0 | `ollama pull qwen3.5:9b-q8_0` |
+| **12GB** | Qwen 3.5:14b Q4_K_M | `ollama pull qwen3.5:14b` |
+| **16GB** | Qwen 3.5:14b Q8_0 | `ollama pull qwen3.5:14b-q8_0` |
+| **24GB** | Qwen 3.5:30b Q4_K_M | `ollama pull qwen3.5:30b` |
 
-### Sugoi Ultra 14B — JP→EN (Alternative)
-
-Fine-tuned on visual novel, RPG, and manga JP→EN data. Specialized for the domain but has a smaller 4K context window. Use Qwen 3.5 unless you specifically need Sugoi's fine-tuned style.
-
-| GPU VRAM | Quantization | Command |
-|---|---|---|
-| **8GB** | Q2_K | `ollama run hf.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF:Q2_K` |
-| **10-12GB** | Q4_K_M (default) | `ollama run hf.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF` |
-| **16GB** | Q8_0 | `ollama run hf.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF:Q8_0` |
+The 9b model is the sweet spot — fast, fits in 6GB VRAM, and produces excellent translations.
 
 ### No GPU? Use Cloud APIs
 
 In Settings, switch Provider to OpenAI/Gemini/DeepSeek/Anthropic, enter your API key, and go. Same workflow, same features, pay per token. Cheapest option: **Gemini 2.0 Flash** at $0.10/$0.40 per 1M tokens.
 
 > **Note:** Cloud APIs may refuse or filter adult content and can ban accounts for repeated NSFW requests. For unrestricted translation of all content types, use Local LLM — everything runs on your GPU, nothing is sent to the cloud.
-
-### Qwen3 — Multi-Language
-
-For non-English targets (Chinese, Korean, Spanish, French, etc.), use **Qwen3** (`ollama pull qwen3:14b`). 24 languages supported with quality ratings in Settings.
-
-| GPU VRAM | Model | Command |
-|---|---|---|
-| **8GB** | Qwen3:8b | `ollama pull qwen3:8b` |
-| **10-12GB** | Qwen3:14b | `ollama pull qwen3:14b` |
-| **16GB** | Qwen3:14b-q8_0 | `ollama pull qwen3:14b-q8_0` |
-| **24GB** | Qwen3:30b-a3b | `ollama pull qwen3:30b-a3b` |
 
 ---
 
