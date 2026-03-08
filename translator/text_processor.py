@@ -14,8 +14,9 @@ import re
 DEFAULT_CHARS_PER_LINE = 55
 DEFAULT_MAX_LINES = 4
 # When a face/portrait graphic is displayed, the text area shrinks.
-# Standard RPG Maker face is 144px wide, leaving ~28 chars for text.
-FACE_CHARS_PER_LINE = 28
+# Standard RPG Maker face is 144px + 12px margin = 156px.
+# Face offset in chars = 156 / (font_size * char_ratio).
+FACE_OFFSET_PX = 156  # pixels consumed by face graphic + margin
 
 # Minimal word wrap plugin for RPG Maker MV/MZ.
 # Injected into games that lack a word wrap plugin (YEP/VisuMZ).
@@ -23,90 +24,118 @@ FACE_CHARS_PER_LINE = 28
 # Font is swapped to Consolas via gamefont.css during export,
 # so character counts are exact for this monospace font.
 WORDWRAP_PLUGIN_JS = r"""/*:
- * @plugindesc Word wrap for translated text.
+ * @plugindesc Render-time word wrap for translated text.
  * @author RPG Maker Translator
  *
- * @param MaxChars
- * @desc Maximum visible characters per line (0 = auto-detect).
- * @default 0
- *
  * @help
- * Wraps text at word boundaries when <WordWrap> tag is present.
- * Place <WordWrap> at the beginning of a message to activate.
- * Font is swapped to Consolas via gamefont.css for consistent rendering.
+ * Wraps text at word boundaries during rendering, using actual pixel
+ * measurements from the game engine. Handles face graphics, escape
+ * codes, font size changes, and icons automatically.
+ *
+ * Hooks Window_Message (dialogue) and Window_Help (descriptions).
+ * Does NOT affect choice windows, battle logs, popups, or other UI.
+ *
+ * Activated by <WordWrap> tag at the start of a text block.
+ * Uses the same approach as YEP_MessageCore for maximum compatibility.
  *
  * Auto-injected by RPG Maker Translator during export.
  */
 (function() {
     'use strict';
 
-    var params = PluginManager.parameters('TranslatorWordWrap');
-    var maxCharsParam = Number(params['MaxChars'] || 0);
+    // ===== Shared wrap-check logic =====
+    function twrCheckWrap(win, textState) {
+        if (!textState) return false;
+        var ch = textState.text[textState.index];
+        if (ch !== ' ' && ch !== '\u3000') return false;
 
-    // --- Detect <WordWrap> tag and pre-wrap text ---
-    var _Window_Base_convertEscapeCharacters =
-        Window_Base.prototype.convertEscapeCharacters;
-    Window_Base.prototype.convertEscapeCharacters = function(text) {
-        text = _Window_Base_convertEscapeCharacters.call(this, text);
+        var text = textState.text;
+        var idx = textState.index + 1;
+        var nextSpace = text.indexOf(' ', idx);
+        var nextBreak = text.indexOf('\n', idx);
+        if (nextSpace < 0) nextSpace = text.length;
+        if (nextBreak >= 0 && nextBreak < nextSpace) nextSpace = nextBreak;
+
+        var word = text.substring(textState.index, nextSpace);
+        var wordWidth = win.textWidth(word);
+        var maxWidth = win.contents ? win.contents.width : 408;
+        return (textState.x + wordWidth > maxWidth);
+    }
+
+    // ===== Window_Message hooks (dialogue) =====
+
+    var _WM_convertEsc = Window_Message.prototype.convertEscapeCharacters;
+    Window_Message.prototype.convertEscapeCharacters = function(text) {
         this._twrWordWrap = false;
         if (/<wordwrap>/i.test(text)) {
             this._twrWordWrap = true;
-            text = text.replace(/<wordwrap>/gi, '');
-            text = this._twrApplyWordWrap(text);
+            text = text.replace(/<wordwrap>/gi, '\n');
+        }
+        text = _WM_convertEsc.call(this, text);
+        if (this._twrWordWrap) {
+            text = text.replace(/[\n\r]+/g, '');
+            text = text.replace(/<(?:br|line break)>/gi, '\n');
         }
         return text;
     };
 
-    // --- Strip escape codes for character counting ---
-    var _twrStripCodes = function(text) {
-        return text.replace(/\x1b[A-Za-z](?:\[\d*\])?/g, '')
-                   .replace(/\x1b[{}$.|!><^]/g, '')
-                   .replace(/<[^>]+>/g, '');
-    };
-
-    // --- Determine max chars: param > auto-detect from pixel width ---
-    Window_Base.prototype._twrMaxChars = function() {
-        if (maxCharsParam > 0) return maxCharsParam;
-        // Auto-detect: measure how many chars fit using actual font
-        var charW = this.textWidth('W');
-        if (charW <= 0) charW = 14;
-        var usable = this.contentsWidth ? this.contentsWidth() :
-                     (this.contents ? this.contents.width : 408);
-        return Math.floor(usable / charW);
-    };
-
-    // --- Pre-process: insert \n at word boundaries ---
-    Window_Base.prototype._twrApplyWordWrap = function(text) {
-        var maxChars = this._twrMaxChars();
-        var lines = text.split('\n');
-        var result = [];
-        for (var i = 0; i < lines.length; i++) {
-            result.push(this._twrWrapLine(lines[i], maxChars));
+    var _WM_processNormal = Window_Message.prototype.processNormalCharacter;
+    Window_Message.prototype.processNormalCharacter = function(textState) {
+        if (this._twrWordWrap && twrCheckWrap(this, textState)) {
+            this.processNewLine(textState);
         }
-        return result.join('\n');
+        _WM_processNormal.call(this, textState);
     };
 
-    Window_Base.prototype._twrWrapLine = function(line, maxChars) {
-        if (!line) return line;
-        var words = line.split(' ');
-        var currentLine = '';
-        var currentLen = 0;
-        var resultLines = [];
-        for (var j = 0; j < words.length; j++) {
-            var word = words[j];
-            var visLen = _twrStripCodes(word).length;
-            var spaceLen = currentLine ? 1 : 0;
-            if (currentLen + spaceLen + visLen > maxChars && currentLine) {
-                resultLines.push(currentLine);
-                currentLine = word;
-                currentLen = visLen;
-            } else {
-                currentLine += (currentLine ? ' ' : '') + word;
-                currentLen += spaceLen + visLen;
+    var _WM_processNewLine = Window_Message.prototype.processNewLine;
+    Window_Message.prototype.processNewLine = function(textState) {
+        _WM_processNewLine.call(this, textState);
+        if (this._twrWordWrap && textState) {
+            if (this.newLineX) {
+                textState.x = this.newLineX(textState);
+            }
+            if (this.needsNewPage && this.needsNewPage(textState)) {
+                this.startPause();
             }
         }
-        if (currentLine) resultLines.push(currentLine);
-        return resultLines.join('\n');
+    };
+
+    if (!Window_Message.prototype.needsNewPage) {
+        Window_Message.prototype.needsNewPage = function(textState) {
+            if (!textState) return false;
+            var lineH = this.lineHeight ? this.lineHeight() : 36;
+            var maxH = this.contents ? this.contents.height : 144;
+            return (textState.y + lineH > maxH);
+        };
+    }
+
+    // ===== Window_Help hooks (skill/item descriptions) =====
+
+    var _WH_convertEsc =
+        Window_Help.prototype.convertEscapeCharacters ||
+        Window_Base.prototype.convertEscapeCharacters;
+    Window_Help.prototype.convertEscapeCharacters = function(text) {
+        this._twrWordWrap = false;
+        if (/<wordwrap>/i.test(text)) {
+            this._twrWordWrap = true;
+            text = text.replace(/<wordwrap>/gi, '');
+        }
+        text = _WH_convertEsc.call(this, text);
+        if (this._twrWordWrap) {
+            // Strip manual line breaks — render-time wrap handles it
+            text = text.replace(/[\n\r]+/g, ' ');
+        }
+        return text;
+    };
+
+    var _WH_processNormal =
+        Window_Help.prototype.processNormalCharacter ||
+        Window_Base.prototype.processNormalCharacter;
+    Window_Help.prototype.processNormalCharacter = function(textState) {
+        if (this._twrWordWrap && twrCheckWrap(this, textState)) {
+            this.processNewLine(textState);
+        }
+        _WH_processNormal.call(this, textState);
     };
 })();
 """
@@ -142,6 +171,8 @@ class PluginAnalyzer:
         self.message_width = 816
         self.font_size = 28
         self.chars_per_line = DEFAULT_CHARS_PER_LINE
+        self.face_chars_per_line = max(15, DEFAULT_CHARS_PER_LINE - int(
+            FACE_OFFSET_PX / (self.font_size * 0.55)))
         self.max_lines = DEFAULT_MAX_LINES
         self.has_wordwrap_plugin = False
         self.wordwrap_tag = ""  # e.g. "<WordWrap>" if plugin supports it
@@ -265,12 +296,14 @@ class PluginAnalyzer:
         char_width = self.font_size * 0.55
         if char_width > 0:
             self.chars_per_line = max(20, int(usable_width / char_width))
+            self.face_chars_per_line = max(15, int(
+                (usable_width - FACE_OFFSET_PX) / char_width))
 
     def get_summary(self) -> str:
         """Return a human-readable summary of detected settings."""
         lines = [f"Message width: {self.message_width}px"]
         lines.append(f"Font size: {self.font_size}px")
-        lines.append(f"Chars per line: ~{self.chars_per_line}")
+        lines.append(f"Chars per line: ~{self.chars_per_line} (face: ~{self.face_chars_per_line})")
         lines.append(f"Max lines per box: {self.max_lines}")
         if self.detected_plugins:
             lines.append(f"Message plugins: {', '.join(self.detected_plugins)}")
@@ -316,29 +349,52 @@ class TextProcessor:
         # If the game has a word wrap plugin (or we're injecting one), use tags
         has_plugin = self.analyzer.has_wordwrap_plugin or self.analyzer.inject_wordwrap
         if use_tag and has_plugin:
-            return self._apply_plugin_wordwrap(translation, orig_line_count)
+            return self._apply_plugin_wordwrap(translation, orig_line_count,
+                                               has_face=has_face)
 
         # Otherwise — manually redistribute text across lines
         return self._apply_manual_wordwrap(translation, orig_line_count,
                                            has_face=has_face)
 
-    def _apply_plugin_wordwrap(self, text: str, orig_line_count: int) -> str:
-        """For games with word wrap plugins: add tag, keep within line count.
+    def _apply_plugin_wordwrap(self, text: str, orig_line_count: int,
+                               *, has_face: bool = False) -> str:
+        """For games with word wrap plugins: add tag only if lines overflow.
 
-        The in-game word wrap plugin handles visual line breaking, so we
-        just need to fit text into the correct number of 401 commands
-        (= orig_line_count).  If the translation has more newlines than
-        the original, merge overflow into the last slot — the plugin
-        re-wraps it at the message window width.
+        Only adds <WordWrap> when at least one line exceeds the available
+        character width.  Entries where all lines already fit keep their
+        original line breaks — this preserves intentional formatting
+        (e.g. repair shop results, short dialogue).
         """
         tag = self.analyzer.wordwrap_tag or "<WordWrap>"
+        max_chars = (self.analyzer.face_chars_per_line if has_face
+                     else self.analyzer.chars_per_line)
 
         # Split by existing newlines (which map to 401 command boundaries)
         lines = text.split("\n")
 
-        # Merge overflow lines into the last slot so we stay within
-        # orig_line_count 401 commands.  The word wrap plugin handles
-        # the visual breaking of long lines.
+        # Check if any line actually overflows the available width
+        needs_wrap = any(
+            self._visual_length(line) > max_chars
+            for line in lines if line.strip()
+        )
+
+        if not needs_wrap:
+            # All lines fit — preserve original formatting, no tag needed.
+            # Still enforce line count to match 401 command slots.
+            if len(lines) > orig_line_count:
+                keep = lines[:orig_line_count - 1] if orig_line_count > 1 else []
+                merged = " ".join(
+                    seg.strip() for seg in lines[len(keep):] if seg.strip()
+                )
+                keep.append(merged)
+                lines = keep
+            while len(lines) < orig_line_count:
+                lines.append("")
+            # Strip any existing <WordWrap> tag — not needed
+            result = "\n".join(lines)
+            return re.sub(r'<[Ww]ord[Ww]rap>', '', result)
+
+        # Lines overflow — merge into orig_line_count slots and add tag
         if len(lines) > orig_line_count:
             keep = lines[:orig_line_count - 1] if orig_line_count > 1 else []
             merged = " ".join(
@@ -369,7 +425,7 @@ class TextProcessor:
         Sets self._last_overflow if the wrapped text exceeds a single
         message box (analyzer.max_lines).
         """
-        max_chars = (FACE_CHARS_PER_LINE if has_face
+        max_chars = (self.analyzer.face_chars_per_line if has_face
                      else self.analyzer.chars_per_line)
         self._last_overflow = False
 
@@ -429,10 +485,11 @@ class TextProcessor:
         cleaned = CONTROL_CODE_REGEX.sub("", text)
         return len(cleaned)
 
-    # Only these field types go through the message window where
-    # <WordWrap> tags are processed.  DB fields (name, description,
-    # terms, etc.) are shown in menus that don't handle the tag.
-    _WORDWRAP_FIELDS = {"dialog", "scroll_text"}
+    # Field types where the <WordWrap> tag is used for render-time wrapping.
+    # dialog / scroll_text — Window_Message (dialogue boxes)
+    # description — Window_Help (skill/item/weapon/armor help text)
+    # Other DB fields (name, terms) use menus that don't support the tag.
+    _WORDWRAP_FIELDS = {"dialog", "scroll_text", "description"}
 
     def process_all(self, entries: list) -> int:
         """Process all translated entries. Returns count of modified entries.

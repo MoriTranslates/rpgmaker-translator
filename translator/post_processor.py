@@ -23,6 +23,7 @@ class PostProcessResult:
     space_after_name_code: int = 0
     collapsed_color_codes: int = 0
     skill_message_space: int = 0
+    spurious_newlines: int = 0
     total_entries_fixed: int = 0
     retranslate_ids: list = None  # Entry IDs that need LLM retranslation
 
@@ -52,6 +53,8 @@ class PostProcessResult:
             parts.append(f"{self.collapsed_color_codes} collapsed color codes")
         if self.skill_message_space:
             parts.append(f"{self.skill_message_space} skill message leading spaces")
+        if self.spurious_newlines:
+            parts.append(f"{self.spurious_newlines} spurious newlines in non-dialog")
         if self.retranslate_ids:
             parts.append(f"{len(self.retranslate_ids)} queued for retranslation")
         if not parts:
@@ -78,6 +81,8 @@ _DOUBLE_SPACE_RE = re.compile(r'  +')
 
 # \n[N] NOT followed by a space, newline, punctuation, or end of string
 # This catches "\\n[1]She" but not "\\n[1] She" or "\\n[1]\n"
+# Only \N[n] needs this fix — it expands to an actor name inline,
+# so "\\N[1]She" would render as "HeroShe" in-game.
 _NAME_CODE_NO_SPACE_RE = re.compile(r'(\\n\[\d+\])(?=[A-Za-z])')
 
 # Collapsed color codes: \c[N]\c[0] with nothing meaningful between them
@@ -305,6 +310,9 @@ def _fix_space_after_name_code(entry) -> bool:
     r"""Insert space after \n[N] when followed directly by a letter.
 
     Fixes: "\\n[1]She went" → "\\n[1] She went"
+    Only \N[n] needs this — it expands to an actor name inline.
+    Other codes like \C[n] are invisible, so spacing around them
+    is preserved by _extract_codes capturing adjacent whitespace.
     """
     trans = entry.translation
     if not trans:
@@ -352,6 +360,30 @@ def _fix_collapsed_color_codes(entry, retranslate_ids: list) -> bool:
     return False
 
 
+def _fix_spurious_newlines(entry) -> bool:
+    """Strip newlines from non-dialog fields when original had none.
+
+    LLMs sometimes word-wrap short fields like choices, skill messages,
+    and item names.  These fields don't go through the message window
+    word wrapper, so newlines render as literal line breaks in menus,
+    choice windows, and battle log — breaking layout.
+
+    Exempts description fields: RPG Maker's Help Window (Window_Help)
+    renders \\n as line breaks, so word wrap newlines are needed there.
+    """
+    if entry.field in ("dialog", "scroll_text", "description"):
+        return False
+    trans = entry.translation
+    orig = entry.original
+    if not trans or '\n' not in trans:
+        return False
+    # Only strip if original had no newlines
+    if '\n' in orig:
+        return False
+    entry.translation = trans.replace('\n', ' ')
+    return True
+
+
 def run_post_processing(entries: list, verbose: bool = False) -> PostProcessResult:
     """Run all post-processing fixes on a list of TranslationEntry objects.
 
@@ -380,6 +412,10 @@ def run_post_processing(entries: list, verbose: bool = False) -> PostProcessResu
 
         if _fix_hallucinated_br(entry):
             result.hallucinated_br += 1
+            entry_fixed = True
+
+        if _fix_spurious_newlines(entry):
+            result.spurious_newlines += 1
             entry_fixed = True
 
         if _fix_word_per_line(entry):

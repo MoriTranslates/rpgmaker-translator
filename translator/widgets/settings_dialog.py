@@ -4,7 +4,8 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLineEdit, QComboBox, QPlainTextEdit, QPushButton,
     QLabel, QGroupBox, QMessageBox, QSpinBox,
-    QCheckBox, QApplication, QProgressDialog,
+    QCheckBox, QApplication, QProgressDialog, QTabWidget, QWidget,
+    QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
@@ -61,29 +62,53 @@ class SettingsDialog(QDialog):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        # ── Translation Provider ─────────────────────────────────────
-        conn_group = QGroupBox("Translation Provider")
-        conn_form = QFormLayout(conn_group)
+        # ── Tab widget ────────────────────────────────────────────────
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        self._build_provider_tab()
+        self._build_prompt_tab()
+        self._build_options_tab()
+
+        # ── Bottom buttons ─────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self._save)
+        btn_row.addWidget(save_btn)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+
+        layout.addLayout(btn_row)
+
+    # ── Tab 1: Provider ───────────────────────────────────────────────
+
+    def _build_provider_tab(self):
+        tab = QWidget()
+        form = QFormLayout(tab)
 
         # Provider dropdown
         self.provider_combo = QComboBox()
         for p in PROVIDERS:
             self.provider_combo.addItem(p)
         self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
-        conn_form.addRow("Provider:", self.provider_combo)
+        form.addRow("Provider:", self.provider_combo)
 
         # API Key (hidden for Ollama)
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_edit.setPlaceholderText("Enter API key...")
         self._api_key_label = QLabel("API Key:")
-        conn_form.addRow(self._api_key_label, self.api_key_edit)
+        form.addRow(self._api_key_label, self.api_key_edit)
 
         # URL (shown for Ollama and Custom)
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("http://localhost:11434")
         self._url_label = QLabel("Server URL:")
-        conn_form.addRow(self._url_label, self.url_edit)
+        form.addRow(self._url_label, self.url_edit)
 
         # Model
         model_row = QHBoxLayout()
@@ -105,11 +130,11 @@ class SettingsDialog(QDialog):
         self.suggest_btn.clicked.connect(self._suggest_model)
         model_row.addWidget(self.suggest_btn)
 
-        conn_form.addRow("Model:", model_row)
+        form.addRow("Model:", model_row)
 
         self.model_hint_label = QLabel("")
         self.model_hint_label.setWordWrap(True)
-        conn_form.addRow("", self.model_hint_label)
+        form.addRow("", self.model_hint_label)
 
         # Vision model (for image translation OCR — Ollama only)
         vision_row = QHBoxLayout()
@@ -130,25 +155,27 @@ class SettingsDialog(QDialog):
         vision_row.addWidget(self.vision_refresh_btn)
 
         self._vision_label = QLabel("Image OCR Model:")
-        conn_form.addRow(self._vision_label, vision_row)
+        form.addRow(self._vision_label, vision_row)
 
         self.status_label = QLabel("")
-        conn_form.addRow("", self.status_label)
+        form.addRow("", self.status_label)
 
         self.lang_combo = QComboBox()
         for name, stars, tip in TARGET_LANGUAGES:
             self.lang_combo.addItem(f"{name}  {stars}", userData=name)
             self.lang_combo.setItemData(self.lang_combo.count() - 1, tip, Qt.ItemDataRole.ToolTipRole)
         self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
-        conn_form.addRow("Target Language:", self.lang_combo)
+        form.addRow("Target Language:", self.lang_combo)
 
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
 
-        layout.addWidget(conn_group)
+        self.tabs.addTab(tab, "Provider")
 
-        # ── Prompt ───────────────────────────────────────────────────
-        prompt_group = QGroupBox("Translation Prompt")
-        prompt_layout = QVBoxLayout(prompt_group)
+    # ── Tab 2: Prompt ─────────────────────────────────────────────────
+
+    def _build_prompt_tab(self):
+        tab = QWidget()
+        vbox = QVBoxLayout(tab)
 
         # Prompt preset dropdown + buttons
         preset_row = QHBoxLayout()
@@ -169,32 +196,24 @@ class SettingsDialog(QDialog):
         clear_btn.clicked.connect(self._clear_prompt)
         preset_row.addWidget(clear_btn)
 
-        prompt_layout.addLayout(preset_row)
+        vbox.addLayout(preset_row)
 
         self.prompt_edit = QPlainTextEdit()
-        self.prompt_edit.setMinimumHeight(120)
+        self.prompt_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.prompt_edit.textChanged.connect(self._on_prompt_edited)
-        prompt_layout.addWidget(self.prompt_edit)
+        vbox.addWidget(self.prompt_edit)
 
-        layout.addWidget(prompt_group)
+        self.tabs.addTab(tab, "Prompt")
 
-        # Translation options
-        opts_group = QGroupBox("Translation Options")
-        opts_form = QFormLayout(opts_group)
+    # ── Tab 3: Options ────────────────────────────────────────────────
 
-        self.dazed_mode_check = QCheckBox("DazedMTL Mode")
-        self.dazed_mode_check.setToolTip(
-            "Mirrors DazedMTL's translation settings:\n"
-            "  - Batch size: 30 lines per request\n"
-            "  - DazedMTL Full prompt\n"
-            "  - Cloud: 4 parallel workers\n"
-            "  - Local Ollama: 1 worker (GPU can't parallelize)\n\n"
-            "Best for cloud APIs. For local Sugoi, batching\n"
-            "still helps (fewer round trips) but workers=1\n"
-            "is optimal since the GPU processes sequentially."
-        )
-        self.dazed_mode_check.stateChanged.connect(self._on_dazed_mode_changed)
-        opts_form.addRow(self.dazed_mode_check)
+    def _build_options_tab(self):
+        tab = QWidget()
+        vbox = QVBoxLayout(tab)
+
+        # ── Translation group ──
+        trans_group = QGroupBox("Translation")
+        trans_form = QFormLayout(trans_group)
 
         self.context_spin = QSpinBox()
         self.context_spin.setRange(0, 20)
@@ -202,7 +221,7 @@ class SettingsDialog(QDialog):
             "Number of recent dialogue lines included as context for the LLM.\n"
             "Higher = better coherence but slower and uses more VRAM."
         )
-        opts_form.addRow("Context window size:", self.context_spin)
+        trans_form.addRow("Context window size:", self.context_spin)
 
         self.workers_spin = QSpinBox()
         self.workers_spin.setRange(1, 16)
@@ -211,7 +230,7 @@ class SettingsDialog(QDialog):
             "Higher = faster batch translation, but uses more VRAM.\n"
             "Ollama will be automatically restarted when this changes."
         )
-        opts_form.addRow("Parallel workers:", self.workers_spin)
+        trans_form.addRow("Parallel workers:", self.workers_spin)
 
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(1, 50)
@@ -221,37 +240,44 @@ class SettingsDialog(QDialog):
             "1 = single-entry mode (one line per request).\n"
             "5-10 = good for local models with large context (Qwen3.5, etc.).\n"
             "30 = cloud APIs (DazedMTL default — reduces round trips).\n\n"
-            "Batching reduces round-trip overhead and can improve\n"
-            "context consistency across sequential dialogue lines.\n\n"
             "If the LLM returns invalid JSON, entries automatically\n"
             "fall back to single-entry translation."
         )
-        opts_form.addRow("Batch size:", self.batch_spin)
+        trans_form.addRow("Batch size:", self.batch_spin)
 
         self.auto_tune_check = QCheckBox("Auto-tune batch size")
         self.auto_tune_check.setToolTip(
             "Automatically calibrate optimal batch size before each\n"
             "batch translation by testing sizes 5→30 and measuring\n"
-            "throughput (entries/sec).\n\n"
-            "Calibration uses ~105 real entries (translations are kept).\n"
-            "Only runs for local Ollama with batch_size > 1.\n"
-            "Cloud APIs skip calibration (fixed batch 30)."
+            "throughput (entries/sec)."
         )
         self.auto_tune_check.toggled.connect(self._on_auto_tune_toggled)
-        opts_form.addRow(self.auto_tune_check)
+        trans_form.addRow(self.auto_tune_check)
 
         self.history_spin = QSpinBox()
         self.history_spin.setRange(0, 30)
         self.history_spin.setSpecialValueText("Disabled")
         self.history_spin.setToolTip(
             "Number of recent translation pairs sent to the LLM as context.\n"
-            "The LLM sees its own previous translations, improving style\n"
-            "consistency and pronoun resolution across sequential dialogue.\n\n"
-            "0 = disabled (no history sent).\n"
-            "10 = recommended (good balance of context vs. speed).\n"
-            "Higher values use more context window but may improve consistency."
+            "0 = disabled. 10 = recommended."
         )
-        opts_form.addRow("Translation history:", self.history_spin)
+        trans_form.addRow("Translation history:", self.history_spin)
+
+        self.dazed_mode_check = QCheckBox("DazedMTL Mode")
+        self.dazed_mode_check.setToolTip(
+            "Mirrors DazedMTL's translation settings:\n"
+            "  - Batch size: 30 lines per request\n"
+            "  - DazedMTL Full prompt\n"
+            "  - Cloud: 4 workers / Local: 1 worker"
+        )
+        self.dazed_mode_check.stateChanged.connect(self._on_dazed_mode_changed)
+        trans_form.addRow(self.dazed_mode_check)
+
+        vbox.addWidget(trans_group)
+
+        # ── Export & Behavior group ──
+        export_group = QGroupBox("Export && Behavior")
+        export_form = QFormLayout(export_group)
 
         self.wordwrap_spin = QSpinBox()
         self.wordwrap_spin.setRange(0, 200)
@@ -261,98 +287,65 @@ class SettingsDialog(QDialog):
             "0 = auto-detect from game plugins (default).\n"
             "Set manually if auto-detection gives wrong results."
         )
-        opts_form.addRow("Word wrap chars/line:", self.wordwrap_spin)
+        export_form.addRow("Word wrap chars/line:", self.wordwrap_spin)
+
+        self.inject_wordwrap_check = QCheckBox("Inject word wrap plugin on export")
+        self.inject_wordwrap_check.setToolTip(
+            "If the game has no word wrap plugin, inject TranslatorWordWrap.js\n"
+            "on export. When enabled, Apply Word Wrap adds <WordWrap> tags.\n"
+            "When disabled, Apply Word Wrap uses manual line breaks."
+        )
+        export_form.addRow(self.inject_wordwrap_check)
 
         self.single_401_check = QCheckBox("Merge dialogue into single 401 command")
         self.single_401_check.setToolTip(
             "On export, merge all dialogue lines into a single 401 event\n"
             "command with embedded newlines, instead of one 401 per line.\n\n"
             "Enable this if your game has an auto-advance plugin that\n"
-            "paginates after every 4 consecutive 401 commands.\n"
-            "With this on, you can manually control pagination by\n"
-            "inserting \\! (wait for input) codes in the translation."
+            "paginates after every 4 consecutive 401 commands."
         )
-        opts_form.addRow(self.single_401_check)
+        export_form.addRow(self.single_401_check)
 
         self.speaker_processing_check = QCheckBox("Enable speaker text processing")
         self.speaker_processing_check.setToolTip(
-            "When enabled (default): strips \\N<name> namebox prefixes from\n"
-            "dialogue text, resolves face graphics to actor names, and\n"
-            "replaces Japanese speaker names with English in contexts.\n\n"
-            "When disabled: dialogue text stays exactly as it appears in the\n"
-            "game files. Speakers are still detected for context and gender\n"
-            "hints, but the text itself is never modified."
+            "Strips \\N<name> namebox prefixes from dialogue text,\n"
+            "resolves face graphics to actor names, and replaces\n"
+            "Japanese speaker names with English in contexts."
         )
-        opts_form.addRow(self.speaker_processing_check)
-
-        self.review_file_check = QCheckBox("Export review file after batch translation")
-        self.review_file_check.setToolTip(
-            "Automatically saves a side-by-side review TXT file\n"
-            "after each batch translation completes.\n\n"
-            "Named: Review_{Provider}_{Model}_{Date}.txt\n"
-            "Includes cost/token summary and all JP/EN pairs.\n"
-            "Share with reviewers who don't have the tool installed."
-        )
-        opts_form.addRow(self.review_file_check)
-
-        self.inject_wordwrap_check = QCheckBox("Inject word wrap plugin on export")
-        self.inject_wordwrap_check.setToolTip(
-            "If the game has no word wrap plugin, inject TranslatorWordWrap.js\n"
-            "on export. This lets the game engine wrap text using actual font\n"
-            "metrics instead of guessing characters per line.\n\n"
-            "When enabled, Apply Word Wrap adds <WordWrap> tags.\n"
-            "When disabled, Apply Word Wrap uses manual line breaks."
-        )
-        opts_form.addRow(self.inject_wordwrap_check)
+        export_form.addRow(self.speaker_processing_check)
 
         self.disable_splash_check = QCheckBox("Disable 'Made with RPG Maker' splash on export")
         self.disable_splash_check.setToolTip(
             "Automatically disables the MadeWithMv/MadeWithMz splash\n"
             "screen plugin when exporting translations to the game."
         )
-        opts_form.addRow(self.disable_splash_check)
+        export_form.addRow(self.disable_splash_check)
 
-        layout.addWidget(opts_group)
-
-        # Appearance
-        appear_group = QGroupBox("Appearance")
-        appear_form = QFormLayout(appear_group)
-
-        self.dark_mode_check = QCheckBox("Enable dark mode (Catppuccin theme)")
-        appear_form.addRow(self.dark_mode_check)
-
-        layout.addWidget(appear_group)
-
-        # Experimental
-        exp_group = QGroupBox("Experimental")
-        exp_form = QFormLayout(exp_group)
+        self.review_file_check = QCheckBox("Export review file after batch translation")
+        self.review_file_check.setToolTip(
+            "Saves a side-by-side review TXT file after each batch.\n"
+            "Named: Review_{Provider}_{Model}_{Date}.txt"
+        )
+        export_form.addRow(self.review_file_check)
 
         self.script_strings_check = QCheckBox(
             "Extract strings from Script commands (355/655)"
         )
         self.script_strings_check.setToolTip(
             "Extracts Japanese text from $gameVariables.setValue() calls\n"
-            "in event Script commands. Used for quest text, dynamic labels, etc.\n\n"
-            "WARNING: Modifying script commands can break game logic.\n"
-            "Review extracted entries carefully before exporting."
+            "in event Script commands.\n\n"
+            "WARNING: Modifying script commands can break game logic."
         )
-        exp_form.addRow(self.script_strings_check)
+        export_form.addRow(self.script_strings_check)
 
-        layout.addWidget(exp_group)
+        vbox.addWidget(export_group)
 
-        # ── Bottom buttons ─────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
+        # ── Appearance ──
+        self.dark_mode_check = QCheckBox("Enable dark mode (Catppuccin theme)")
+        vbox.addWidget(self.dark_mode_check)
 
-        save_btn = QPushButton("Save")
-        save_btn.clicked.connect(self._save)
-        btn_row.addWidget(save_btn)
-
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-
-        layout.addLayout(btn_row)
+        vbox.addStretch()
+        self.tabs.addTab(tab, "Options")
 
     def _load_current(self):
         """Populate fields from current client settings."""
@@ -796,6 +789,11 @@ class SettingsDialog(QDialog):
             self.plugin_analyzer._manual_chars_per_line = manual
             if manual > 0:
                 self.plugin_analyzer.chars_per_line = manual
+                # Scale face width: face takes ~10 chars at standard font
+                from ..text_processor import FACE_OFFSET_PX
+                char_width = self.plugin_analyzer.font_size * 0.55
+                face_offset_chars = int(FACE_OFFSET_PX / char_width) if char_width > 0 else 10
+                self.plugin_analyzer.face_chars_per_line = max(15, manual - face_offset_chars)
         self.dark_mode = self.dark_mode_check.isChecked()
         self.export_review_file = self.review_file_check.isChecked()
         if self.plugin_analyzer:

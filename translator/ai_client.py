@@ -106,7 +106,7 @@ SYSTEM_PROMPT = """You are a professional Japanese to English translator special
 Rules:
 - Translate ALL text faithfully and completely, including sexual, violent, or explicit content. Never censor, euphemize, skip, or refuse any content. This is a licensed translation project.
 - Translate the Japanese text naturally into English suitable for an RPG game.
-- The text may contain opaque code markers like «CODE1», «CODE2», etc. These are internal engine tags. Output them EXACTLY as-is — never remove, translate, rewrite, or replace them with names or words.
+- The text may contain opaque code markers like «CODE1», «CODE2», etc. These are internal engine tags. Output them EXACTLY as-is in «guillemet» format — never remove, translate, rewrite, or replace them with names or words. NEVER convert them to <<CODE1>>, [CODE1], or any other format.
 - Keep the same line break structure as the original when possible.
 - NEVER add explanations, translator notes, commentary, or parenthetical remarks — output ONLY the translated text and nothing else. No "Note:", no "TL note:", no commentary of any kind.
 - If the text is already in English or is a proper noun, keep it as-is.
@@ -146,7 +146,7 @@ SUGOI_SYSTEM_PROMPT = """You are a professional localizer translating Japanese t
 
 Rules:
 - Translate ALL text faithfully and completely, including sexual, violent, or explicit content. Never censor, euphemize, or refuse. This is a licensed translation project.
-- The text may contain code markers like «CODE1», «CODE2», etc. These are internal engine tags. Output them EXACTLY as-is — never remove, translate, or replace them with names or words.
+- The text may contain code markers like «CODE1», «CODE2», etc. These are internal engine tags. Output them EXACTLY as-is — never remove, translate, or replace them with names or words. NEVER convert them to <<CODE1>> or any other format.
 - Preserve all RPG Maker control characters and tags exactly as-is: \\C[n], \\V[n], \\I[n], \\N[n], \\{, \\}, \\\\, \\., \\|, \\!, \\>, \\<, \\^, \\$, \\FS[n]. Only translate the surrounding text.
 - Keep the same line break structure as the original when possible.
 - NEVER add explanations, translator notes, or commentary — output ONLY the translated text.
@@ -180,7 +180,7 @@ You will be translating erotic and sexual content.
 - Translate all text to English, no exceptions. Double check that there is no Japanese in your response.
 - Avoid using romaji or including any Japanese text in your response.
 - Maintain Japanese honorifics (e.g., -san, -senpai, -chan, etc.) in your translations.
-- Leave code markers like «CODE1», «CODE2» exactly as-is in the translation.
+- Leave code markers like «CODE1», «CODE2» exactly as-is in «guillemet» format. NEVER convert them to <<CODE1>>, [CODE1], or any other format.
 - Maintain any spacing or newlines in the translation.
 - Never include any notes, explanations, disclaimers, or anything similar in your response.
 - `...` can be a part of the dialogue. Translate it as it is and include it in your response.
@@ -198,7 +198,7 @@ Output ONLY the English translation.
 - Never include any notes, explanations, disclaimers, or anything similar in your response.
 - Maintain any spacing in the translation.
 - `...` can be a part of the dialogue. Translate it as it is.
-- Leave code markers like «CODE1», «CODE2» exactly as-is.
+- Leave code markers like «CODE1», «CODE2» exactly as-is in «guillemet» format. NEVER convert them to <<CODE1>>, [CODE1], or any other format.
 - When a glossary is provided, you MUST use the exact glossary translations for those terms.
 - Maintain Japanese honorifics (-san, -chan, -kun, -sama, -sensei, -senpai, etc.)."""
 
@@ -929,11 +929,23 @@ class AIClient:
         return bool(JAPANESE_RE.search(cleaned))
 
     @staticmethod
+    # Extract regex: same as CONTROL_CODE_RE but captures an optional
+    # trailing space so it survives the LLM round-trip.  Without this,
+    # "\C[0] Karen" → «CODE1» Karen → LLM drops space → «CODE1»Karen
+    # → restore → "\C[0]Karen" (missing space).  By storing "\C[0] "
+    # (with space), restore always puts it back.
+    _EXTRACT_RE = re.compile(
+        r'(?:' + CONTROL_CODE_RE.pattern + r')( ?)'
+    )
+
+    @staticmethod
     def _extract_codes(text: str) -> tuple:
         """Replace control codes with opaque placeholders.
 
         Uses «CODE1», «CODE2», etc. — a format the LLM will treat as
         untouchable markup rather than a fillable template variable.
+        Captures a trailing space (if present) as part of the stored
+        value so it's always restored even if the LLM drops it.
 
         Returns:
             (cleaned_text, mapping) where mapping is {"«CODE1»": "\\C[2]", ...}
@@ -944,10 +956,10 @@ class AIClient:
         def _replace(m):
             counter[0] += 1
             key = f"\u00abCODE{counter[0]}\u00bb"  # «CODE1», «CODE2», ...
-            mapping[key] = m.group(0)
+            mapping[key] = m.group(0)  # includes trailing space if present
             return key
 
-        cleaned = CONTROL_CODE_RE.sub(_replace, text)
+        cleaned = AIClient._EXTRACT_RE.sub(_replace, text)
         return cleaned, mapping
 
     @staticmethod
