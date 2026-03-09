@@ -7,7 +7,7 @@ All fixes are pure string operations — no LLM needed.
 import re
 from dataclasses import dataclass
 
-from . import CONTROL_CODE_RE, JAPANESE_RE
+from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
 
 
 @dataclass
@@ -26,6 +26,7 @@ class PostProcessResult:
     skill_message_space: int = 0
     spurious_newlines: int = 0
     corrupt_speaker: int = 0
+    tyrano_tag_leaks: int = 0
     total_entries_fixed: int = 0
     retranslate_ids: list = None  # Entry IDs that need LLM retranslation
 
@@ -61,6 +62,8 @@ class PostProcessResult:
             parts.append(f"{self.spurious_newlines} spurious newlines in non-dialog")
         if self.corrupt_speaker:
             parts.append(f"{self.corrupt_speaker} corrupt speaker names")
+        if self.tyrano_tag_leaks:
+            parts.append(f"{self.tyrano_tag_leaks} TyranoScript tag leaks")
         if self.retranslate_ids:
             parts.append(f"{len(self.retranslate_ids)} queued for retranslation")
         if not parts:
@@ -233,6 +236,24 @@ def _fix_code_leaks(entry, retranslate_ids: list) -> bool:
             retranslate_ids.append(entry.id)
         else:
             entry.translation = new
+        return True
+    return False
+
+
+def _fix_tyrano_tag_leaks(entry) -> bool:
+    """Strip literal TyranoScript tags [r], [p], [l], etc. from translations.
+
+    These tags should have been extracted as «CODE» placeholders before
+    translation.  If they appear literally, they were either echoed by
+    the LLM or translated before the placeholder system was active.
+    """
+    trans = entry.translation
+    if not trans:
+        return False
+    new = TYRANO_CODE_RE.sub(' ', trans)
+    if new != trans:
+        new = re.sub(r'  +', ' ', new).strip()
+        entry.translation = new
         return True
     return False
 
@@ -467,7 +488,8 @@ def _fix_corrupt_speaker(entry, retranslate_ids: list) -> bool:
 
 
 def run_post_processing(entries: list, verbose: bool = False,
-                        glossary: dict | None = None) -> PostProcessResult:
+                        glossary: dict | None = None,
+                        project_type: str = "rpgmaker") -> PostProcessResult:
     """Run all post-processing fixes on a list of TranslationEntry objects.
 
     Modifies entries in-place. Returns a summary of fixes applied.
@@ -476,6 +498,7 @@ def run_post_processing(entries: list, verbose: bool = False,
     Args:
         glossary: Optional JP→EN glossary for reconstructing collapsed
                   color codes (character names the LLM dropped).
+        project_type: "rpgmaker" or "tyranoscript" — controls which fixes run.
     """
     result = PostProcessResult()
     fixed_ids = set()
@@ -502,6 +525,11 @@ def run_post_processing(entries: list, verbose: bool = False,
         if _fix_code_leaks(entry, result.retranslate_ids):
             result.code_leaks += 1
             entry_fixed = True
+
+        if project_type == "tyranoscript":
+            if _fix_tyrano_tag_leaks(entry):
+                result.tyrano_tag_leaks += 1
+                entry_fixed = True
 
         if _fix_wordwrap_tags(entry):
             result.wordwrap_tags += 1

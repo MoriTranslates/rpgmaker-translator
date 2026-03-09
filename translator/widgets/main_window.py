@@ -2763,15 +2763,15 @@ class MainWindow(QMainWindow):
 
         # Run automated post-processing cleanup (skip if this IS the cleanup pass)
         from ..post_processor import run_post_processing
+        pp_kwargs = dict(glossary=self.project.glossary,
+                         project_type=self._project_type)
         is_cleanup_pass = getattr(self, "_is_cleanup_retranslation", False)
         if is_cleanup_pass:
             self._is_cleanup_retranslation = False
-            pp_result = run_post_processing(self.project.entries,
-                                            glossary=self.project.glossary)
+            pp_result = run_post_processing(self.project.entries, **pp_kwargs)
             # Don't chain another retranslation — one pass is enough
         else:
-            pp_result = run_post_processing(self.project.entries,
-                                            glossary=self.project.glossary)
+            pp_result = run_post_processing(self.project.entries, **pp_kwargs)
 
             # Auto-retranslate flagged entries (one pass only)
             if pp_result.retranslate_ids:
@@ -3740,7 +3740,8 @@ class MainWindow(QMainWindow):
 
         # Run post-processor (word-per-line, placeholder leaks, spacing, etc.)
         result = run_post_processing(self.project.entries,
-                                     glossary=self.project.glossary)
+                                     glossary=self.project.glossary,
+                                     project_type=self._project_type)
 
         # Also run quote/contraction fixes
         quotes_fixed = 0
