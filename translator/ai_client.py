@@ -9,7 +9,7 @@ import time
 
 import requests
 
-from . import CONTROL_CODE_RE, JAPANESE_RE
+from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
 
 log = logging.getLogger(__name__)
 
@@ -391,6 +391,7 @@ class AIClient:
         self.glossary = {}       # JP term -> EN translation forced mappings
         self.vision_model = ""   # Vision model for image OCR
         self.dazed_mode = False  # DazedMTL mode toggle (batch 30, DazedMTL prompt)
+        self.project_type = "rpgmaker"  # "rpgmaker" | "tyranoscript"
         self._managed_proc = None  # subprocess.Popen if we started Ollama
         # Cost tracking (cloud APIs only) — lock protects parallel worker updates
         import threading
@@ -936,9 +937,12 @@ class AIClient:
     _EXTRACT_RE = re.compile(
         r'(?:' + CONTROL_CODE_RE.pattern + r')( ?)'
     )
+    _EXTRACT_RE_TYRANO = re.compile(
+        r'(?:' + TYRANO_CODE_RE.pattern + r')( ?)',
+        re.IGNORECASE,
+    )
 
-    @staticmethod
-    def _extract_codes(text: str) -> tuple:
+    def _extract_codes(self, text: str) -> tuple:
         """Replace control codes with opaque placeholders.
 
         Uses «CODE1», «CODE2», etc. — a format the LLM will treat as
@@ -946,9 +950,15 @@ class AIClient:
         Captures a trailing space (if present) as part of the stored
         value so it's always restored even if the LLM drops it.
 
+        Automatically uses the TyranoScript tag regex when project_type
+        is "tyranoscript".
+
         Returns:
             (cleaned_text, mapping) where mapping is {"«CODE1»": "\\C[2]", ...}
         """
+        regex = (self._EXTRACT_RE_TYRANO
+                 if self.project_type == "tyranoscript"
+                 else self._EXTRACT_RE)
         mapping = {}
         counter = [0]
 
@@ -958,7 +968,7 @@ class AIClient:
             mapping[key] = m.group(0)  # includes trailing space if present
             return key
 
-        cleaned = AIClient._EXTRACT_RE.sub(_replace, text)
+        cleaned = regex.sub(_replace, text)
         return cleaned, mapping
 
     @staticmethod

@@ -805,6 +805,7 @@ class MainWindow(QMainWindow):
             else:
                 self._project_type = "rpgmaker"
                 entries = self.parser.load_project(path)
+            self.client.project_type = self._project_type
         except FileNotFoundError as e:
             QMessageBox.warning(self, "Error", str(e))
             return
@@ -941,6 +942,7 @@ class MainWindow(QMainWindow):
         # Reset project
         self.project = TranslationProject()
         self._project_type = "rpgmaker"
+        self.client.project_type = "rpgmaker"
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries([])
         self.event_viewer.set_entries([])
@@ -1581,6 +1583,7 @@ class MainWindow(QMainWindow):
 
         # Restore project type from saved state
         self._project_type = self.project.project_type
+        self.client.project_type = self._project_type
         is_tyrano = self._project_type == "tyranoscript"
 
         # If saved project_path is stale (folder renamed/moved), update it
@@ -3872,7 +3875,9 @@ class MainWindow(QMainWindow):
         if not self.project.entries:
             return 0
 
-        from .. import CONTROL_CODE_RE
+        from .. import CONTROL_CODE_RE, TYRANO_CODE_RE
+        code_re = (TYRANO_CODE_RE if self._project_type == "tyranoscript"
+                   else CONTROL_CODE_RE)
 
         fixed = 0
         for entry in self.project.entries:
@@ -3881,7 +3886,7 @@ class MainWindow(QMainWindow):
             if not entry.translation:
                 continue
 
-            orig_codes = CONTROL_CODE_RE.findall(entry.original)
+            orig_codes = code_re.findall(entry.original)
             if not orig_codes:
                 continue
 

@@ -11,6 +11,19 @@ CONTROL_CODE_RE = re.compile(
     r'|%\d+'                    # %1, %2, etc. — RPG Maker format specifiers
 )
 
+# Regex matching TyranoScript inline tags that appear within dialogue.
+# [r] [rr] [l] [p] [heart] [emb exp="..."] [ruby text="..."] [graph ...]
+# [font ...] [resetfont] — must be extracted as placeholders before LLM.
+TYRANO_CODE_RE = re.compile(
+    r'\[(?:r|rr|l|p|heart'
+    r'|emb\s[^\]]*'
+    r'|ruby\s[^\]]*'
+    r'|graph\s[^\]]*'
+    r'|font\s[^\]]*'
+    r'|resetfont)\]',
+    re.IGNORECASE,
+)
+
 # Japanese characters — hiragana, katakana, CJK kanji.
 JAPANESE_RE = re.compile(
     r'[\u3040-\u309F'   # Hiragana
