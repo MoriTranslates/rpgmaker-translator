@@ -169,6 +169,7 @@ QDialogButtonBox QPushButton {
 
 from ..ai_client import AIClient
 from ..rpgmaker_mv import RPGMakerMVParser
+from ..tyranoscript import TyranoScriptParser
 from ..project_model import TranslationProject
 from ..translation_engine import TranslationEngine
 from ..text_processor import PluginAnalyzer, TextProcessor
@@ -229,7 +230,9 @@ class MainWindow(QMainWindow):
         # Core objects
         self.client = AIClient()
         self.parser = RPGMakerMVParser()
+        self.tyrano_parser = TyranoScriptParser()
         self.project = TranslationProject()
+        self._project_type = "rpgmaker"  # "rpgmaker" | "tyranoscript"
         self.engine = TranslationEngine(self.client)
         self.plugin_analyzer = PluginAnalyzer()
         self.text_processor = TextProcessor(self.plugin_analyzer)
@@ -705,9 +708,9 @@ class MainWindow(QMainWindow):
     # ── Actions ────────────────────────────────────────────────────
 
     def _open_project(self):
-        """Open an RPG Maker MV/MZ project folder."""
+        """Open an RPG Maker MV/MZ or TyranoScript project folder."""
         path = QFileDialog.getExistingDirectory(
-            self, "Select RPG Maker MV/MZ Project Folder"
+            self, "Select Game Project Folder"
         )
         if not path:
             return
@@ -742,7 +745,8 @@ class MainWindow(QMainWindow):
                         f"{plugin_info}", 8000
                     )
                     folder = os.path.basename(path)
-                    self.setWindowTitle(f"RPG Maker Translator \u2014 {folder}")
+                    engine = "TyranoScript" if self._project_type == "tyranoscript" else "RPG Maker"
+                    self.setWindowTitle(f"{engine} Translator \u2014 {folder}")
                     # Offer wizard if there are untranslated entries
                     # Show choice BEFORE preloading so dialog appears instantly
                     wizard_chosen = False
@@ -754,20 +758,76 @@ class MainWindow(QMainWindow):
                     return
                 # Fall through to fresh project on load failure
 
-        # Fresh project — parse game files from scratch
+        # Auto-extract NW.js TyranoScript exe if needed
+        if not TyranoScriptParser.is_tyranoscript_project(path):
+            nwjs_exe = TyranoScriptParser.find_nwjs_exe(path)
+            if nwjs_exe:
+                dest = os.path.join(path, "extracted")
+                exe_name = os.path.basename(nwjs_exe)
+                reply = QMessageBox.question(
+                    self, "Extract TyranoScript Game?",
+                    f"Found NW.js game executable:\n{exe_name}\n\n"
+                    "Extract game data so it can be translated?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    progress = QProgressDialog(
+                        "Extracting game data...", "Cancel", 0, 100, self)
+                    progress.setWindowTitle("Extracting")
+                    progress.setMinimumDuration(0)
+                    progress.setValue(0)
+                    QApplication.processEvents()
+
+                    def on_progress(current, total):
+                        if total > 0:
+                            progress.setMaximum(total)
+                            progress.setValue(current)
+                        QApplication.processEvents()
+
+                    try:
+                        count = TyranoScriptParser.extract_nwjs(
+                            nwjs_exe, dest, progress_cb=on_progress)
+                        progress.close()
+                        self.statusbar.showMessage(
+                            f"Extracted {count} files from {exe_name}", 5000)
+                    except Exception as e:
+                        progress.close()
+                        QMessageBox.warning(
+                            self, "Extraction Failed", f"Error: {e}")
+                        return
+
+        # Detect project type and parse
+        is_tyrano = TyranoScriptParser.is_tyranoscript_project(path)
         try:
-            entries = self.parser.load_project(path)
+            if is_tyrano:
+                self._project_type = "tyranoscript"
+                entries = self.tyrano_parser.load_project(path)
+            else:
+                self._project_type = "rpgmaker"
+                entries = self.parser.load_project(path)
         except FileNotFoundError as e:
             QMessageBox.warning(self, "Error", str(e))
             return
 
-        self.project = TranslationProject(project_path=path, entries=entries)
+        if not entries:
+            QMessageBox.warning(
+                self, "No Entries Found",
+                "Could not find translatable text in this folder.\n\n"
+                "Supported formats:\n"
+                "  - RPG Maker MV/MZ (data/*.json)\n"
+                "  - TyranoScript (data/scenario/*.ks)",
+            )
+            return
+
+        self.project = TranslationProject(
+            project_path=path, project_type=self._project_type, entries=entries
+        )
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries(entries)
         self.event_viewer.set_entries(entries)
 
         # Defer actor gender dialog + pre-translate to first batch start
-        self._actors_ready = False
+        self._actors_ready = is_tyrano  # TyranoScript has no actor system
 
         # Check for vocab.txt first — if found and accepted, skip default glossary
         vocab_loaded = self._check_vocab_file(path)
@@ -791,8 +851,9 @@ class MainWindow(QMainWindow):
         # Rebuild merged glossary (general + project auto-glossary entries)
         self._rebuild_glossary()
 
-        # Analyze plugins for word wrap settings
-        self.plugin_analyzer.analyze_project(path)
+        # RPG Maker-specific: analyze plugins for word wrap settings
+        if not is_tyrano:
+            self.plugin_analyzer.analyze_project(path)
 
         self._enable_project_actions()
 
@@ -800,34 +861,42 @@ class MainWindow(QMainWindow):
         if getattr(self.client, "vision_model", ""):
             self.image_panel.set_project(path, self.client)
 
-        plugin_info = ""
-        if self.plugin_analyzer.detected_plugins:
-            plugin_info = f" | Plugins: {', '.join(self.plugin_analyzer.detected_plugins)}"
-        self.statusbar.showMessage(
-            f"Loaded {len(entries)} entries | "
-            f"~{self.plugin_analyzer.chars_per_line} chars/line{plugin_info}", 8000
-        )
-
-        # Info about plugin entries
-        plugin_count = sum(1 for e in entries if e.file == "plugins.js")
-        if plugin_count > 0:
-            QMessageBox.information(
-                self, "Plugin Parameters",
-                f"Found {plugin_count} translatable strings in plugins.js.\n\n"
-                "Only values containing Japanese display text were extracted.\n"
-                "Asset filenames and internal identifiers are skipped.\n\n"
-                "Review the entries in the Plugins section of the file tree.\n"
-                "Skip any entries that look like command triggers or tags\n"
-                "rather than player-visible text.",
+        if is_tyrano:
+            self.statusbar.showMessage(
+                f"TyranoScript: {len(entries)} entries from "
+                f"{len(set(e.file for e in entries))} files", 8000
             )
+        else:
+            plugin_info = ""
+            if self.plugin_analyzer.detected_plugins:
+                plugin_info = f" | Plugins: {', '.join(self.plugin_analyzer.detected_plugins)}"
+            self.statusbar.showMessage(
+                f"Loaded {len(entries)} entries | "
+                f"~{self.plugin_analyzer.chars_per_line} chars/line{plugin_info}", 8000
+            )
+
+            # Info about plugin entries
+            plugin_count = sum(1 for e in entries if e.file == "plugins.js")
+            if plugin_count > 0:
+                QMessageBox.information(
+                    self, "Plugin Parameters",
+                    f"Found {plugin_count} translatable strings in plugins.js.\n\n"
+                    "Only values containing Japanese display text were extracted.\n"
+                    "Asset filenames and internal identifiers are skipped.\n\n"
+                    "Review the entries in the Plugins section of the file tree.\n"
+                    "Skip any entries that look like command triggers or tags\n"
+                    "rather than player-visible text.",
+                )
 
         # Window title
         folder = os.path.basename(path)
-        self.setWindowTitle(f"RPG Maker Translator \u2014 {folder}")
+        engine = "TyranoScript" if is_tyrano else "RPG Maker"
+        self.setWindowTitle(f"{engine} Translator \u2014 {folder}")
 
-        # Offer wizard vs manual mode for new projects
-        # Show choice BEFORE preloading model so dialog appears instantly
-        wizard_chosen = self._show_wizard_choice()
+        # Offer wizard vs manual mode for new projects (RPG Maker only for now)
+        wizard_chosen = False
+        if not is_tyrano:
+            wizard_chosen = self._show_wizard_choice()
 
         # Preload model into VRAM (wizard handles its own Ollama calls)
         if not wizard_chosen and not self.client.is_cloud:
@@ -871,6 +940,7 @@ class MainWindow(QMainWindow):
 
         # Reset project
         self.project = TranslationProject()
+        self._project_type = "rpgmaker"
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries([])
         self.event_viewer.set_entries([])
@@ -1495,7 +1565,8 @@ class MainWindow(QMainWindow):
             f"({self.project.translated_count} translated)", 5000
         )
         name = os.path.basename(self.project.project_path) if self.project.project_path else "Restored"
-        self.setWindowTitle(f"RPG Maker Translator \u2014 {name}")
+        engine = "TyranoScript" if self._project_type == "tyranoscript" else "RPG Maker"
+        self.setWindowTitle(f"{engine} Translator \u2014 {name}")
 
     def _restore_from_state(self, path: str) -> bool:
         """Load a save file and restore full project state.
@@ -1508,17 +1579,24 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", f"Failed to load state:\n{e}")
             return False
 
+        # Restore project type from saved state
+        self._project_type = self.project.project_type
+        is_tyrano = self._project_type == "tyranoscript"
+
         # If saved project_path is stale (folder renamed/moved), update it
         # to the directory containing the save file (works for saves inside
         # the project folder like _translation_state.json).
         if self.project.project_path and not os.path.isdir(self.project.project_path):
             save_dir = os.path.dirname(os.path.abspath(path))
-            if self.parser._find_data_dir(save_dir):
-                self.project.project_path = save_dir
+            if is_tyrano:
+                if TyranoScriptParser.is_tyranoscript_project(save_dir):
+                    self.project.project_path = save_dir
+            else:
+                if self.parser._find_data_dir(save_dir):
+                    self.project.project_path = save_dir
 
-        # Merge plugin entries that didn't exist when the state was saved
-        # (e.g. saved before plugin extraction was enabled).
-        if self.project.project_path:
+        # RPG Maker-specific: merge plugin entries added after the state was saved
+        if not is_tyrano and self.project.project_path:
             self._merge_new_plugin_entries()
 
         self.file_tree.load_project(self.project)
@@ -1531,8 +1609,8 @@ class MainWindow(QMainWindow):
 
         self._rebuild_glossary()
 
-        # Restore actor context from saved genders (skip dialog on next batch)
-        if self.project.actor_genders and self.project.project_path:
+        # Restore actor context from saved genders (RPG Maker only)
+        if not is_tyrano and self.project.actor_genders and self.project.project_path:
             actors_raw = self.parser.load_actors_raw(self.project.project_path)
             if actors_raw:
                 self.client.actor_context = self.parser.build_actor_context(
@@ -1546,7 +1624,7 @@ class MainWindow(QMainWindow):
                     self._update_speaker_names(actors_raw, actor_tl)
             self._actors_ready = True
         else:
-            self._actors_ready = False
+            self._actors_ready = is_tyrano  # TyranoScript has no actor system
 
         self._backfill_db_glossary()
         self._last_save_path = path
@@ -1611,16 +1689,25 @@ class MainWindow(QMainWindow):
 
         # Reset pipeline bar for manual mode (wizard controls its own flow)
         if not self._wizard_active:
+            self.pipeline_bar.set_engine(self._project_type)
             self.pipeline_bar.reset()
             # Auto-detect already-completed steps
-            db_entries = [e for e in self.project.entries if e.file in self._DB_FILES]
-            dialogue_entries = [e for e in self.project.entries if e.file not in self._DB_FILES]
-            db_done = all(e.status != "untranslated" for e in db_entries) if db_entries else False
-            dlg_done = all(e.status != "untranslated" for e in dialogue_entries) if dialogue_entries else False
-            if db_done:
-                self.pipeline_bar.mark_done("db")
-            if dlg_done:
-                self.pipeline_bar.mark_done("dialogue")
+            if self._project_type == "tyranoscript":
+                # TyranoScript: single "Translate" step covers all entries
+                all_done = all(
+                    e.status != "untranslated" for e in self.project.entries
+                ) if self.project.entries else False
+                if all_done:
+                    self.pipeline_bar.mark_done("dialogue")
+            else:
+                db_entries = [e for e in self.project.entries if e.file in self._DB_FILES]
+                dialogue_entries = [e for e in self.project.entries if e.file not in self._DB_FILES]
+                db_done = all(e.status != "untranslated" for e in db_entries) if db_entries else False
+                dlg_done = all(e.status != "untranslated" for e in dialogue_entries) if dialogue_entries else False
+                if db_done:
+                    self.pipeline_bar.mark_done("db")
+                if dlg_done:
+                    self.pipeline_bar.mark_done("dialogue")
 
     def _preload_model(self):
         """Unload stale models and load the active one into VRAM.
@@ -2341,7 +2428,7 @@ class MainWindow(QMainWindow):
         return count
 
     def _export_to_game(self):
-        """Write translations back to the game's JSON files."""
+        """Write translations back to game files."""
         if not self.project.project_path:
             QMessageBox.warning(self, "Error", "No project path set. Open a project first.")
             return
@@ -2351,8 +2438,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Nothing to Export", "No translated entries to export.")
             return
 
-        # Check for unwrapped lines that would overflow in-game
-        unwrapped = self._check_unwrapped_entries(translated)
+        # Check for unwrapped lines (RPG Maker only)
+        unwrapped = 0 if self._project_type == "tyranoscript" else self._check_unwrapped_entries(translated)
         if unwrapped > 0:
             result = QMessageBox.warning(
                 self, "Lines May Overflow",
@@ -2398,32 +2485,42 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self.parser.save_project(self.project.project_path, self.project.entries)
+            if self._project_type == "tyranoscript":
+                self.tyrano_parser.save_project(
+                    self.project.project_path, self.project.entries)
+                QMessageBox.information(
+                    self, "Export Complete",
+                    f"Exported {len(translated)} translations to .ks files.\n"
+                    f"Original files backed up in scenario_original/."
+                )
+            else:
+                self.parser.save_project(
+                    self.project.project_path, self.project.entries)
 
-            # Auto-inject word wrap plugin when translations use <WordWrap> tags
-            # and no existing plugin handles them
-            plugin_msg = ""
-            has_ww_tags = any(
-                e.translation and "<WordWrap>" in e.translation
-                for e in translated
-            )
-            if has_ww_tags and not self.plugin_analyzer.has_wordwrap_plugin:
-                cpl = self.plugin_analyzer.chars_per_line
-                if self.parser.inject_wordwrap_plugin(
-                        self.project.project_path, max_chars=cpl):
-                    plugin_msg = f"\nWord wrap plugin injected ({cpl} chars/line)."
+                # Auto-inject word wrap plugin when translations use <WordWrap> tags
+                # and no existing plugin handles them
+                plugin_msg = ""
+                has_ww_tags = any(
+                    e.translation and "<WordWrap>" in e.translation
+                    for e in translated
+                )
+                if has_ww_tags and not self.plugin_analyzer.has_wordwrap_plugin:
+                    cpl = self.plugin_analyzer.chars_per_line
+                    if self.parser.inject_wordwrap_plugin(
+                            self.project.project_path, max_chars=cpl):
+                        plugin_msg = f"\nWord wrap plugin injected ({cpl} chars/line)."
 
-            # Disable splash screen plugin if setting is on
-            if self._disable_splash:
-                if self.parser.disable_splash_plugin(self.project.project_path):
-                    plugin_msg += "\n'Made with RPG Maker' splash disabled."
+                # Disable splash screen plugin if setting is on
+                if self._disable_splash:
+                    if self.parser.disable_splash_plugin(self.project.project_path):
+                        plugin_msg += "\n'Made with RPG Maker' splash disabled."
 
-            QMessageBox.information(
-                self, "Export Complete",
-                f"Exported {len(translated)} translations to game files.\n"
-                f"Original Japanese files backed up in data_original/."
-                + plugin_msg
-            )
+                QMessageBox.information(
+                    self, "Export Complete",
+                    f"Exported {len(translated)} translations to game files.\n"
+                    f"Original Japanese files backed up in data_original/."
+                    + plugin_msg
+                )
             if not self._wizard_active:
                 self.pipeline_bar.mark_done("export")
         except Exception as e:
@@ -3063,6 +3160,10 @@ class MainWindow(QMainWindow):
 
     def _on_pipeline_step(self, step_key: str):
         """Handle Next Step button click from the pipeline bar."""
+        if step_key == "dialogue" and self._project_type == "tyranoscript":
+            # TyranoScript has no DB/dialogue split — translate everything
+            self._start_batch(mode="all")
+            return
         actions = {
             "db": self._batch_translate_db,
             "dialogue": self._batch_translate_dialogue,
@@ -3352,7 +3453,10 @@ class MainWindow(QMainWindow):
 
         # Update pipeline bar
         if not self._wizard_active:
-            step = "db" if mode == "db" else "dialogue" if mode == "dialogue" else "db"
+            if self._project_type == "tyranoscript":
+                step = "dialogue"  # TyranoScript has single translate step
+            else:
+                step = "db" if mode == "db" else "dialogue" if mode == "dialogue" else "db"
             self.pipeline_bar.mark_active(step)
 
         # Glossary prefill: exact-match entries skip LLM entirely

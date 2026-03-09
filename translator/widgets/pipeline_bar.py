@@ -43,14 +43,23 @@ class _StepLabel(QLabel):
         self._refresh()
 
 
-# Steps definition: (key, display_name)
-PIPELINE_STEPS = [
+# Steps definitions per engine type: (key, display_name)
+RPGMAKER_STEPS = [
     ("db", "Translate DB"),
     ("dialogue", "Translate Dialogue"),
     ("cleanup", "Clean Up"),
     ("wordwrap", "Word Wrap"),
     ("export", "Export"),
 ]
+
+TYRANOSCRIPT_STEPS = [
+    ("dialogue", "Translate"),
+    ("cleanup", "Clean Up"),
+    ("export", "Export"),
+]
+
+# Default for backward compat
+PIPELINE_STEPS = RPGMAKER_STEPS
 
 
 class PipelineBar(QWidget):
@@ -60,28 +69,21 @@ class PipelineBar(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._steps = RPGMAKER_STEPS
         self._step_labels: dict[str, _StepLabel] = {}
+        self._arrow_labels: list[QLabel] = []
         self._current_index = -1  # no step active
         self._build_ui()
         self.setVisible(False)  # hidden until project loaded
 
     def _build_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 8, 2)
-        layout.setSpacing(0)
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(8, 2, 8, 2)
+        self._layout.setSpacing(0)
 
-        # Step labels with arrows between them
-        for i, (key, name) in enumerate(PIPELINE_STEPS):
-            label = _StepLabel(i + 1, name)
-            self._step_labels[key] = label
-            layout.addWidget(label)
-            if i < len(PIPELINE_STEPS) - 1:
-                arrow = QLabel("\u2192")
-                arrow.setStyleSheet("color: #45475a; padding: 0 4px;")
-                arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                layout.addWidget(arrow)
+        self._rebuild_steps()
 
-        layout.addSpacing(12)
+        self._layout.addSpacing(12)
 
         # Next Step nudge
         self.next_btn = QPushButton("Next Step")
@@ -94,14 +96,51 @@ class PipelineBar(QWidget):
         )
         self.next_btn.clicked.connect(self._on_next_clicked)
         self.next_btn.setVisible(False)
-        layout.addWidget(self.next_btn)
+        self._layout.addWidget(self.next_btn)
 
-        layout.addStretch()
+        self._layout.addStretch()
 
         # Status hint
         self.hint_label = QLabel("")
         self.hint_label.setStyleSheet("color: #a6adc8; font-size: 11px;")
-        layout.addWidget(self.hint_label)
+        self._layout.addWidget(self.hint_label)
+
+    def _rebuild_steps(self):
+        """Create step label widgets for current step list."""
+        # Remove old step labels and arrows
+        for label in self._step_labels.values():
+            self._layout.removeWidget(label)
+            label.deleteLater()
+        for arrow in self._arrow_labels:
+            self._layout.removeWidget(arrow)
+            arrow.deleteLater()
+        self._step_labels.clear()
+        self._arrow_labels.clear()
+
+        # Insert new step labels at the beginning of the layout
+        insert_pos = 0
+        for i, (key, name) in enumerate(self._steps):
+            label = _StepLabel(i + 1, name)
+            self._step_labels[key] = label
+            self._layout.insertWidget(insert_pos, label)
+            insert_pos += 1
+            if i < len(self._steps) - 1:
+                arrow = QLabel("\u2192")
+                arrow.setStyleSheet("color: #45475a; padding: 0 4px;")
+                arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._arrow_labels.append(arrow)
+                self._layout.insertWidget(insert_pos, arrow)
+                insert_pos += 1
+
+    def set_engine(self, engine: str):
+        """Switch pipeline steps for the given engine type."""
+        if engine == "tyranoscript":
+            new_steps = TYRANOSCRIPT_STEPS
+        else:
+            new_steps = RPGMAKER_STEPS
+        if new_steps != self._steps:
+            self._steps = new_steps
+            self._rebuild_steps()
 
     def reset(self):
         """Reset all steps to pending (call when opening a new project)."""
@@ -122,10 +161,10 @@ class PipelineBar(QWidget):
             if label.state == "active":
                 label.state = "pending"
         self._step_labels[step_key].state = "active"
-        idx = [k for k, _ in PIPELINE_STEPS].index(step_key)
+        idx = [k for k, _ in self._steps].index(step_key)
         self._current_index = idx
         self.next_btn.setVisible(False)
-        self.hint_label.setText(f"{PIPELINE_STEPS[idx][1]} in progress...")
+        self.hint_label.setText(f"{self._steps[idx][1]} in progress...")
 
     def mark_done(self, step_key: str):
         """Mark a step as completed and show Next Step nudge."""
@@ -136,18 +175,18 @@ class PipelineBar(QWidget):
 
     def mark_done_up_to(self, step_key: str):
         """Mark all steps up to and including step_key as done."""
-        keys = [k for k, _ in PIPELINE_STEPS]
+        keys = [k for k, _ in self._steps]
         if step_key not in keys:
             return
         target = keys.index(step_key)
-        for i, (key, _) in enumerate(PIPELINE_STEPS):
+        for i, (key, _) in enumerate(self._steps):
             if i <= target:
                 self._step_labels[key].state = "done"
         self._nudge_next()
 
     def _nudge_next(self):
         """Find next pending step and show the nudge button."""
-        for i, (key, name) in enumerate(PIPELINE_STEPS):
+        for i, (key, name) in enumerate(self._steps):
             if self._step_labels[key].state == "pending":
                 self._current_index = i
                 self.next_btn.setText(f"Next: {name}")
@@ -160,7 +199,7 @@ class PipelineBar(QWidget):
 
     def _on_next_clicked(self):
         """Emit the step key for the next pending step."""
-        for key, _ in PIPELINE_STEPS:
+        for key, _ in self._steps:
             if self._step_labels[key].state == "pending":
                 self.step_requested.emit(key)
                 return

@@ -27,6 +27,7 @@ class TranslationEntry:
 class TranslationProject:
     """Holds all translation entries for an RPG Maker project."""
     project_path: str = ""
+    project_type: str = "rpgmaker"  # "rpgmaker" | "tyranoscript"
     entries: list = field(default_factory=list)
     glossary: dict = field(default_factory=dict)  # JP -> EN forced mappings
     actor_genders: dict = field(default_factory=dict)  # actor_id -> gender
@@ -82,6 +83,7 @@ class TranslationProject:
         """Save project state to a JSON file for resume support."""
         data = {
             "project_path": self.project_path,
+            "project_type": self.project_type,
             "entries": [asdict(e) for e in self.entries],
             "glossary": self.glossary,
             "actor_genders": self.actor_genders,
@@ -95,7 +97,10 @@ class TranslationProject:
         """Load project state from a saved JSON file."""
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        project = cls(project_path=data.get("project_path", ""))
+        project = cls(
+            project_path=data.get("project_path", ""),
+            project_type=data.get("project_type", "rpgmaker"),
+        )
         project.entries = [TranslationEntry(**e) for e in data.get("entries", [])]
         project.glossary = data.get("glossary", {})
         # JSON converts int keys to strings — convert back to int
