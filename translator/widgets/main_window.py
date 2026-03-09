@@ -263,13 +263,7 @@ class MainWindow(QMainWindow):
         # Apply dark mode by default
         self._apply_dark_mode()
 
-        # Auto-start Ollama with saved worker count if not already running
-        if not self.client.is_available():
-            self.client.restart_server(self.engine.num_workers)
-
-        # Clear stale models from VRAM on startup (keep_alive=-1 persists across sessions)
-        if not self.client.is_cloud:
-            self.client.unload_models()
+        # Ollama is started on-demand (wizard or manual translate), not at launch
 
         # Auto-save timer (every 2 minutes)
         self._autosave_timer = QTimer(self)
@@ -1726,6 +1720,17 @@ class MainWindow(QMainWindow):
                 model=self.client.model,
                 project_type=ptype,
             )
+
+    def _ensure_ollama_ready(self):
+        """Start Ollama if needed. Called on-demand before translation."""
+        if self.client.is_cloud:
+            return True
+        if not self.client.is_available():
+            self.client.restart_server(self.engine.num_workers)
+        if not self.client.is_available():
+            QMessageBox.warning(self, "Ollama", "Cannot connect to Ollama. Please start it manually.")
+            return False
+        return True
 
     def _preload_model(self):
         """Unload stale models and load the active one into VRAM.
@@ -3251,11 +3256,7 @@ class MainWindow(QMainWindow):
         This gives the LLM strong, consistent gender context per character
         and lets the user QA one character's lines at a time.
         """
-        if not self.client.is_available():
-            QMessageBox.warning(
-                self, "Ollama Not Available",
-                "Cannot connect to Ollama. Make sure it's running:\n  ollama serve"
-            )
+        if not self._ensure_ollama_ready():
             return
 
         # First batch: run actor pre-translate + gender dialog
@@ -3455,12 +3456,7 @@ class MainWindow(QMainWindow):
         Returns:
             True if batch was started, False if skipped/cancelled.
         """
-        if not self.client.is_available():
-            if not self._wizard_active:
-                QMessageBox.warning(
-                    self, "Ollama Not Available",
-                    "Cannot connect to Ollama. Make sure it's running:\n  ollama serve"
-                )
+        if not self._ensure_ollama_ready():
             return False
 
         # First batch: run actor pre-translate + gender dialog
@@ -3535,11 +3531,7 @@ class MainWindow(QMainWindow):
 
     def _polish_translations(self):
         """Run all translated entries through the LLM for grammar cleanup."""
-        if not self.client.is_available():
-            QMessageBox.warning(
-                self, "Ollama Not Available",
-                "Cannot connect to Ollama. Make sure it's running:\n  ollama serve"
-            )
+        if not self._ensure_ollama_ready():
             return
 
         to_polish = [
@@ -4748,11 +4740,7 @@ class MainWindow(QMainWindow):
 
     def _translate_selected(self, entry_ids: list):
         """Translate specific selected entries (allows re-translation)."""
-        if not self.client.is_available():
-            QMessageBox.warning(
-                self, "Ollama Not Available",
-                "Cannot connect to Ollama. Make sure it's running:\n  ollama serve"
-            )
+        if not self._ensure_ollama_ready():
             return
 
         entries = [self.project.get_entry_by_id(eid) for eid in entry_ids]
@@ -4828,11 +4816,7 @@ class MainWindow(QMainWindow):
 
     def _retranslate_with_correction(self, entry_id: str, correction: str):
         """Retranslate a single entry with user's correction hint."""
-        if not self.client.is_available():
-            QMessageBox.warning(
-                self, "Ollama Not Available",
-                "Cannot connect to Ollama. Make sure it's running:\n  ollama serve"
-            )
+        if not self._ensure_ollama_ready():
             return
 
         entry = self.project.get_entry_by_id(entry_id)
@@ -4913,11 +4897,7 @@ class MainWindow(QMainWindow):
 
     def _polish_selected(self, entry_ids: list):
         """Polish grammar on selected entries via background thread."""
-        if not self.client.is_available():
-            QMessageBox.warning(
-                self, "Ollama Not Available",
-                "Cannot connect to Ollama. Make sure it's running:\n  ollama serve"
-            )
+        if not self._ensure_ollama_ready():
             return
 
         entries = [self.project.get_entry_by_id(eid) for eid in entry_ids]
@@ -4981,11 +4961,7 @@ class MainWindow(QMainWindow):
 
     def _show_variants(self, entry_id: str):
         """Generate 3 translation variants and let the user pick one."""
-        if not self.client.is_available():
-            QMessageBox.warning(
-                self, "Ollama Not Available",
-                "Cannot connect to Ollama. Make sure it's running:\n  ollama serve"
-            )
+        if not self._ensure_ollama_ready():
             return
 
         entry = self.project.get_entry_by_id(entry_id)
