@@ -55,6 +55,7 @@ RPGMAKER_STEPS = [
 TYRANOSCRIPT_STEPS = [
     ("dialogue", "Translate"),
     ("cleanup", "Clean Up"),
+    ("wordwrap", "Word Wrap"),
     ("export", "Export"),
 ]
 

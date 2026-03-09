@@ -430,3 +430,157 @@ class TyranoScriptParser:
                 except Exception:
                     pass
         return ""
+
+    # ── Word Wrap ─────────────────────────────────────────────
+
+    @staticmethod
+    def detect_line_budget(ks_contents: list[str]) -> int:
+        """Derive English character budget from original JP line lengths.
+
+        Scans all .ks file contents, splits dialogue on [r]/[p]/newlines,
+        strips inline tags, and uses the 95th percentile of JP line lengths
+        as the baseline (avoids outliers like HTML comments).  Since JP
+        characters are full-width (~2x English), the budget is:
+
+            english_budget = p95_jp_chars * 1.6
+
+        Args:
+            ks_contents: List of .ks file text contents (strings).
+
+        Returns:
+            English character budget per line (int).  Falls back to 55 if
+            no dialogue is found (reasonable default for 800px window).
+        """
+        # Any [tag ...] or <!-- comment --> — strip for character counting
+        tag_re = re.compile(r'\[[^\]]*\]|<!--.*?-->')
+        # Split points: [r], [rr], [p], [l] and actual newlines
+        split_re = re.compile(r'\[(?:r|rr|p|l)\]', re.IGNORECASE)
+
+        lengths = []
+        in_script = False
+
+        for text in ks_contents:
+            for line in text.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # Skip iscript blocks
+                if _ISCRIPT_START.match(stripped):
+                    in_script = True
+                    continue
+                if _ISCRIPT_END.match(stripped):
+                    in_script = False
+                    continue
+                if in_script:
+                    continue
+                # Skip comments (both ; and HTML)
+                if stripped.startswith(";") or stripped.startswith("<!--"):
+                    continue
+                if _SPEAKER_RE.match(stripped):
+                    continue
+                if _COMMAND_LINE_RE.match(stripped):
+                    continue
+                # Must contain Japanese to be dialogue
+                if not JAPANESE_RE.search(stripped):
+                    continue
+
+                # Split on line break tags
+                segments = split_re.split(stripped)
+                for seg in segments:
+                    clean = tag_re.sub("", seg).strip()
+                    if clean and JAPANESE_RE.search(clean):
+                        lengths.append(len(clean))
+
+        if not lengths:
+            return 55  # safe default
+
+        # Use 95th percentile to avoid outliers
+        lengths.sort()
+        p95_idx = int(len(lengths) * 0.95)
+        p95 = lengths[min(p95_idx, len(lengths) - 1)]
+
+        return int(p95 * 1.6)
+
+    @staticmethod
+    def wordwrap_translation(text: str, budget: int) -> str:
+        """Insert [r] line break tags into translated text at word boundaries.
+
+        Args:
+            text: English translated text (may already contain [r]/[p] tags).
+            budget: Maximum characters per line before wrapping.
+
+        Returns:
+            Text with [r] tags inserted at word boundaries.
+        """
+        if not text or budget <= 0:
+            return text
+
+        # Tag pattern — preserve but don't count toward width
+        tag_re = re.compile(r'\[[^\]]*\]')
+
+        # If text already has [r] tags from the LLM, strip them first
+        # (we'll re-wrap properly)
+        has_p = "[p]" in text.lower()
+        # Split on [p] to preserve paragraph boundaries
+        paragraphs = re.split(r'\[p\]', text, flags=re.IGNORECASE)
+
+        wrapped_parts = []
+        for para_idx, para in enumerate(paragraphs):
+            # Remove existing [r] tags — we'll re-insert them
+            para = re.sub(r'\[r\]', ' ', para, flags=re.IGNORECASE)
+            para = re.sub(r'\[rr\]', ' ', para, flags=re.IGNORECASE)
+            # Collapse multiple spaces
+            para = re.sub(r'  +', ' ', para).strip()
+
+            if not para:
+                wrapped_parts.append(para)
+                continue
+
+            # Split into words and tags
+            tokens = tag_re.split(para)
+            tags = tag_re.findall(para)
+
+            # Rebuild with word wrapping
+            result_lines = []
+            current_line = ""
+            current_width = 0
+
+            # Interleave text chunks and tags
+            all_pieces = []
+            for i, chunk in enumerate(tokens):
+                all_pieces.append(("text", chunk))
+                if i < len(tags):
+                    all_pieces.append(("tag", tags[i]))
+
+            for piece_type, piece in all_pieces:
+                if piece_type == "tag":
+                    current_line += piece
+                    continue
+
+                words = piece.split(" ")
+                for wi, word in enumerate(words):
+                    if not word:
+                        continue
+                    word_len = len(word)
+                    # Check if adding this word exceeds budget
+                    needed = word_len + (1 if current_width > 0 else 0)
+                    if current_width + needed > budget and current_width > 0:
+                        result_lines.append(current_line.rstrip())
+                        current_line = word
+                        current_width = word_len
+                    else:
+                        if current_width > 0:
+                            current_line += " "
+                            current_width += 1
+                        current_line += word
+                        current_width += word_len
+
+            if current_line.strip():
+                result_lines.append(current_line.rstrip())
+
+            wrapped_parts.append("[r]".join(result_lines))
+
+        # Re-join with [p] tags
+        if has_p and len(paragraphs) > 1:
+            return "[p]".join(wrapped_parts)
+        return wrapped_parts[0] if wrapped_parts else text

@@ -3571,6 +3571,10 @@ class MainWindow(QMainWindow):
         if not self.project.entries:
             return
 
+        if self._project_type == "tyranoscript":
+            self._apply_wordwrap_tyrano()
+            return
+
         cpl = self.plugin_analyzer.chars_per_line
         summary = self.plugin_analyzer.get_summary()
 
@@ -3632,6 +3636,86 @@ class MainWindow(QMainWindow):
             else:
                 msg += f"\n\nAcross {len(files)} files."
         QMessageBox.information(self, "Word Wrap Applied", msg)
+        if not self._wizard_active:
+            self.pipeline_bar.mark_done("wordwrap")
+
+    def _apply_wordwrap_tyrano(self):
+        """Apply TyranoScript word wrap using [r] tags derived from JP line lengths."""
+        # Read all .ks source files to detect line budget
+        scenario_dir = self.tyrano_parser._find_scenario_dir(
+            self.project.project_path)
+        if not scenario_dir:
+            QMessageBox.warning(self, "Error", "Cannot find scenario directory.")
+            return
+
+        from pathlib import Path
+        ks_contents = []
+        for ks_path in Path(scenario_dir).rglob("*.ks"):
+            try:
+                ks_contents.append(ks_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+
+        budget = TyranoScriptParser.detect_line_budget(ks_contents)
+
+        # Confirm with user
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Apply Word Wrap")
+        dlg.setMinimumWidth(400)
+        layout = QVBoxLayout(dlg)
+
+        header = QLabel("TyranoScript Word Wrap")
+        header.setStyleSheet("font-size: 15px; font-weight: bold; margin-bottom: 4px;")
+        layout.addWidget(header)
+
+        info = QLabel(
+            f"Detected line budget: ~{budget} English characters per line\n"
+            f"(derived from original JP line lengths in {len(ks_contents)} .ks files)\n\n"
+            "This will insert [r] line break tags into translated dialogue\n"
+            "at word boundaries to fit the game's text box."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        checkbox = QCheckBox("I understand this will modify my translations")
+        layout.addWidget(checkbox)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        ok_btn.setText("Apply Word Wrap")
+        ok_btn.setEnabled(False)
+        checkbox.toggled.connect(ok_btn.setEnabled)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        # Apply word wrap to all translated dialogue entries
+        count = 0
+        for entry in self.project.entries:
+            if entry.status not in ("translated", "reviewed"):
+                continue
+            if not entry.translation:
+                continue
+            if entry.field not in ("dialog",):
+                continue
+            wrapped = TyranoScriptParser.wordwrap_translation(
+                entry.translation, budget)
+            if wrapped != entry.translation:
+                entry.translation = wrapped
+                count += 1
+
+        self.trans_table.refresh()
+        QMessageBox.information(
+            self, "Word Wrap Applied",
+            f"Modified {count} entries.\n"
+            f"Wrapped to ~{budget} chars/line using [r] tags."
+        )
         if not self._wizard_active:
             self.pipeline_bar.mark_done("wordwrap")
 
