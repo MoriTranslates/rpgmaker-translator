@@ -2554,23 +2554,33 @@ class MainWindow(QMainWindow):
         if not self.project or not self.project.project_path:
             return
 
-        data_dir = self.parser._find_data_dir(self.project.project_path)
+        # Find the right directory based on engine type
+        if self._project_type == "tyranoscript":
+            from ..tyranoscript import TyranoScriptParser
+            tyrano = TyranoScriptParser()
+            data_dir = tyrano._find_scenario_dir(self.project.project_path)
+            backup_dir = os.path.join(
+                os.path.dirname(data_dir), "scenario_original") if data_dir else None
+        else:
+            data_dir = self.parser._find_data_dir(self.project.project_path)
+            backup_dir = data_dir + "_original" if data_dir else None
+
         if not data_dir:
             QMessageBox.warning(self, "Error", "Could not find data directory.")
             return
 
-        backup_dir = data_dir + "_original"
-        if not os.path.isdir(backup_dir):
+        if not backup_dir or not os.path.isdir(backup_dir):
+            backup_name = "scenario_original/" if self._project_type == "tyranoscript" else "data_original/"
             QMessageBox.information(
                 self, "No Backup Found",
-                "No data_original/ backup exists. Export to game first to create one."
+                f"No {backup_name} backup exists. Export to game first to create one."
             )
             return
 
         reply = QMessageBox.question(
             self, "Restore Originals",
             "This will overwrite the current game files with the original "
-            "Japanese versions from data_original/.\n\n"
+            "Japanese versions from backup.\n\n"
             "Your translation state is NOT affected — only the game files.\n\n"
             "Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -2594,21 +2604,22 @@ class MainWindow(QMainWindow):
                 raise
             shutil.rmtree(temp_dir)
 
-            # Also restore plugins.js if backup exists
+            # RPG Maker: also restore plugins.js if backup exists
             plugins_restored = False
-            plugins_path = self.parser._find_plugins_file(self.project.project_path)
-            if plugins_path:
-                backup_path = os.path.join(
-                    os.path.dirname(plugins_path),
-                    os.path.basename(plugins_path).replace("plugins.", "plugins_original.")
-                )
-                if os.path.isfile(backup_path):
-                    shutil.copy2(backup_path, plugins_path)
-                    plugins_restored = True
+            if self._project_type != "tyranoscript":
+                plugins_path = self.parser._find_plugins_file(self.project.project_path)
+                if plugins_path:
+                    backup_path = os.path.join(
+                        os.path.dirname(plugins_path),
+                        os.path.basename(plugins_path).replace("plugins.", "plugins_original.")
+                    )
+                    if os.path.isfile(backup_path):
+                        shutil.copy2(backup_path, plugins_path)
+                        plugins_restored = True
 
-            # Clean up injected word wrap plugin
-            self.parser.remove_wordwrap_plugin(self.project.project_path)
-            self.plugin_analyzer.inject_wordwrap = False
+                # Clean up injected word wrap plugin
+                self.parser.remove_wordwrap_plugin(self.project.project_path)
+                self.plugin_analyzer.inject_wordwrap = False
 
             msg = "Original Japanese files have been restored.\n"
             if plugins_restored:
