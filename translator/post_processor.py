@@ -27,6 +27,10 @@ class PostProcessResult:
     spurious_newlines: int = 0
     corrupt_speaker: int = 0
     tyrano_tag_leaks: int = 0
+    broken_emb_tags: int = 0
+    broken_code_placeholders: int = 0
+    hallucinated_tags: int = 0
+    extra_tyrano_tags: int = 0
     total_entries_fixed: int = 0
     retranslate_ids: list = None  # Entry IDs that need LLM retranslation
 
@@ -64,6 +68,14 @@ class PostProcessResult:
             parts.append(f"{self.corrupt_speaker} corrupt speaker names")
         if self.tyrano_tag_leaks:
             parts.append(f"{self.tyrano_tag_leaks} TyranoScript tag leaks")
+        if self.broken_emb_tags:
+            parts.append(f"{self.broken_emb_tags} broken [emb] tags")
+        if self.broken_code_placeholders:
+            parts.append(f"{self.broken_code_placeholders} broken «CODE» placeholders")
+        if self.hallucinated_tags:
+            parts.append(f"{self.hallucinated_tags} hallucinated tags")
+        if self.extra_tyrano_tags:
+            parts.append(f"{self.extra_tyrano_tags} extra [r]/[rr]/[heart] tags")
         if self.retranslate_ids:
             parts.append(f"{len(self.retranslate_ids)} queued for retranslation")
         if not parts:
@@ -256,6 +268,93 @@ def _fix_tyrano_tag_leaks(entry) -> bool:
         entry.translation = new
         return True
     return False
+
+
+# Broken [emb exp="f.mea] — missing closing quote before ]
+# Variable names are short identifiers like f.mea, f.penis, f.you
+_BROKEN_EMB_RE = re.compile(r'\[emb\s+exp="([\w.]+)\]')
+
+# Broken [emb exp=f.mea"] — missing opening quote after =
+_BROKEN_EMB_RE2 = re.compile(r'\[emb\s+exp=([\w.]+)"\]')
+
+# Broken «CODEn without closing » — followed by anything except »
+_BROKEN_CODE_RE = re.compile(r'\u00abCODE(\d+)(?!\u00bb)(?=[\s\[.,;:!?\'")\-\u00ab\]]|$)')
+
+# Hallucinated game tags — LLM invents [pussy], [breasts], etc.
+_HALLUCINATED_TAG_RE = re.compile(
+    r'\[(?:pussy|breasts|cock|dick|penis|vagina|ass|anus|nipple|cum)\]',
+    re.IGNORECASE,
+)
+
+
+def _fix_broken_emb_tags(entry) -> bool:
+    """Repair broken [emb exp="...] tags with missing quotes."""
+    trans = entry.translation
+    if not trans or '[emb' not in trans.lower():
+        return False
+    new = trans
+    # Fix [emb exp="f.mea] → [emb exp="f.mea"]
+    new = _BROKEN_EMB_RE.sub(r'[emb exp="\1"]', new)
+    # Fix [emb exp=f.mea"] → [emb exp="f.mea"]
+    new = _BROKEN_EMB_RE2.sub(r'[emb exp="\1"]', new)
+    if new != trans:
+        entry.translation = new
+        return True
+    return False
+
+
+def _fix_broken_code_placeholders(entry) -> bool:
+    """Repair «CODEn missing closing » guillemet."""
+    trans = entry.translation
+    if not trans or '\u00abCODE' not in trans:
+        return False
+    new = _BROKEN_CODE_RE.sub('\u00abCODE\\1\u00bb', trans)
+    if new != trans:
+        entry.translation = new
+        return True
+    return False
+
+
+def _fix_hallucinated_tags(entry) -> bool:
+    """Strip hallucinated game tags like [pussy], [breasts], etc."""
+    trans = entry.translation
+    if not trans or '[' not in trans:
+        return False
+    new = _HALLUCINATED_TAG_RE.sub('', trans)
+    if new != trans:
+        new = re.sub(r'  +', ' ', new).strip()
+        entry.translation = new
+        return True
+    return False
+
+
+def _fix_extra_tyrano_tags(entry) -> bool:
+    """Remove [r]/[rr]/[heart] tags that weren't in the original.
+
+    LLM sometimes adds extra line break or decoration tags.
+    Only strips tags whose count exceeds the original.
+    """
+    trans = entry.translation
+    orig = entry.original
+    if not trans or '[' not in trans:
+        return False
+    changed = False
+    for tag in ('[r]', '[rr]', '[heart]'):
+        orig_count = orig.lower().count(tag)
+        trans_count = trans.lower().count(tag)
+        if trans_count > orig_count:
+            # Remove excess occurrences from the end
+            excess = trans_count - orig_count
+            for _ in range(excess):
+                # Find last occurrence (case insensitive)
+                idx = trans.lower().rfind(tag)
+                if idx >= 0:
+                    trans = trans[:idx] + trans[idx + len(tag):]
+                    changed = True
+    if changed:
+        trans = re.sub(r'  +', ' ', trans).strip()
+        entry.translation = trans
+    return changed
 
 
 def _fix_wordwrap_tags(entry) -> bool:
@@ -527,9 +626,25 @@ def run_post_processing(entries: list, verbose: bool = False,
             entry_fixed = True
 
         if project_type == "tyranoscript":
-            if _fix_tyrano_tag_leaks(entry):
-                result.tyrano_tag_leaks += 1
+            if _fix_broken_emb_tags(entry):
+                result.broken_emb_tags += 1
                 entry_fixed = True
+
+            if _fix_broken_code_placeholders(entry):
+                result.broken_code_placeholders += 1
+                entry_fixed = True
+
+            if _fix_hallucinated_tags(entry):
+                result.hallucinated_tags += 1
+                entry_fixed = True
+
+            if _fix_extra_tyrano_tags(entry):
+                result.extra_tyrano_tags += 1
+                entry_fixed = True
+
+            # Note: _fix_tyrano_tag_leaks (blanket strip) is replaced by the
+            # targeted fixes above.  Tags in translations are legitimate —
+            # restored from «CODE» placeholders after LLM call.
 
         if _fix_wordwrap_tags(entry):
             result.wordwrap_tags += 1
