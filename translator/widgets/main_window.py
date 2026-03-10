@@ -1,12 +1,15 @@
 """Main application window — ties together all widgets."""
 
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import time
 from collections import Counter
+
+log = logging.getLogger(__name__)
 
 from PyQt6.QtWidgets import (
     QMainWindow, QSplitter, QToolBar, QStatusBar, QProgressBar,
@@ -239,6 +242,7 @@ class MainWindow(QMainWindow):
         self._dark_mode = True
         self._export_review_file = False
         self._disable_splash = True
+        self._show_translation_splash = True
         self._actors_ready = False  # True after actor gender dialog has been shown/skipped
         self._batch_start_time = 0
         self._batch_done_count = 0
@@ -2538,6 +2542,15 @@ class MainWindow(QMainWindow):
                     if self.parser.disable_splash_plugin(self.project.project_path):
                         plugin_msg += "\n'Made with RPG Maker' splash disabled."
 
+                # Generate translation splash screen
+                if self._show_translation_splash:
+                    try:
+                        from ..splash_generator import inject_splash
+                        if inject_splash(self.project.project_path):
+                            plugin_msg += "\nTranslation splash screen injected."
+                    except Exception as exc:
+                        log.warning("Splash injection failed: %s", exc)
+
                 QMessageBox.information(
                     self, "Export Complete",
                     f"Exported {len(translated)} translations to game files.\n"
@@ -2733,6 +2746,7 @@ class MainWindow(QMainWindow):
             plugin_analyzer=self.plugin_analyzer, engine=self.engine,
             export_review_file=self._export_review_file,
             disable_splash=self._disable_splash,
+            show_translation_splash=self._show_translation_splash,
         )
         if dlg.exec():
             # Apply dark mode if changed
@@ -2742,6 +2756,7 @@ class MainWindow(QMainWindow):
                 self.trans_table.set_dark_mode(self._dark_mode)
             self._export_review_file = dlg.export_review_file
             self._disable_splash = dlg.disable_splash
+            self._show_translation_splash = dlg.show_translation_splash
             self._save_settings()
             # Preload model into VRAM if model changed (avoids cold-start delay)
             if not self.client.is_cloud:
@@ -3073,6 +3088,8 @@ class MainWindow(QMainWindow):
             self._export_review_file = cfg["export_review_file"]
         if "disable_splash" in cfg:
             self._disable_splash = cfg["disable_splash"]
+        if "show_translation_splash" in cfg:
+            self._show_translation_splash = cfg["show_translation_splash"]
         if "inject_wordwrap" in cfg:
             self.plugin_analyzer.inject_wordwrap = cfg["inject_wordwrap"]
 
@@ -3100,6 +3117,7 @@ class MainWindow(QMainWindow):
             "auto_tune": self.engine.auto_tune,
             "export_review_file": self._export_review_file,
             "disable_splash": self._disable_splash,
+            "show_translation_splash": self._show_translation_splash,
             "inject_wordwrap": self.plugin_analyzer.inject_wordwrap,
         }
         try:

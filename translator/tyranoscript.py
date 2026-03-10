@@ -200,9 +200,12 @@ class TyranoScriptParser:
                             elif entry_id.startswith(file_key + "/ptext/"):
                                 old_text = entry_id.split("/ptext/", 1)[1]
                                 if f'text="{old_text}"' in line:
+                                    # Replace spaces with &nbsp; in ptext
+                                    # TyranoScript parser strips spaces
+                                    nbsp_trans = trans.replace(" ", "&nbsp;")
                                     line = line.replace(
                                         f'text="{old_text}"',
-                                        f'text="{trans}"')
+                                        f'text="{nbsp_trans}"')
 
                     # Apply eval_var replacements to [eval] and [if/elsif]
                     if eval_var_map:
@@ -514,10 +517,19 @@ class TyranoScriptParser:
             if _COMMAND_LINE_RE.match(stripped):
                 # Check if it starts with a known inline tag followed by text
                 if _INLINE_TAG_RE.match(stripped):
-                    text_only = _INLINE_TAG_RE.sub('', stripped).strip()
-                    if not JAPANESE_RE.search(text_only):
+                    # Strip leading inline tags — they're preserved on export
+                    # from the backup line, so don't send them to the LLM
+                    temp = stripped
+                    while True:
+                        m = _INLINE_TAG_RE.match(temp)
+                        if m:
+                            temp = temp[m.end():]
+                        else:
+                            break
+                    temp = temp.strip()
+                    if not JAPANESE_RE.search(temp):
                         continue
-                    # Falls through to dialogue extraction below
+                    stripped = temp  # only the translatable text
                 else:
                     continue
 
@@ -694,13 +706,17 @@ class TyranoScriptParser:
     _LINE_TERM_RE = re.compile(
         r'\[(?:r|rr|p|l|cm)\]\s*$', re.IGNORECASE)
 
+    # Fix unquoted [emb exp=f.xxx] -> [emb exp="f.xxx"]
+    _EMB_UNQUOTED_RE = re.compile(
+        r'\[emb\s+exp=(f\.\w+)\]', re.IGNORECASE)
+
     def _apply_dialogue_translation(self, original_line: str, translation: str) -> str:
         """Replace the text content of a dialogue line with its translation.
 
-        Preserves leading whitespace.  Appends a trailing space when the
-        translation doesn't end with an inline break tag ([r], [p], etc.)
-        so that TyranoScript's line-concatenation doesn't fuse English
-        words across source lines (e.g. "succubus's" + "status" → ok).
+        Preserves leading whitespace and leading inline tags ([emb ...],
+        [heart], etc.) from the original line.  Appends a trailing NBSP
+        when the translation doesn't end with an inline break tag so that
+        TyranoScript's line-concatenation doesn't fuse English words.
         """
         # Preserve original indentation
         indent = ""
@@ -710,16 +726,67 @@ class TyranoScriptParser:
             else:
                 break
 
-        # If translation doesn't end with a break tag, append a Unicode
-        # non-breaking space (U+00A0) so consecutive dialogue lines don't
-        # fuse words together.  Regular spaces get stripped by $.trim() in
-        # the TyranoScript parser, but U+00A0 is not ASCII whitespace so
-        # $.trim() preserves it, and it renders as a normal space.
-        trimmed = translation.rstrip()
-        if trimmed and not self._LINE_TERM_RE.search(trimmed):
-            translation = trimmed + "\u00A0"
+        # Fix unquoted [emb exp=f.xxx] -> [emb exp="f.xxx"] in translation
+        # (LLMs consistently strip the quotes from exp= attributes)
+        clean_trans = self._EMB_UNQUOTED_RE.sub(
+            r'[emb exp="\1"]', translation)
 
-        return indent + translation
+        # Extract leading inline tags from the ORIGINAL backup line
+        content = original_line.strip()
+        prefix = ""
+        while True:
+            m = _INLINE_TAG_RE.match(content)
+            if m:
+                prefix += m.group(0)
+                content = content[m.end():]
+            else:
+                break
+
+        if prefix:
+            # Check which prefix [emb] expressions the translation already
+            # contains (LLM may have repositioned them mid-sentence).
+            # Only prepend tags that are truly missing from the translation.
+            missing_prefix = ""
+            for tag_m in re.finditer(r'\[emb\s+exp="([^"]+)"\]', prefix):
+                expr = tag_m.group(1)  # e.g. "f.mea"
+                # Check if this expression appears anywhere in translation
+                if expr not in clean_trans:
+                    missing_prefix += tag_m.group(0)
+
+            # Also preserve non-emb leading tags (like [heart])
+            for tag_m in re.finditer(
+                    r'\[(?!emb\s)[^\]]+\]', prefix, re.IGNORECASE):
+                tag = tag_m.group(0)
+                if tag.lower() not in clean_trans.lower():
+                    missing_prefix += tag
+
+            # Strip any leading duplicates the LLM prepended
+            if missing_prefix:
+                # Only strip if translation starts with the same tags
+                temp = clean_trans
+                while True:
+                    m = _INLINE_TAG_RE.match(temp)
+                    if m:
+                        tag_text = m.group(0)
+                        # Check if this leading tag is already in our prefix
+                        tag_expr = re.search(r'exp="?([^"\]]+)', tag_text)
+                        if tag_expr and tag_expr.group(1) in prefix:
+                            temp = temp[m.end():]
+                        else:
+                            break
+                    else:
+                        break
+                if temp.lstrip():
+                    clean_trans = temp.lstrip()
+
+            clean_trans = missing_prefix + clean_trans
+
+        # Append Unicode NBSP so consecutive lines don't fuse words
+        trimmed = clean_trans.rstrip()
+        if trimmed and not self._LINE_TERM_RE.search(trimmed):
+            clean_trans = trimmed + "\u00A0"
+
+        return indent + clean_trans
 
     def get_game_title(self, project_dir: str) -> str:
         """Try to extract game title from Config.tjs or package.json."""

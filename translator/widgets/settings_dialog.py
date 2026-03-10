@@ -45,13 +45,15 @@ class SettingsDialog(QDialog):
 
     def __init__(self, client: AIClient, parent=None, parser: RPGMakerMVParser = None,
                  dark_mode: bool = True, plugin_analyzer=None, engine=None,
-                 export_review_file: bool = False, disable_splash: bool = True):
+                 export_review_file: bool = False, disable_splash: bool = True,
+                 show_translation_splash: bool = True):
         super().__init__(parent)
         self.client = client
         self.parser = parser
         self.dark_mode = dark_mode
         self.export_review_file = export_review_file
         self.disable_splash = disable_splash
+        self.show_translation_splash = show_translation_splash
         self.plugin_analyzer = plugin_analyzer
         self.engine = engine
         self.setWindowTitle("Settings")
@@ -328,6 +330,14 @@ class SettingsDialog(QDialog):
         )
         export_form.addRow(self.review_file_check)
 
+        self.translation_splash_check = QCheckBox("Show translation splash on export")
+        self.translation_splash_check.setToolTip(
+            "Injects a 'Translated with RPG Maker Translator' splash screen\n"
+            "that displays before the title screen when the game starts.\n"
+            "RPG Maker games only."
+        )
+        export_form.addRow(self.translation_splash_check)
+
         self.script_strings_check = QCheckBox(
             "Extract strings from Script commands (355/655)"
         )
@@ -394,6 +404,7 @@ class SettingsDialog(QDialog):
         self.inject_wordwrap_check.setChecked(
             self.plugin_analyzer.inject_wordwrap if self.plugin_analyzer else False)
         self.disable_splash_check.setChecked(self.disable_splash)
+        self.translation_splash_check.setChecked(self.show_translation_splash)
         self.dark_mode_check.setChecked(self.dark_mode)
         self.dazed_mode_check.setChecked(getattr(self.client, "dazed_mode", False))
         self.script_strings_check.setChecked(
@@ -807,6 +818,7 @@ class SettingsDialog(QDialog):
         if self.plugin_analyzer:
             self.plugin_analyzer.inject_wordwrap = self.inject_wordwrap_check.isChecked()
         self.disable_splash = self.disable_splash_check.isChecked()
+        self.show_translation_splash = self.translation_splash_check.isChecked()
         self.client.dazed_mode = self.dazed_mode_check.isChecked()
         if self.parser:
             self.parser.extract_script_strings = self.script_strings_check.isChecked()
