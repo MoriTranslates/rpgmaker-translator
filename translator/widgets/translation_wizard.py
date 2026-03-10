@@ -417,7 +417,8 @@ class TranslationWizard(QDialog):
             # Re-run post-processing on the freshly retranslated entries
             from ..post_processor import run_post_processing
             result = run_post_processing(self.mw.project.entries,
-                                        glossary=self.mw.project.glossary)
+                                        glossary=self.mw.project.glossary,
+                                        project_type=self.mw._project_type)
             self.mw._autosave()
             parts = ["Retranslation complete"]
             if result.total_entries_fixed:
@@ -435,7 +436,8 @@ class TranslationWizard(QDialog):
 
         codes_fixed = self.mw._restore_missing_codes()
         result = run_post_processing(self.mw.project.entries,
-                                     glossary=self.mw.project.glossary)
+                                     glossary=self.mw.project.glossary,
+                                     project_type=self.mw._project_type)
 
         # Quote/contraction cleanup
         quotes_fixed = 0
