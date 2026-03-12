@@ -464,7 +464,15 @@ class ImageTranslator:
                 continue
             try:
                 result = self.client.translate_name(
-                    region.text, hint="text in game image"
+                    region.text,
+                    hint=(
+                        "game menu button label — use standard game UI terms: "
+                        "はじめから=New Game, つづきから=Continue, "
+                        "オプション=Options, クレジット=Credits, "
+                        "セーブ=Save, ロード=Load, もどる=Back, "
+                        "タイトルへ=Title Screen, やめる=Quit, "
+                        "ニューゲーム=New Game. Keep it short (1-3 words)"
+                    ),
                 )
                 region.translation = result or region.text
             except Exception:
@@ -502,6 +510,10 @@ class ImageTranslator:
         2. Clears only the text region (makes transparent)
         3. Cleans stray text pixels that bleed into the icon zone
         4. Draws English text in the original text color with shadow
+
+        For two-state sprite sheets (title/menu buttons), uses a dedicated path
+        that skips icon detection — clears entire text region, centers English text,
+        and preserves top/bottom state colors.
         """
         img = self.open_image(image_path).convert("RGBA")
         img_w, img_h = img.size
@@ -509,15 +521,40 @@ class ImageTranslator:
         # Detect two-state sprite sheet
         is_two_state, merged = self._detect_two_state(regions, img_h)
 
+        # If OCR only found one half but the image looks like a two-state
+        # sprite (has visible content in both halves), mirror the regions
+        if not is_two_state and regions:
+            is_two_state, merged = self._infer_two_state(
+                img, regions, img_w, img_h)
+
         if is_two_state and merged:
-            half_h = img_h // 2
+            # Two-state sprite sheets: dedicated render (no icon detection)
+            # Upscale small images for better text rendering quality
+            orig_size = (img_w, img_h)
+            scale = 1
+            if max(img_w, img_h) < 300:
+                scale = max(2, 600 // max(img_w, img_h))
+                img = img.resize(
+                    (img_w * scale, img_h * scale),
+                    Image.Resampling.LANCZOS,
+                )
+                img_w, img_h = img.size
+
             for text, bbox_top, bbox_bot in merged:
                 if not text:
                     continue
-                # Process top half
-                self._preserve_region(img, bbox_top, text, img_w)
-                # Process bottom half
-                self._preserve_region(img, bbox_bot, text, img_w)
+                # Scale bboxes if upscaled
+                if scale > 1:
+                    bbox_top = tuple(v * scale for v in bbox_top)
+                    bbox_bot = tuple(v * scale for v in bbox_bot)
+                # Render top half (usually selected/highlighted state)
+                self._render_sprite_text(img, bbox_top, text, img_w)
+                # Render bottom half (usually unselected/dim state)
+                self._render_sprite_text(img, bbox_bot, text, img_w)
+
+            # Resize back to original dimensions if we upscaled
+            if scale > 1:
+                img = img.resize(orig_size, Image.Resampling.LANCZOS)
         else:
             for region in regions:
                 if not region.translation:
@@ -526,6 +563,115 @@ class ImageTranslator:
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         img.save(output_path, "PNG")
+
+    def _render_sprite_text(
+        self, img: Image.Image, bbox: tuple, text: str, img_w: int,
+    ):
+        """Render English text for a two-state sprite sheet button.
+
+        Unlike _preserve_region, this skips icon detection entirely —
+        these are text-only images (title buttons, menu commands).
+        Clears text pixels in the bbox, then draws centered English text
+        with a glow/outline effect matching the original style.
+
+        RPG Maker title buttons typically have:
+        - A colored text core (pink for selected, gray for unselected)
+        - A soft light-gray glow/outline around the text (the "cloud" effect)
+        This method recreates that style using Pillow's stroke rendering.
+        """
+        x1, y1, x2, y2 = bbox
+        box_w = x2 - x1
+        box_h = y2 - y1
+        if box_w < 10 or box_h < 10:
+            return
+
+        # Sample outline (glow) and core text colors before clearing
+        outline_color, core_color = self._sample_sprite_colors(img, bbox)
+
+        # Clear all visible pixels in the bbox
+        pixels = img.load()
+        for x in range(x1, x2):
+            for y in range(y1, y2):
+                r, g, b, a = pixels[x, y]
+                if a > 10:
+                    pixels[x, y] = (0, 0, 0, 0)
+
+        # Calculate stroke width relative to image size (the "cloud" glow)
+        stroke_w = max(2, min(box_h // 12, 8))
+
+        # Draw centered English text with glow outline
+        draw = ImageDraw.Draw(img)
+        # Account for stroke in available space
+        available_w = box_w - 8 - stroke_w * 2
+        available_h = box_h - 4 - stroke_w * 2
+
+        # Sprite buttons: always single line — shrink font until it fits
+        font = self._fit_single_line(text, available_w, available_h)
+        tb = draw.textbbox((0, 0), text, font=font)
+        tw = tb[2] - tb[0]
+        th = tb[3] - tb[1]
+
+        # Center text in the bbox
+        tx = x1 + (box_w - tw) // 2
+        ty = y1 + (box_h - th) // 2
+
+        # Draw with stroke (outline/glow) + fill (core color)
+        draw.text(
+            (tx, ty), text, font=font,
+            fill=core_color,
+            stroke_width=stroke_w,
+            stroke_fill=outline_color,
+        )
+
+    @staticmethod
+    def _sample_sprite_colors(
+        img: Image.Image, bbox: tuple,
+    ) -> tuple[tuple, tuple]:
+        """Sample outline (glow) and core text colors from a sprite text region.
+
+        Returns (outline_color, core_color):
+        - outline_color: the glow/cloud effect (usually light gray)
+        - core_color: the actual text fill (pink, dark gray, etc.)
+        """
+        x1, y1, x2, y2 = bbox
+        crop = img.crop((x1, y1, x2, y2)).convert("RGBA")
+
+        from collections import Counter
+
+        # Collect all visible pixels
+        visible = []
+        for x in range(crop.size[0]):
+            for y in range(crop.size[1]):
+                r, g, b, a = crop.getpixel((x, y))
+                if a > 100:
+                    visible.append((r, g, b))
+
+        if not visible:
+            return ((220, 220, 220, 255), (200, 100, 150, 255))
+
+        # Quantize to find color groups
+        quantized = [(r // 32 * 32, g // 32 * 32, b // 32 * 32)
+                     for r, g, b in visible]
+        counts = Counter(quantized).most_common(10)
+
+        # Most common is typically the outline/glow (light gray)
+        outline_rgb = counts[0][0]
+        outline_color = (*outline_rgb, 200)  # slightly transparent for soft glow
+
+        # Find the core color: the most common color that's distinctly different
+        # from the outline (different hue or significantly different brightness)
+        core_color = (200, 100, 150, 255)  # fallback pink
+        for rgb, count in counts[1:]:
+            r, g, b = rgb
+            or_, og, ob = outline_rgb
+            # Different if: saturation differs, or brightness differs by 40+
+            brightness_diff = abs((r + g + b) // 3 - (or_ + og + ob) // 3)
+            max_diff = max(abs(r - or_), abs(g - og), abs(b - ob))
+            if brightness_diff > 30 or max_diff > 40:
+                core_color = (r, g, b, 255)
+                break
+
+        return (outline_color, core_color)
 
     def _preserve_region(
         self, img: Image.Image, bbox: tuple, text: str, img_w: int,
@@ -822,6 +968,63 @@ class ImageTranslator:
 
         return True, merged
 
+    @staticmethod
+    def _infer_two_state(
+        img: Image.Image, regions: list[TextRegion],
+        img_w: int, img_h: int,
+    ) -> tuple[bool, list[tuple[str, tuple, tuple]]]:
+        """Infer two-state sprite when OCR only found one half.
+
+        Checks if the image has visible content in both halves (top and
+        bottom). If OCR regions are only in one half but both halves have
+        pixels, this is likely a two-state sprite where the model missed
+        the lighter/fainter half. Mirror each region to the other half
+        and use full-width bboxes covering each half.
+        """
+        half_y = img_h // 2
+        if half_y < 20:
+            return False, []
+
+        # Check if all OCR regions are in one half only
+        in_top = [r for r in regions if (r.bbox[1] + r.bbox[3]) // 2 < half_y]
+        in_bot = [r for r in regions if (r.bbox[1] + r.bbox[3]) // 2 >= half_y]
+
+        if in_top and in_bot:
+            return False, []  # regions in both halves — not a missed case
+
+        # Check both halves have visible pixels
+        pixels = img.load()
+        margin = 5
+
+        def _has_content(y_start, y_end):
+            count = 0
+            step = max(1, (y_end - y_start) // 20)
+            x_step = max(1, img_w // 20)
+            for y in range(y_start + margin, y_end - margin, step):
+                for x in range(margin, img_w - margin, x_step):
+                    r, g, b, a = pixels[x, y]
+                    if a > 50:
+                        count += 1
+            return count > 3
+
+        top_has = _has_content(0, half_y)
+        bot_has = _has_content(half_y, img_h)
+
+        if not (top_has and bot_has):
+            return False, []  # one half is empty — not two-state
+
+        # Mirror: create full-width bboxes for each half
+        source = in_top or in_bot
+        merged = []
+        for r in source:
+            text = r.translation or r.text
+            # Use full-width bboxes with small margins for each half
+            top_bbox = (margin, margin, img_w - margin, half_y - margin)
+            bot_bbox = (margin, half_y + margin, img_w - margin, img_h - margin)
+            merged.append((text, top_bbox, bot_bbox))
+
+        return True, merged
+
     # ── Color detection helpers ──────────────────────────────────
 
     @staticmethod
@@ -851,6 +1054,27 @@ class ImageTranslator:
         return warm_count > len(pixels) * 0.03
 
     # ── Text fitting ─────────────────────────────────────────────
+
+    @staticmethod
+    def _fit_single_line(
+        text: str, max_w: int, max_h: int, min_size: int = 6,
+    ) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+        """Find the largest font size that fits text on a single line."""
+        font_path = _SYSTEM_FONT_BOLD or _SYSTEM_FONT
+        if not font_path:
+            return ImageFont.load_default()
+
+        max_size = max(min_size, int(max_h * 0.9))
+        dummy = Image.new("RGB", (1, 1))
+        draw = ImageDraw.Draw(dummy)
+
+        for size in range(max_size, min_size - 1, -1):
+            font = ImageFont.truetype(font_path, size)
+            bb = draw.textbbox((0, 0), text, font=font)
+            if (bb[2] - bb[0]) <= max_w and (bb[3] - bb[1]) <= max_h:
+                return font
+
+        return ImageFont.truetype(font_path, min_size)
 
     @staticmethod
     def _fit_text(
