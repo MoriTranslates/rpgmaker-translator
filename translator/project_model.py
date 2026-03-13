@@ -101,7 +101,12 @@ class TranslationProject:
             project_path=data.get("project_path", ""),
             project_type=data.get("project_type", "rpgmaker"),
         )
-        project.entries = [TranslationEntry(**e) for e in data.get("entries", [])]
+        # Filter to known fields — forward-compatible with newer save files
+        known = {f.name for f in TranslationEntry.__dataclass_fields__.values()}
+        project.entries = [
+            TranslationEntry(**{k: v for k, v in e.items() if k in known})
+            for e in data.get("entries", [])
+        ]
         project.glossary = data.get("glossary", {})
         # JSON converts int keys to strings — convert back to int
         raw_genders = data.get("actor_genders", {})
