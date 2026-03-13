@@ -646,7 +646,10 @@ class EventViewerPanel(QWidget):
         entry = self._current_entries[row]
         new_text = self._trans_editor.toPlainText()
         entry.translation = new_text
-        entry.status = "translated" if new_text.strip() else "untranslated"
+        if not new_text.strip():
+            entry.status = "untranslated"
+        elif entry.status not in ("translated", "reviewed"):
+            entry.status = "translated"
 
         # Update table row
         self._detail_table.blockSignals(True)
