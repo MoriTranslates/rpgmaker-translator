@@ -7,6 +7,8 @@ All fixes are pure string operations — no LLM needed.
 import re
 from dataclasses import dataclass
 
+import wordninja
+
 from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
 
 
@@ -37,6 +39,7 @@ class PostProcessResult:
     dialogue_quotes: int = 0
     missing_spaces: int = 0
     restored_line_breaks: int = 0
+    split_words: int = 0
     total_entries_fixed: int = 0
     retranslate_ids: list = None  # Entry IDs that need LLM retranslation
 
@@ -92,6 +95,8 @@ class PostProcessResult:
             parts.append(f"{self.dialogue_quotes} dialogue quotes stripped")
         if self.missing_spaces:
             parts.append(f"{self.missing_spaces} missing spaces fixed")
+        if self.split_words:
+            parts.append(f"{self.split_words} split words rejoined")
         if self.restored_line_breaks:
             parts.append(f"{self.restored_line_breaks} line breaks restored")
         if self.retranslate_ids:
@@ -132,6 +137,29 @@ _NAME_CODE_NO_SPACE_RE = re.compile(r'(\\n\[\d+\])(?=[A-Za-z])')
 
 # Collapsed color codes: \c[N]\c[0] with nothing meaningful between them
 _COLLAPSED_COLOR_RE = re.compile(r'(\\c\[\d+\])(\\c\[0\])')
+
+# Mid-word space patterns (LLM splits words with spaces: "Dan cer", "Pos it ion")
+# Pattern A: word + short fragment(s): "Sque eze", "Pos it ion", "Act ive"
+_SPLIT_WORD_3 = re.compile(r"(?<![a-zA-Z'])([A-Za-z]{2,})\s+([a-z]{1,3})\s+([a-z]{1,3})(?=\s|[^a-zA-Z]|$)")
+_SPLIT_WORD_2 = re.compile(r"(?<![a-zA-Z'])([A-Za-z]{2,})\s+([a-z]{1,3})(?=\s|[^a-zA-Z]|$)")
+# Pattern B: short prefix + long word: "Dis appeared", "Per vert"
+_SPLIT_WORD_PREFIX = re.compile(r"(?<![a-zA-Z'])([A-Z][a-z]{1,3})\s+([a-z]{4,})(?=\s|[^a-zA-Z]|$)")
+
+# Common English words that should NOT be merged with adjacent words
+_COMMON_WORDS = {
+    'a', 'an', 'the', 'is', 'it', 'in', 'on', 'to', 'do', 'no', 'or',
+    'at', 'if', 'by', 'he', 'me', 'we', 'my', 'up', 'as', 'so', 'be',
+    'of', 'am', 'go', 'us', 'oh', 'ok', 'hi',
+    'you', 'for', 'are', 'not', 'but', 'all', 'can', 'her', 'was', 'one',
+    'our', 'out', 'day', 'get', 'has', 'him', 'his', 'how', 'its', 'may',
+    'new', 'now', 'old', 'see', 'way', 'who', 'did', 'let', 'say', 'she',
+    'too', 'use', 'big', 'off', 'try', 'ask', 'men', 'run', 'top', 'yes',
+    'yet', 'red', 'set', 'put', 'end', 'why', 'far', 'eye', 'own', 'job',
+    'sir', 'and', 'got', 'lot', 'don', 'cum', 'sex', 'hot',
+    'turn', 'take', 'look', 'hold', 'pull', 'drop', 'stand', 'show',
+    'hang', 'work', 'fall', 'shoot', 'thank', 'every', 'some', 'even',
+    'hand', 'blow',
+}
 
 # System term fields that should be title-cased
 _SYSTEM_TERM_FIELDS = {
@@ -825,6 +853,64 @@ def _fix_emb_spacing(entry) -> bool:
     return False
 
 
+def _try_merge_fragments(groups: list[str]) -> str | None:
+    """Try merging word fragments into a single word using wordninja.
+
+    Returns the merged word if wordninja confirms it's a single word
+    and at least one fragment is not a common standalone English word.
+    Returns None if the fragments are likely separate real words.
+    """
+    combined = ''.join(groups)
+    if len(combined) < 4:
+        return None
+    # If all fragments are common standalone words, it's likely a real phrase
+    if all(g.lower() in _COMMON_WORDS for g in groups):
+        return None
+    # Ask wordninja: is this one word?
+    parts = wordninja.split(combined.lower())
+    if len(parts) == 1:
+        # Preserve original capitalization
+        if groups[0][0].isupper():
+            return combined[0].upper() + combined[1:]
+        return combined
+    return None
+
+
+def _fix_split_words(entry) -> bool:
+    """Rejoin words that the LLM split with spaces.
+
+    LLMs sometimes insert spaces mid-word (e.g. "Danc ing", "Vill age",
+    "Dis appeared"). Detects fragments, merges them, and verifies with
+    wordninja that the result is a real word.
+    """
+    trans = entry.translation
+    if not trans:
+        return False
+
+    new = trans
+    for _ in range(3):  # Multiple passes for overlapping splits
+        prev = new
+        # 3-fragment: "Pos it ion", "Caut io us"
+        new = _SPLIT_WORD_3.sub(
+            lambda m: _try_merge_fragments([m.group(1), m.group(2), m.group(3)]) or m.group(0),
+            new)
+        # 2-fragment: "Dan cer", "Sque eze", "Act ive"
+        new = _SPLIT_WORD_2.sub(
+            lambda m: _try_merge_fragments([m.group(1), m.group(2)]) or m.group(0),
+            new)
+        # Prefix split: "Dis appeared", "Per vert"
+        new = _SPLIT_WORD_PREFIX.sub(
+            lambda m: _try_merge_fragments([m.group(1), m.group(2)]) or m.group(0),
+            new)
+        if new == prev:
+            break
+
+    if new != trans:
+        entry.translation = new
+        return True
+    return False
+
+
 def run_post_processing(entries: list, verbose: bool = False,
                         glossary: dict | None = None,
                         project_type: str = "rpgmaker") -> PostProcessResult:
@@ -929,6 +1015,10 @@ def run_post_processing(entries: list, verbose: bool = False,
 
         if _fix_missing_spaces(entry):
             result.missing_spaces += 1
+            entry_fixed = True
+
+        if _fix_split_words(entry):
+            result.split_words += 1
             entry_fixed = True
 
         if _fix_double_spaces(entry):

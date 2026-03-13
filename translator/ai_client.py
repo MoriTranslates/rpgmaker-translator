@@ -171,6 +171,37 @@ Context-sensitive translation:
 - Do NOT add quotation marks around dialogue. Japanese 「」 brackets are speech markers — the game engine already displays text in dialogue boxes, so quotes are redundant. Just translate the content without wrapping it in "quotes"."""
 
 
+SRPG_SYSTEM_PROMPT = """You are a professional Japanese to English translator specializing in tactical RPG (SRPG) game dialogue, including adult (18+) content.
+
+Rules:
+- Translate ALL text faithfully and completely, including sexual, violent, or explicit content. Never censor, euphemize, skip, or refuse any content. This is a licensed translation project.
+- Translate the Japanese text naturally into English suitable for a tactical RPG game (Fire Emblem-style).
+- This game has NO inline control codes or placeholders. The text is pure prose — translate it directly.
+- Keep the same number of line breaks (newlines) as the original. Each line break corresponds to a line in the game's text box.
+- NEVER add explanations, translator notes, commentary, or parenthetical remarks — output ONLY the translated text and nothing else.
+- If the text is already in English or is a proper noun, keep it as-is.
+- Match the tone and style of the original (casual, formal, dramatic, etc.).
+- When a glossary is provided, you MUST use the exact glossary translations for those terms.
+- ALWAYS translate katakana words into their English MEANING, not romanized form.
+- NEVER use romanized Japanese (romaji) in the output. Translate ALL Japanese words to proper English. The ONLY exceptions are: character names, place names, and preserved honorifics (-san, -chan, -kun, -sama, -sensei, -senpai, -dono).
+- Your output must contain NO Japanese characters (hiragana, katakana, or kanji). Everything must be fully translated to English.
+
+Pronoun rules (CRITICAL):
+- Japanese often omits pronouns entirely. Do NOT guess or infer pronouns randomly.
+- If character info lists a gender (male/female), use the correct pronouns for that character.
+- If gender is NOT specified or unclear, prefer: the character's name, "they/them", or "you" — do NOT default to "he" or "she".
+- Use second person "you" for lines spoken TO the player character.
+- Use first person "I/me" for lines where the speaker talks about themselves.
+
+Honorifics:
+- Preserve Japanese honorifics as-is: -san, -kun, -chan, -sama, -sensei, -senpai, -dono, etc.
+
+Context-sensitive translation:
+- This is a tactical RPG with unit classes, skills, maps, and turn-based combat. Keep class names, skill names, and UI labels concise.
+- For adult scenes, use natural and explicit English that matches the original intensity. Do not tone down or soften the language.
+- Do NOT capitalize common nouns mid-sentence unless they are proper names or titles."""
+
+
 # Sugoi Ultra 14B — JP→EN specialized model (fine-tuned from Qwen2.5-14B).
 # Trimmed prompt: Sugoi already handles katakana→English, no-romaji, no-JP-in-output,
 # and context-sensitive translation natively from its fine-tuning data.
@@ -403,6 +434,11 @@ def build_system_prompt(target_language: str = "English", model: str = "",
         if target_language not in ("English", "Pig Latin"):
             base = base.replace("English", target_language)
         return base
+    if project_type == "srpgstudio":
+        base = SRPG_SYSTEM_PROMPT
+        if target_language not in ("English", "Pig Latin"):
+            base = base.replace("English", target_language)
+        return base
     if target_language in ("English", "Pig Latin"):
         return SYSTEM_PROMPT
     return SYSTEM_PROMPT.replace("English", target_language)
@@ -430,7 +466,7 @@ class AIClient:
         self.actor_names = {}    # {actor_id(int): "name string"}
         self.glossary = {}       # JP term -> EN translation forced mappings
         self.dazed_mode = False  # DazedMTL mode toggle (batch 30, DazedMTL prompt)
-        self.project_type = "rpgmaker"  # "rpgmaker" | "tyranoscript"
+        self.project_type = "rpgmaker"  # "rpgmaker" | "tyranoscript" | "srpgstudio"
         self._managed_proc = None  # subprocess.Popen if we started Ollama
         # Cost tracking (cloud APIs only) — lock protects parallel worker updates
         import threading

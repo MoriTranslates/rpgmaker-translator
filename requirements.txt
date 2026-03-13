@@ -3,3 +3,4 @@ requests
 Pillow
 openai
 wordninja
+pycryptodome

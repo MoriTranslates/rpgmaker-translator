@@ -59,6 +59,13 @@ TYRANOSCRIPT_STEPS = [
     ("export", "Export"),
 ]
 
+SRPGSTUDIO_STEPS = [
+    ("dialogue", "Translate"),
+    ("cleanup", "Clean Up"),
+    ("wordwrap", "Word Wrap"),
+    ("export", "Export"),
+]
+
 # Default for backward compat
 PIPELINE_STEPS = RPGMAKER_STEPS
 
@@ -137,6 +144,8 @@ class PipelineBar(QWidget):
         """Switch pipeline steps for the given engine type."""
         if engine == "tyranoscript":
             new_steps = TYRANOSCRIPT_STEPS
+        elif engine == "srpgstudio":
+            new_steps = SRPGSTUDIO_STEPS
         else:
             new_steps = RPGMAKER_STEPS
         if new_steps != self._steps:

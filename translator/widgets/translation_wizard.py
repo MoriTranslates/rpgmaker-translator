@@ -105,6 +105,9 @@ class TranslationWizard(QDialog):
         steps_group = QGroupBox("Translation Pipeline")
         steps_layout = QVBoxLayout(steps_group)
 
+        # Detect engine type for step customization
+        is_srpg = getattr(self.mw, '_project_type', '') == 'srpgstudio'
+
         self.cb_db = QCheckBox("1. Translate database (names, items, skills, terms)")
         self.cb_dialogue = QCheckBox("2. Translate dialogue and events")
         self.cb_cleanup = QCheckBox("3. Clean up artifacts (spacing, codes, capitalization)")
@@ -115,31 +118,50 @@ class TranslationWizard(QDialog):
 
         # Smart defaults
         entries = project.entries if project else []
-        db_entries = [e for e in entries if e.file in self.mw._DB_FILES]
-        dialogue_entries = [e for e in entries if e.file not in self.mw._DB_FILES]
-        has_db_untranslated = any(e.status == "untranslated" for e in db_entries)
-        has_dialogue_untranslated = any(e.status == "untranslated" for e in dialogue_entries)
 
-        self.cb_db.setChecked(has_db_untranslated)
-        if not db_entries:
-            self.cb_db.setText("1. Translate database (no DB entries)")
-            self.cb_db.setEnabled(False)
-        elif not has_db_untranslated:
-            self.cb_db.setText("1. Translate database (all done)")
-        self.cb_dialogue.setChecked(has_dialogue_untranslated)
-        if not dialogue_entries:
-            self.cb_dialogue.setText("2. Translate dialogue (no dialogue entries)")
-            self.cb_dialogue.setEnabled(False)
-        elif not has_dialogue_untranslated:
-            self.cb_dialogue.setText("2. Translate dialogue (all done)")
-        self.cb_cleanup.setChecked(True)
-        self.cb_retranslate.setChecked(True)
-        self.cb_wordwrap.setChecked(True)
-        self.cb_export.setChecked(True)
-        self.cb_patch.setChecked(False)
+        if is_srpg:
+            # SRPG Studio: no DB/dialogue split, no word wrap
+            has_untranslated = any(e.status == "untranslated" for e in entries)
+            self.cb_db.setVisible(False)
+            self.cb_dialogue.setText("1. Translate all entries")
+            self.cb_dialogue.setChecked(has_untranslated)
+            if not has_untranslated:
+                self.cb_dialogue.setText("1. Translate all entries (all done)")
+            self.cb_cleanup.setText("2. Clean up artifacts (spacing, capitalization)")
+            self.cb_retranslate.setText("3. Retranslate broken entries")
+            self.cb_wordwrap.setText("4. Apply word wrap (~50 chars/line)")
+            self.cb_wordwrap.setChecked(True)
+            self.cb_export.setText("5. Export translations to data.dts")
+            self.cb_patch.setVisible(False)
+            self.cb_cleanup.setChecked(True)
+            self.cb_retranslate.setChecked(has_untranslated)
+            self.cb_export.setChecked(True)
+        else:
+            db_entries = [e for e in entries if e.file in self.mw._DB_FILES]
+            dialogue_entries = [e for e in entries if e.file not in self.mw._DB_FILES]
+            has_db_untranslated = any(e.status == "untranslated" for e in db_entries)
+            has_dialogue_untranslated = any(e.status == "untranslated" for e in dialogue_entries)
 
-        if not has_db_untranslated and not has_dialogue_untranslated:
-            self.cb_retranslate.setChecked(False)
+            self.cb_db.setChecked(has_db_untranslated)
+            if not db_entries:
+                self.cb_db.setText("1. Translate database (no DB entries)")
+                self.cb_db.setEnabled(False)
+            elif not has_db_untranslated:
+                self.cb_db.setText("1. Translate database (all done)")
+            self.cb_dialogue.setChecked(has_dialogue_untranslated)
+            if not dialogue_entries:
+                self.cb_dialogue.setText("2. Translate dialogue (no dialogue entries)")
+                self.cb_dialogue.setEnabled(False)
+            elif not has_dialogue_untranslated:
+                self.cb_dialogue.setText("2. Translate dialogue (all done)")
+            self.cb_cleanup.setChecked(True)
+            self.cb_retranslate.setChecked(True)
+            self.cb_wordwrap.setChecked(True)
+            self.cb_export.setChecked(True)
+            self.cb_patch.setChecked(False)
+
+            if not has_db_untranslated and not has_dialogue_untranslated:
+                self.cb_retranslate.setChecked(False)
 
         for cb in [self.cb_db, self.cb_dialogue, self.cb_cleanup,
                     self.cb_retranslate, self.cb_wordwrap, self.cb_export,
@@ -294,7 +316,8 @@ class TranslationWizard(QDialog):
             if step == WizardStep.TRANSLATE_DB:
                 self.detail_label.setText(f"Database: {done}/{total} ({pct}%)")
             elif step == WizardStep.TRANSLATE_DIALOGUE:
-                self.detail_label.setText(f"Dialogue: {done}/{total} ({pct}%)")
+                lbl = "Translating" if getattr(self.mw, '_project_type', '') == 'srpgstudio' else "Dialogue"
+                self.detail_label.setText(f"{lbl}: {done}/{total} ({pct}%)")
             elif step == WizardStep.RETRANSLATE:
                 self.detail_label.setText(f"Fixing: {done}/{total} ({pct}%)")
 
@@ -321,15 +344,24 @@ class TranslationWizard(QDialog):
             QTimer.singleShot(200, lambda: self._start_batch_step("db"))
 
         elif step == WizardStep.TRANSLATE_DIALOGUE:
-            self.step_label.setText(
-                f"Step {step_num}/{total_steps}: Translating dialogue...")
-            self.progress_bar.setRange(0, 0)
-            self.detail_label.setText("Building glossary from database, then translating...")
-            # Backfill glossary from DB translations
-            self.mw._backfill_db_glossary()
-            self.mw._rebuild_glossary()
-            self.mw._wizard_active = True
-            QTimer.singleShot(200, lambda: self._start_batch_step("dialogue"))
+            is_srpg = getattr(self.mw, '_project_type', '') == 'srpgstudio'
+            if is_srpg:
+                self.step_label.setText(
+                    f"Step {step_num}/{total_steps}: Translating all entries...")
+                self.progress_bar.setRange(0, 0)
+                self.detail_label.setText("Translating names, dialogue, descriptions...")
+                self.mw._wizard_active = True
+                QTimer.singleShot(200, lambda: self._start_batch_step("all"))
+            else:
+                self.step_label.setText(
+                    f"Step {step_num}/{total_steps}: Translating dialogue...")
+                self.progress_bar.setRange(0, 0)
+                self.detail_label.setText("Building glossary from database, then translating...")
+                # Backfill glossary from DB translations
+                self.mw._backfill_db_glossary()
+                self.mw._rebuild_glossary()
+                self.mw._wizard_active = True
+                QTimer.singleShot(200, lambda: self._start_batch_step("dialogue"))
 
         elif step == WizardStep.CLEANUP:
             self.step_label.setText(
@@ -480,20 +512,34 @@ class TranslationWizard(QDialog):
 
     def _run_wordwrap(self):
         """Apply word wrap (synchronous)."""
-        from ..text_processor import TextProcessor
+        is_srpg = getattr(self.mw, '_project_type', '') == 'srpgstudio'
 
-        analyzer = self.mw.plugin_analyzer
-        processor = TextProcessor(analyzer)
-        count = 0
-        for entry in self.mw.project.entries:
-            if not entry.translation or entry.status not in ("translated", "reviewed"):
-                continue
-            if "dialog" not in entry.field and "scroll" not in entry.field:
-                continue
-            new_text = processor.process_entry(entry.original, entry.translation)
-            if new_text != entry.translation:
-                entry.translation = new_text
-                count += 1
+        if is_srpg:
+            count = 0
+            for entry in self.mw.project.entries:
+                if not entry.translation or entry.status not in ("translated", "reviewed"):
+                    continue
+                if entry.field != "dialogue":
+                    continue
+                wrapped = self.mw._wordwrap_srpg_text(entry.translation, 50)
+                if wrapped != entry.translation:
+                    entry.translation = wrapped
+                    count += 1
+        else:
+            from ..text_processor import TextProcessor
+
+            analyzer = self.mw.plugin_analyzer
+            processor = TextProcessor(analyzer)
+            count = 0
+            for entry in self.mw.project.entries:
+                if not entry.translation or entry.status not in ("translated", "reviewed"):
+                    continue
+                if "dialog" not in entry.field and "scroll" not in entry.field:
+                    continue
+                new_text = processor.process_entry(entry.original, entry.translation)
+                if new_text != entry.translation:
+                    entry.translation = new_text
+                    count += 1
 
         self.mw.trans_table.refresh()
         self.mw._autosave()
@@ -509,10 +555,6 @@ class TranslationWizard(QDialog):
     def _run_export(self):
         """Export translations to game files."""
         try:
-            from ..rpgmaker_mv import RPGMakerMVParser
-            import re
-
-            parser = RPGMakerMVParser()
             translated = [e for e in self.mw.project.entries
                           if e.status in ("translated", "reviewed") and e.translation]
 
@@ -525,26 +567,36 @@ class TranslationWizard(QDialog):
                 return
 
             project_path = self.mw.project.project_path
+            is_srpg = getattr(self.mw, '_project_type', '') == 'srpgstudio'
 
-            # Strip WordWrap tags if no plugin and not injecting
-            inject_ww = getattr(self.mw, '_inject_wordwrap', False)
-            has_plugin = (self.mw.plugin_analyzer.has_wordwrap_plugin
-                          if self.mw.plugin_analyzer else False)
-            if not has_plugin and not inject_ww:
-                for e in translated:
-                    if e.translation and "<WordWrap>" in e.translation:
-                        e.translation = re.sub(
-                            r'<WordWrap>', '', e.translation, flags=re.IGNORECASE)
+            if is_srpg:
+                from ..srpgstudio import SRPGStudioParser
+                parser = SRPGStudioParser()
+                parser.save_project(project_path, translated)
+            else:
+                import re
+                from ..rpgmaker_mv import RPGMakerMVParser
+                parser = RPGMakerMVParser()
 
-            parser.save_project(project_path, translated)
+                # Strip WordWrap tags if no plugin and not injecting
+                inject_ww = getattr(self.mw, '_inject_wordwrap', False)
+                has_plugin = (self.mw.plugin_analyzer.has_wordwrap_plugin
+                              if self.mw.plugin_analyzer else False)
+                if not has_plugin and not inject_ww:
+                    for e in translated:
+                        if e.translation and "<WordWrap>" in e.translation:
+                            e.translation = re.sub(
+                                r'<WordWrap>', '', e.translation, flags=re.IGNORECASE)
 
-            if inject_ww:
-                chars = getattr(self.mw, '_chars_per_line', 0)
-                parser.inject_wordwrap_plugin(project_path, max_chars=chars)
+                parser.save_project(project_path, translated)
 
-            disable_splash = getattr(self.mw, '_disable_splash', False)
-            if disable_splash:
-                parser.disable_splash_plugin(project_path)
+                if inject_ww:
+                    chars = getattr(self.mw, '_chars_per_line', 0)
+                    parser.inject_wordwrap_plugin(project_path, max_chars=chars)
+
+                disable_splash = getattr(self.mw, '_disable_splash', False)
+                if disable_splash:
+                    parser.disable_splash_plugin(project_path)
 
             self.mw._autosave()
             self.progress_bar.setRange(0, 1)
@@ -564,6 +616,16 @@ class TranslationWizard(QDialog):
         """Create a translation patch zip."""
         try:
             import os
+
+            # SRPG Studio doesn't support patch zip (single binary archive)
+            if getattr(self.mw, '_project_type', '') == 'srpgstudio':
+                self.detail_label.setText("Patch zip not available for SRPG Studio.")
+                self.progress_bar.setRange(0, 1)
+                self.progress_bar.setValue(1)
+                self._step_index += 1
+                QTimer.singleShot(500, self._run_next_step)
+                return
+
             from ..rpgmaker_mv import RPGMakerMVParser
 
             parser = RPGMakerMVParser()
