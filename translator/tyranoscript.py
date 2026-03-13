@@ -166,8 +166,12 @@ class TyranoScriptParser:
 
             translations = lookup.get(file_key, {})
 
-            with open(src, "r", encoding="utf-8") as f:
-                lines = f.readlines()
+            try:
+                with open(src, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            except UnicodeDecodeError:
+                with open(src, "r", encoding="shift_jis", errors="replace") as f:
+                    lines = f.readlines()
 
             new_lines = []
             for i, line in enumerate(lines):
