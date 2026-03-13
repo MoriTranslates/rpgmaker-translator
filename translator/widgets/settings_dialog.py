@@ -579,7 +579,10 @@ class SettingsDialog(QDialog):
             self.status_label.setText("Could not fetch models -- is Ollama running?")
             self.status_label.setStyleSheet("color: red;")
         self.model_combo.blockSignals(False)
-        self._on_model_changed(self.model_combo.currentText())
+        # Only trigger model-changed if the model actually changed
+        new_model = self.model_combo.currentText()
+        if new_model != current:
+            self._on_model_changed(new_model)
 
     def _refresh_models(self):
         """Fetch available models from Ollama (used by Refresh button)."""
