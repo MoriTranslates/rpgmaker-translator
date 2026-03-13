@@ -168,6 +168,10 @@ class QueuePanel(QWidget):
         if row is None:
             return
 
+        # Guard against double-counting (e.g. glossary prefill then LLM)
+        status_item = self._table.item(row, 0)
+        if status_item and status_item.data(Qt.ItemDataRole.UserRole) == "done":
+            return
         self._done_count += 1
         icon, color = _STATUS["done"]
         status_item = self._table.item(row, 0)
