@@ -176,10 +176,12 @@ from ..tyranoscript import TyranoScriptParser
 from ..srpgstudio import SRPGStudioParser
 from ..rpgmaker_ace import RPGMakerAceParser
 from ..rpgmaker_2k import RPGMaker2KParser
+from ..renpy import RenPyParser
 from ..engine_handler import (
     EngineHandler, detect_engine, get_handler_by_key,
     RPGMakerMVHandler, RPGMakerMZHandler, RPGMakerAceHandler,
     RPGMaker2KHandler, TyranoScriptHandler, SRPGStudioHandler,
+    RenPyHandler,
 )
 from ..project_model import TranslationProject
 from ..translation_engine import TranslationEngine
@@ -226,6 +228,7 @@ class MainWindow(QMainWindow):
         self.srpg_parser = SRPGStudioParser()
         self.ace_parser = RPGMakerAceParser()
         self.rm2k_parser = RPGMaker2KParser()
+        self.renpy_parser = RenPyParser()
         # Engine handler registry — maps key -> handler with parser
         self._engine_handlers = {
             "rpgmaker_mv": RPGMakerMVHandler(self.parser),
@@ -234,6 +237,7 @@ class MainWindow(QMainWindow):
             "rpgmaker_2k": RPGMaker2KHandler(self.rm2k_parser),
             "tyranoscript": TyranoScriptHandler(self.tyrano_parser),
             "srpgstudio": SRPGStudioHandler(self.srpg_parser),
+            "renpy": RenPyHandler(self.renpy_parser),
         }
         self.handler: EngineHandler = self._engine_handlers["rpgmaker_mv"]
         self._engine_overrides: dict[str, dict] = {}  # per-engine setting overrides

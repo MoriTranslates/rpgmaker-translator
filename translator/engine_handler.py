@@ -342,10 +342,44 @@ class SRPGStudioHandler(EngineHandler):
                 f"Original file backed up as data_original.dts.")
 
 
+# ── Ren'Py ──────────────────────────────────────────────────
+
+class RenPyHandler(EngineHandler):
+    key = "renpy"
+    display_name = "Ren'Py"
+    backup_description = "game_original/"
+
+    has_wordwrap = True
+    system_prompt_key = "renpy"
+
+    pipeline_steps = [
+        ("dialogue", "Translate"),
+        ("cleanup", "Clean Up"),
+        ("wordwrap", "Word Wrap"),
+        ("export", "Export"),
+    ]
+
+    @staticmethod
+    def detect(path: str) -> bool:
+        from .renpy import RenPyParser
+        return RenPyParser.is_renpy_project(path)
+
+    def get_export_label(self):
+        return "Export translations to .rpy files"
+
+    def get_wordwrap_label(self):
+        return "Apply word wrap (visual novel lines)"
+
+    def get_export_message(self, count: int) -> str:
+        return (f"Exported {count} translations to .rpy files.\n"
+                f"Original files backed up in game_original/.")
+
+
 # ── Registry ─────────────────────────────────────────────────
 # Detection order matters: more specific engines first (RM2K before MV/MZ)
 
 ENGINE_REGISTRY: list[type[EngineHandler]] = [
+    RenPyHandler,
     TyranoScriptHandler,
     SRPGStudioHandler,
     RPGMakerAceHandler,

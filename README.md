@@ -5,9 +5,10 @@
 <h1 align="center">RPG Maker Translator</h1>
 
 <p align="center">
-Translate RPG Maker MV/MZ/VX Ace, TyranoScript, and SRPG Studio games from Japanese to English.<br>
+Translate RPG Maker MV/MZ/VX Ace/2000/2003, Ren'Py, TyranoScript, and SRPG Studio games using local or cloud LLMs.<br>
 <b>Local LLM</b> (Ollama + Qwen 3.5 — free, private, no content filters) or <b>Cloud API</b> (OpenAI, Gemini, DeepSeek, Anthropic — experimental, pay-per-token).<br>
 Auto-tuned to maximize GPU speed. Pronoun-aware. Glossary-driven. Batch translation with resume.<br>
+Per-engine settings, prompts, and model selection via the Engines tab.<br>
 Designed by a human, coded with <a href="https://claude.ai/code">Claude Code</a>.
 Cloud API engine ported from <a href="https://github.com/dazedanon/DazedMTLTool">DazedMTLTool</a> (MIT).
 </p>
@@ -21,12 +22,14 @@ Cloud API engine ported from <a href="https://github.com/dazedanon/DazedMTLTool"
 
 ## At a Glance
 
-Open a game folder. Hit Batch Translate. Get a playable English translation. Supports RPG Maker MV/MZ/VX Ace, TyranoScript, and SRPG Studio — engine auto-detected on open.
+Open a game folder. Hit Batch Translate. Get a playable translation. Supports 7 engines — auto-detected on open.
 
 | | |
 |---|---|
+| **7 Game Engines** | RPG Maker MV, MZ, VX Ace, 2000/2003, Ren'Py, TyranoScript, SRPG Studio — all auto-detected |
 | **Local LLM (free)** | Ollama + [Qwen 3.5:9b](https://ollama.com/library/qwen3.5) on your GPU — auto-tuned for your hardware, no API keys, no content filters, no account bans. Your data never leaves your PC |
 | **Cloud API (experimental)** | OpenAI, Gemini, DeepSeek, Anthropic — DazedMTL-compatible batch mode with live cost tracking |
+| **Per-engine settings** | Each engine has its own context, batch size, workers, word wrap, model, and system prompt — configurable in the Engines tab |
 | **Pronoun system** | Actor genders, speaker detection, `\N[n]` character mapping — the LLM knows who's "he" and who's "she" |
 | **Glossary-driven** | Two-layer glossary auto-built from translated DB names — "Potion" stays "Potion" everywhere |
 | **Open in RPG Maker** | One-click workspace with directory junctions — edit and playtest translations in RPG Maker's visual editor |
@@ -61,6 +64,7 @@ Open a game folder. Hit Batch Translate. Get a playable English translation. Sup
 - **Auto-retry** — Detects leftover Japanese in output and retries with a stronger prompt.
 - **Auto-save & checkpointing** — Saves every 25 entries during batch. Crash-proof.
 - **Auto-tune** — Tournament-style calibration finds your GPU's optimal batch size automatically. Just hit translate and it figures out the fastest settings.
+- **Per-engine configuration** — Each engine gets its own context window, batch size, workers, word wrap, model override, and system prompt via the Engines tab in Settings. A "Default (All Engines)" row lets non-tinkers set everything at once.
 - **DazedMTL Mode** — One-click toggle: batch 30, 4 workers, DazedMTL prompt. Works with both local Sugoi and cloud APIs.
 - **Open in RPG Maker** — Creates a workspace with directory junctions so you can QA and playtest translations in RPG Maker's visual editor. Auto-detects MV vs MZ.
 - **Cloud cost tracking** — Real-time token count and USD cost during batch translation.
@@ -200,12 +204,16 @@ Project entries override general entries for the same JP term.
 | Prompt Preset | Default / Sugoi | Preset prompt or Custom. Reset Default / Clear buttons |
 | DazedMTL Mode | Off | One-click: batch 30, 4 workers, DazedMTL prompt |
 | Target Language | English | 24 languages with quality ratings |
-| Context window | 3 | Recent dialogue lines as context (higher = better coherence) |
+| Context window | 10 | Recent dialogue lines as context (higher = better coherence) |
 | Workers | 2 | Parallel translation threads (auto-set by provider) |
-| Batch size | 1 | Lines per request (auto-set: 1 local, 30 cloud) |
+| Batch size | 5 | Lines per request (auto-set: 5 local, 30 cloud) |
 | Auto-tune batch size | Off | Tournament calibration tests batch sizes 5-30 and picks the fastest for your GPU |
 | Translation history | 10 | Recent translations sent as assistant messages |
 | Dark mode | On | Catppuccin dark theme |
+
+### Engines Tab
+
+Per-engine overrides for Context, Batch Size, Workers, Word Wrap, and Model. A **Default (All Engines)** row sets values for all engines at once — individual engines can override specific settings. Each engine also has its own system prompt that evolves independently.
 
 ---
 
@@ -218,14 +226,22 @@ Project entries override general entries for the same JP term.
 | RPG Maker MV | .json | Supported |
 | RPG Maker MZ | .json | Supported |
 | RPG Maker VX Ace | .rvdata2 | Supported |
+| RPG Maker 2000/2003 | .ldb, .lmu | Supported |
+| Ren'Py | .rpy | Supported |
 | TyranoScript | .ks | Supported |
 | SRPG Studio | data.dts | Supported |
 
 All engines auto-detect when you open a game folder — no manual configuration needed.
 
-> **TyranoScript** — Auto-extraction from NW.js executables, `[r]`/`[p]`/`[emb]` tag preservation via `«CODE»` placeholders, self-calibrating word wrap from original JP line lengths, VN-specific LLM prompt, and a dedicated post-processor for tag leak cleanup.
+> **RPG Maker MV/MZ** — Separate engine handlers with independent system prompts. Full plugin extraction, speaker detection, namebox handling, face-aware word wrap, and patch zip export.
 
 > **RPG Maker VX Ace** — Parses Ruby Marshal binary files via `rubymarshal`. Full database + event support (actors, items, skills, maps, common events, troops). Same two-stage DB → Dialogue workflow as MV/MZ.
+
+> **RPG Maker 2000/2003** — LCF binary parser for `.ldb` and `.lmu` files. Word wrap at 50 chars/line. EasyRPG Player auto-downloaded on export for locale-free play on non-Japanese Windows.
+
+> **Ren'Py** — Parses `.rpy` script files for dialogue, narration, choices, and character definitions. Preserves `{i}`, `{b}`, `{color=...}` inline tags. Language-agnostic prompt (works for any source language, not just Japanese). Backup to `game_original/`, idempotent re-export.
+
+> **TyranoScript** — Auto-extraction from NW.js executables, `[r]`/`[p]`/`[emb]` tag preservation via `«CODE»` placeholders, self-calibrating word wrap from original JP line lengths, VN-specific LLM prompt, and a dedicated post-processor for tag leak cleanup.
 
 > **SRPG Studio** — Decrypts and parses `data.dts` (AES-128-CBC encrypted, zlib-compressed XML). Translates all text content and exports directly back to the encrypted format.
 
@@ -249,6 +265,7 @@ All engines auto-detect when you open a game folder — no manual configuration 
 | Missing control codes | Right-click > Restore Missing Codes, or they auto-restore at checkpoints |
 | Cloud API errors | Check your API key in Settings. Test Connection button verifies connectivity |
 | Plugin translations break game | Plugin entries are skipped by default. Only unskip display text (menu labels, descriptions) |
+| RM2K game won't launch | Japanese locale issue — use EasyRPG Player (auto-copied on export) or Locale Emulator |
 
 ---
 
@@ -259,6 +276,7 @@ All engines auto-detect when you open a game folder — no manual configuration 
 - **[Ollama](https://ollama.com/)** — Local LLM inference server that makes GPU translation free and private.
 - **[rubymarshal](https://github.com/d9pouces/RubyMarshal)** — Ruby Marshal binary format parser, used for RPG Maker VX Ace `.rvdata2` files.
 - **[pycryptodome](https://www.pycryptodome.org/)** — AES decryption for SRPG Studio `data.dts` files.
+- **[EasyRPG Player](https://easyrpg.org/)** — Open-source RPG Maker 2000/2003 runtime, used for locale-independent play of translated RM2K games.
 
 ---
 
