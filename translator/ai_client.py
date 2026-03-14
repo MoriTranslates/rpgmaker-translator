@@ -311,6 +311,7 @@ _NAME_SYSTEM_PROMPT = (
 # (name, stars, tooltip description)
 TARGET_LANGUAGES = [
     ("English",               "\u2605\u2605\u2605\u2605\u2605", "Best — use Sugoi Ultra 14B for optimal JP→EN quality"),
+    ("Japanese",              "\u2605\u2605\u2605\u2605\u2605", "Excellent — Qwen's strongest CJK language. For EN→JP, CN→JP, KR→JP translation"),
     ("Chinese (Simplified)",  "\u2605\u2605\u2605\u2605\u2605", "Excellent — Qwen's native language, huge JP\u2194CN corpus. Works well on 8b+"),
     ("Chinese (Traditional)", "\u2605\u2605\u2605\u2605\u2606", "Excellent — close to Simplified, strong CJK support. Works well on 8b+"),
     ("Korean",                "\u2605\u2605\u2605\u2605\u2606", "Excellent — strong CJK family, large JP\u2194KR corpus. Works well on 8b+"),
