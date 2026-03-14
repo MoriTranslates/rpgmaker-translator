@@ -523,6 +523,7 @@ _PROMPT_REGISTRY: dict[str, str] = {
     "renpy": RENPY_SYSTEM_PROMPT,
     "wolfrpg": WOLFRPG_SYSTEM_PROMPT,
     "crowd": CROWD_SYSTEM_PROMPT,
+    "kirikiri": TYRANO_SYSTEM_PROMPT,  # KAG/Kirikiri uses same VN prompt as TyranoScript
 }
 
 

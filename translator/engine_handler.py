@@ -342,6 +342,38 @@ class SRPGStudioHandler(EngineHandler):
                 f"Original file backed up as data_original.dts.")
 
 
+# ── Kirikiri / KAG ──────────────────────────────────────────
+
+class KirikiriHandler(EngineHandler):
+    key = "kirikiri"
+    display_name = "Kirikiri"
+    backup_description = "scenario_original/"
+
+    has_speaker_processing = True
+    system_prompt_key = "kirikiri"
+
+    pipeline_steps = [
+        ("dialogue", "Translate"),
+        ("cleanup", "Clean Up"),
+        ("export", "Export"),
+    ]
+
+    @staticmethod
+    def detect(path: str) -> bool:
+        from .kirikiri import KirikiriParser
+        return KirikiriParser.is_kirikiri_project(path)
+
+    def get_export_label(self):
+        return "Export translations to .ks files"
+
+    def get_wordwrap_label(self):
+        return "Apply word wrap (visual novel lines)"
+
+    def get_export_message(self, count: int) -> str:
+        return (f"Exported {count} translations to .ks files.\n"
+                f"Original files backed up in scenario_original/.")
+
+
 # ── Crowd ───────────────────────────────────────────────────
 
 class CrowdHandler(EngineHandler):
@@ -450,8 +482,9 @@ class WolfRPGHandler(EngineHandler):
 
 ENGINE_REGISTRY: list[type[EngineHandler]] = [
     CrowdHandler,        # Crowd engine (.sce files)
+    KirikiriHandler,     # Kirikiri/KAG (.ks + startup.tjs)
     RenPyHandler,
-    TyranoScriptHandler,
+    TyranoScriptHandler,  # Must be after Kirikiri (both use .ks)
     SRPGStudioHandler,
     WolfRPGHandler,
     RPGMakerAceHandler,

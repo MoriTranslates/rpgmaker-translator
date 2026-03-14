@@ -179,11 +179,12 @@ from ..rpgmaker_2k import RPGMaker2KParser
 from ..renpy import RenPyParser
 from ..wolfrpg import WolfRPGParser
 from ..crowd import CrowdParser
+from ..kirikiri import KirikiriParser
 from ..engine_handler import (
     EngineHandler, detect_engine, get_handler_by_key,
     RPGMakerMVHandler, RPGMakerMZHandler, RPGMakerAceHandler,
     RPGMaker2KHandler, TyranoScriptHandler, SRPGStudioHandler,
-    RenPyHandler, WolfRPGHandler, CrowdHandler,
+    RenPyHandler, WolfRPGHandler, CrowdHandler, KirikiriHandler,
 )
 from ..project_model import TranslationProject
 from ..translation_engine import TranslationEngine
@@ -233,6 +234,7 @@ class MainWindow(QMainWindow):
         self.renpy_parser = RenPyParser()
         self.wolf_parser = WolfRPGParser()
         self.crowd_parser = CrowdParser()
+        self.kirikiri_parser = KirikiriParser()
         # Engine handler registry — maps key -> handler with parser
         self._engine_handlers = {
             "rpgmaker_mv": RPGMakerMVHandler(self.parser),
@@ -244,6 +246,7 @@ class MainWindow(QMainWindow):
             "renpy": RenPyHandler(self.renpy_parser),
             "wolfrpg": WolfRPGHandler(self.wolf_parser),
             "crowd": CrowdHandler(self.crowd_parser),
+            "kirikiri": KirikiriHandler(self.kirikiri_parser),
         }
         self.handler: EngineHandler = self._engine_handlers["rpgmaker_mv"]
         self._engine_overrides: dict[str, dict] = {}  # per-engine setting overrides
