@@ -66,6 +66,13 @@ SRPGSTUDIO_STEPS = [
     ("export", "Export"),
 ]
 
+RPGMAKER2K_STEPS = [
+    ("db", "Translate DB"),
+    ("dialogue", "Translate Dialogue"),
+    ("cleanup", "Clean Up"),
+    ("export", "Export"),
+]
+
 # Default for backward compat
 PIPELINE_STEPS = RPGMAKER_STEPS
 
@@ -146,6 +153,8 @@ class PipelineBar(QWidget):
             new_steps = TYRANOSCRIPT_STEPS
         elif engine == "srpgstudio":
             new_steps = SRPGSTUDIO_STEPS
+        elif engine == "rpgmaker_2k":
+            new_steps = RPGMAKER2K_STEPS
         else:
             new_steps = RPGMAKER_STEPS
         if new_steps != self._steps:

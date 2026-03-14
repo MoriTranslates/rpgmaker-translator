@@ -175,6 +175,7 @@ from ..rpgmaker_mv import RPGMakerMVParser
 from ..tyranoscript import TyranoScriptParser
 from ..srpgstudio import SRPGStudioParser
 from ..rpgmaker_ace import RPGMakerAceParser
+from ..rpgmaker_2k import RPGMaker2KParser
 from ..project_model import TranslationProject
 from ..translation_engine import TranslationEngine
 from ..text_processor import PluginAnalyzer, TextProcessor
@@ -204,6 +205,8 @@ class MainWindow(QMainWindow):
         "Actors.rvdata2", "Classes.rvdata2", "Items.rvdata2", "Weapons.rvdata2",
         "Armors.rvdata2", "Skills.rvdata2", "States.rvdata2", "Enemies.rvdata2",
         "System.rvdata2",
+        # RM2K/2K3 — all DB entries are in RPG_RT.ldb
+        "RPG_RT.ldb",
     }
 
     # DB fields whose translated values should be auto-added to glossary
@@ -226,6 +229,8 @@ class MainWindow(QMainWindow):
         "Skills.rvdata2": ("name",),
         "Enemies.rvdata2": ("name",),
         "States.rvdata2": ("name",),
+        # RM2K/2K3
+        "RPG_RT.ldb": ("name", "nickname"),
     }
     # Map displayNames are keyed by Map###.json — matched dynamically
     _AUTO_GLOSSARY_MAP_FIELD = "displayName"
@@ -251,8 +256,9 @@ class MainWindow(QMainWindow):
         self.tyrano_parser = TyranoScriptParser()
         self.srpg_parser = SRPGStudioParser()
         self.ace_parser = RPGMakerAceParser()
+        self.rm2k_parser = RPGMaker2KParser()
         self.project = TranslationProject()
-        self._project_type = "rpgmaker"  # "rpgmaker" | "rpgmaker_ace" | "tyranoscript" | "srpgstudio"
+        self._project_type = "rpgmaker"  # "rpgmaker" | "rpgmaker_ace" | "rpgmaker_2k" | "tyranoscript" | "srpgstudio"
         self.engine = TranslationEngine(self.client)
         self.plugin_analyzer = PluginAnalyzer()
         self.text_processor = TextProcessor(self.plugin_analyzer)
@@ -814,6 +820,7 @@ class MainWindow(QMainWindow):
         is_tyrano = TyranoScriptParser.is_tyranoscript_project(path)
         is_srpg = SRPGStudioParser.is_srpgstudio_project(path)
         is_ace = RPGMakerAceParser.is_ace_project(path)
+        is_2k = RPGMaker2KParser.is_2k_project(path)
         try:
             if is_tyrano:
                 self._project_type = "tyranoscript"
@@ -824,6 +831,9 @@ class MainWindow(QMainWindow):
             elif is_ace:
                 self._project_type = "rpgmaker_ace"
                 entries = self.ace_parser.load_project(path)
+            elif is_2k:
+                self._project_type = "rpgmaker_2k"
+                entries = self.rm2k_parser.load_project(path)
             else:
                 self._project_type = "rpgmaker"
                 entries = self.parser.load_project(path)
@@ -839,6 +849,7 @@ class MainWindow(QMainWindow):
                 "Supported formats:\n"
                 "  - RPG Maker MV/MZ (data/*.json)\n"
                 "  - RPG Maker VX Ace (Data/*.rvdata2)\n"
+                "  - RPG Maker 2000/2003 (RPG_RT.ldb)\n"
                 "  - TyranoScript (data/scenario/*.ks)\n"
                 "  - SRPG Studio (data.dts)",
             )
@@ -852,7 +863,7 @@ class MainWindow(QMainWindow):
         self.event_viewer.set_entries(entries)
 
         # Defer actor gender dialog + pre-translate to first batch start
-        self._actors_ready = is_tyrano or is_srpg  # No actor system in Tyrano/SRPG
+        self._actors_ready = is_tyrano or is_srpg  # No actor system in Tyrano/SRPG; RM2K has actors
 
         # Check for vocab.txt first — if found and accepted, skip default glossary
         vocab_loaded = self._check_vocab_file(path)
@@ -877,7 +888,7 @@ class MainWindow(QMainWindow):
         self._rebuild_glossary()
 
         # RPG Maker MV/MZ-specific: analyze plugins for word wrap settings
-        if not is_tyrano and not is_srpg and not is_ace:
+        if not is_tyrano and not is_srpg and not is_ace and not is_2k:
             self.plugin_analyzer.analyze_project(path)
 
         self._enable_project_actions()
@@ -893,6 +904,12 @@ class MainWindow(QMainWindow):
             self.statusbar.showMessage(
                 f"VX Ace: {len(entries)} entries from "
                 f"{len(set(e.file for e in entries))} .rvdata2 files", 8000
+            )
+        elif is_2k:
+            map_count = sum(1 for e in entries if e.file.lower().endswith('.lmu'))
+            self.statusbar.showMessage(
+                f"RM2K/2K3: {len(entries)} entries from "
+                f"{len(set(e.file for e in entries))} files", 8000
             )
         elif is_tyrano:
             self.statusbar.showMessage(
@@ -924,7 +941,8 @@ class MainWindow(QMainWindow):
         # Window title
         folder = os.path.basename(path)
         engine = {"srpgstudio": "SRPG Studio", "tyranoscript": "TyranoScript",
-                  "rpgmaker_ace": "RPG Maker VX Ace"}.get(self._project_type, "RPG Maker")
+                  "rpgmaker_ace": "RPG Maker VX Ace",
+                  "rpgmaker_2k": "RPG Maker 2000/2003"}.get(self._project_type, "RPG Maker")
         self.setWindowTitle(f"{engine} Translator \u2014 {folder}")
 
         # Offer folder rename for SRPG Studio (no actors to pre-translate)
@@ -933,8 +951,7 @@ class MainWindow(QMainWindow):
 
         # Offer wizard vs manual mode for new projects
         wizard_chosen = False
-        if not is_tyrano and not is_srpg:
-            wizard_chosen = self._show_wizard_choice()
+        wizard_chosen = self._show_wizard_choice()
 
         # Preload model into VRAM (wizard handles its own Ollama calls)
         if not wizard_chosen and not self.client.is_cloud:
@@ -1238,7 +1255,12 @@ class MainWindow(QMainWindow):
             return False
 
         entries = self.project.entries
-        active_parser = self.ace_parser if self._project_type == "rpgmaker_ace" else self.parser
+        if self._project_type == "rpgmaker_ace":
+            active_parser = self.ace_parser
+        elif self._project_type == "rpgmaker_2k":
+            active_parser = self.rm2k_parser
+        else:
+            active_parser = self.parser
         actors_raw = active_parser.load_actors_raw(path)
 
         # Pre-translate game title + actor info so the user can read them
@@ -1297,7 +1319,9 @@ class MainWindow(QMainWindow):
                     protag_gender = "female"
 
                 # Inject JP gender profile into data_original so LLM has context
-                self._inject_protag_profile(path, protag_gender)
+                # (MV/MZ only — writes to Actors.json)
+                if self._project_type not in ("rpgmaker_2k",):
+                    self._inject_protag_profile(path, protag_gender)
 
         # Show gender assignment dialog with translated names
         if actors_raw:
@@ -1658,6 +1682,9 @@ class MainWindow(QMainWindow):
             elif self._project_type == "rpgmaker_ace":
                 if RPGMakerAceParser.is_ace_project(save_dir):
                     self.project.project_path = save_dir
+            elif self._project_type == "rpgmaker_2k":
+                if RPGMaker2KParser.is_2k_project(save_dir):
+                    self.project.project_path = save_dir
             else:
                 if self.parser._find_data_dir(save_dir):
                     self.project.project_path = save_dir
@@ -1677,8 +1704,8 @@ class MainWindow(QMainWindow):
         self._rebuild_glossary()
 
         # Restore actor context from saved genders (RPG Maker MV/MZ and VX Ace)
-        if self._project_type in ("rpgmaker", "rpgmaker_ace") and self.project.actor_genders and self.project.project_path:
-            active_parser = self.ace_parser if self._project_type == "rpgmaker_ace" else self.parser
+        if self._project_type in ("rpgmaker", "rpgmaker_ace", "rpgmaker_2k") and self.project.actor_genders and self.project.project_path:
+            active_parser = {"rpgmaker_ace": self.ace_parser, "rpgmaker_2k": self.rm2k_parser}.get(self._project_type, self.parser)
             actors_raw = active_parser.load_actors_raw(self.project.project_path)
             if actors_raw:
                 self.client.actor_context = self.parser.build_actor_context(
@@ -1692,7 +1719,7 @@ class MainWindow(QMainWindow):
                     self._update_speaker_names(actors_raw, actor_tl)
             self._actors_ready = True
         else:
-            self._actors_ready = self._project_type not in ("rpgmaker", "rpgmaker_ace")
+            self._actors_ready = self._project_type not in ("rpgmaker", "rpgmaker_ace", "rpgmaker_2k")
 
         self._backfill_db_glossary()
         self._last_save_path = path
@@ -2536,7 +2563,7 @@ class MainWindow(QMainWindow):
             return
 
         # Check for unwrapped lines (RPG Maker MV/MZ only — others don't use plugin word wrap)
-        unwrapped = 0 if self._project_type in ("tyranoscript", "srpgstudio", "rpgmaker_ace") else self._check_unwrapped_entries(translated)
+        unwrapped = 0 if self._project_type in ("tyranoscript", "srpgstudio", "rpgmaker_ace", "rpgmaker_2k") else self._check_unwrapped_entries(translated)
         if unwrapped > 0:
             result = QMessageBox.warning(
                 self, "Lines May Overflow",
@@ -2564,6 +2591,7 @@ class MainWindow(QMainWindow):
             "srpgstudio": "data_original.dts",
             "tyranoscript": "scenario_original/",
             "rpgmaker_ace": "Data_original/",
+            "rpgmaker_2k": "RPG_RT_original.ldb + *_original.lmu",
         }.get(self._project_type, "data_original/")
         layout.addWidget(QLabel(
             f"This will overwrite {len(set(e.file for e in translated))} "
@@ -2602,6 +2630,14 @@ class MainWindow(QMainWindow):
                     self, "Export Complete",
                     f"Exported {len(translated)} translations to .rvdata2 files.\n"
                     f"Original files backed up in Data_original/."
+                )
+            elif self._project_type == "rpgmaker_2k":
+                self.rm2k_parser.save_project(
+                    self.project.project_path, self.project.entries)
+                QMessageBox.information(
+                    self, "Export Complete",
+                    f"Exported {len(translated)} translations to LCF files.\n"
+                    f"Original files backed up with _original suffix."
                 )
             elif self._project_type == "tyranoscript":
                 self.tyrano_parser.save_project(
@@ -2668,6 +2704,18 @@ class MainWindow(QMainWindow):
                 )
             except FileNotFoundError as e:
                 QMessageBox.information(self, "No Backup Found", str(e))
+            except Exception as e:
+                QMessageBox.critical(self, "Restore Failed", str(e))
+            return
+
+        # RM2K/2K3: *_original.ldb / *_original.lmu restore
+        if self._project_type == "rpgmaker_2k":
+            try:
+                self.rm2k_parser.restore_originals(self.project.project_path)
+                QMessageBox.information(
+                    self, "Restore Complete",
+                    "Original LCF files restored from _original backups."
+                )
             except Exception as e:
                 QMessageBox.critical(self, "Restore Failed", str(e))
             return
