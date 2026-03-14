@@ -19,6 +19,10 @@ _DB_FILES = {
     "Actors.json", "Classes.json", "Items.json", "Weapons.json",
     "Armors.json", "Skills.json", "States.json", "Enemies.json",
     "System.json", "plugins.js",
+    # Wolf RPG databases
+    "Database/DataBase", "Database/CDataBase", "Database/SysDatabase",
+    # RPG Maker 2000/2003
+    "RPG_RT.ldb",
 }
 
 # Fields that are not part of event dialogue flow

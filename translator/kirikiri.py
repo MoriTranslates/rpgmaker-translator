@@ -17,14 +17,22 @@ File format (.ks):
   - 地 (chi) as chara name — narration (narrator voice)
 
 Project structure:
-  - data/scenario/*.ks — script files
-  - Some games pack everything into .xp3 archives (not yet supported)
+  - data/scenario/*.ks — script files (loose or packed in .xp3 archives)
+
+XP3 archive format:
+  - Magic: XP3\\r\\n \\n\\x1a\\x8bg\\x01 (11 bytes)
+  - Index offset at byte 11 (uint64 LE)
+  - Index may be redirected (flag 0x80) or inline (flag 0x01=compressed, 0x00=raw)
+  - File entries: 'File' chunks containing 'info' (path), 'segm' (data location), 'adlr' (checksum)
+  - File data stored as zlib-compressed segments at offsets within the archive
 """
 
 import logging
 import os
 import re
 import shutil
+import struct
+import zlib
 from pathlib import Path
 
 from .project_model import TranslationEntry
@@ -32,15 +40,19 @@ from . import JAPANESE_RE
 
 log = logging.getLogger(__name__)
 
-# Speaker tag: @name chara="Speaker Name"
+# Speaker tags — two common KAG conventions:
+#   @name chara="Speaker Name"           (KAG3 style)
+#   [cn name="Speaker" voice="..."]      (alternate KAG style)
 _NAME_TAG = re.compile(r'@name\s+chara="([^"]*)"', re.IGNORECASE)
+_CN_TAG = re.compile(r'\[cn\s+name="([^"]*)"', re.IGNORECASE)
 
 # Voice cue: @PV storage="voice_file"
 _VOICE_TAG = re.compile(r'@PV\s+storage="([^"]*)"', re.IGNORECASE)
 
-# End markers
+# End markers — @e / @ve (KAG3) or [en] (alternate)
 _END_UNVOICED = re.compile(r'^@e\s*$', re.IGNORECASE)
 _END_VOICED = re.compile(r'^@ve\s*$', re.IGNORECASE)
+_END_CN = re.compile(r'^\[en\]\s*$', re.IGNORECASE)
 
 # Command line: starts with @ or [
 _COMMAND_LINE = re.compile(r'^[@\[]')
@@ -50,6 +62,181 @@ _LABEL_LINE = re.compile(r'^\*')
 
 # Comment line: starts with ;
 _COMMENT_LINE = re.compile(r'^;')
+
+# ── XP3 archive constants ─────────────────────────────────────
+_XP3_MAGIC = b'XP3\x0D\x0A\x20\x0A\x1A\x8B\x67\x01'
+_XP3_INDEX_CONTINUE = 0x80
+_XP3_INDEX_COMPRESSED = 0x01
+_XP3_INDEX_UNCOMPRESSED = 0x00
+
+
+def is_xp3_file(path: str) -> bool:
+    """Check if a file is an XP3 archive."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(11) == _XP3_MAGIC
+    except Exception:
+        return False
+
+
+def extract_xp3(xp3_path: str, output_dir: str, filter_ext: str | None = None) -> list[str]:
+    """Extract files from an XP3 archive.
+
+    Args:
+        xp3_path: Path to .xp3 file
+        output_dir: Directory to extract into
+        filter_ext: If set, only extract files with this extension (e.g. ".ks")
+
+    Returns:
+        List of extracted file paths (relative to output_dir)
+    """
+    with open(xp3_path, "rb") as f:
+        data = f.read()
+
+    if data[:11] != _XP3_MAGIC:
+        raise ValueError(f"Not an XP3 archive: {xp3_path}")
+
+    # Read index offset
+    index_offset = struct.unpack_from('<Q', data, 11)[0]
+    if not index_offset or index_offset >= len(data):
+        raise ValueError(f"Invalid index offset: {index_offset}")
+
+    # Read index flag
+    flag = data[index_offset]
+
+    if flag == _XP3_INDEX_CONTINUE:
+        # Index is elsewhere: skip 8 bytes, read real offset
+        real_offset = struct.unpack_from('<8xQ', data, index_offset + 1)[0]
+        if real_offset >= len(data):
+            raise ValueError(f"Invalid redirected index offset: {real_offset}")
+        flag = data[real_offset]
+        index_offset = real_offset
+
+    if flag == _XP3_INDEX_COMPRESSED:
+        comp_size, uncomp_size = struct.unpack_from('<QQ', data, index_offset + 1)
+        comp_data = data[index_offset + 17 : index_offset + 17 + comp_size]
+        index_data = zlib.decompress(comp_data)
+        if len(index_data) != uncomp_size:
+            log.warning("XP3 index size mismatch: got %d, expected %d",
+                        len(index_data), uncomp_size)
+    elif flag == _XP3_INDEX_UNCOMPRESSED:
+        uncomp_size = struct.unpack_from('<Q', data, index_offset + 1)[0]
+        index_data = data[index_offset + 9 : index_offset + 9 + uncomp_size]
+    else:
+        raise ValueError(f"Unexpected XP3 index flag: 0x{flag:02x}")
+
+    # Parse file entries from index
+    extracted = []
+    pos = 0
+    while pos < len(index_data):
+        chunk_name = index_data[pos:pos + 4]
+        if chunk_name != b'File':
+            break  # unexpected chunk, stop
+        pos += 4
+        chunk_size = struct.unpack_from('<Q', index_data, pos)[0]
+        pos += 8
+        chunk_end = pos + chunk_size
+
+        # Parse sub-chunks within this File entry
+        file_path = None
+        segments = []
+        while pos < chunk_end:
+            sub_name = index_data[pos:pos + 4]
+            pos += 4
+            sub_size = struct.unpack_from('<Q', index_data, pos)[0]
+            pos += 8
+            sub_start = pos
+
+            if sub_name == b'info':
+                # flags(4) + uncomp_size(8) + comp_size(8) + path_len(2) + path(UTF-16LE) + null(2)
+                _flags = struct.unpack_from('<I', index_data, pos)[0]
+                path_len = struct.unpack_from('<H', index_data, pos + 20)[0]
+                path_bytes = index_data[pos + 22 : pos + 22 + path_len * 2]
+                file_path = path_bytes.decode('utf-16le')
+            elif sub_name == b'segm':
+                num_segments = sub_size // 28
+                for s in range(num_segments):
+                    seg_off = sub_start + s * 28
+                    is_comp = struct.unpack_from('<?', index_data, seg_off)[0]
+                    seg_data_off = struct.unpack_from('<Q', index_data, seg_off + 4)[0]
+                    seg_uncomp = struct.unpack_from('<Q', index_data, seg_off + 12)[0]
+                    seg_comp = struct.unpack_from('<Q', index_data, seg_off + 20)[0]
+                    segments.append((is_comp, seg_data_off, seg_uncomp, seg_comp))
+            # skip adlr, time, etc.
+
+            pos = sub_start + sub_size
+
+        if file_path and segments:
+            # Apply extension filter
+            if filter_ext and not file_path.lower().endswith(filter_ext.lower()):
+                continue
+
+            # Read and decompress file data from all segments
+            file_data = b''
+            for is_comp, seg_off, seg_uncomp, seg_comp in segments:
+                seg_raw = data[seg_off : seg_off + seg_comp]
+                if is_comp:
+                    seg_raw = zlib.decompress(seg_raw)
+                file_data += seg_raw
+
+            # Write to output
+            out_path = os.path.join(output_dir, file_path.replace("/", os.sep))
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path, "wb") as f:
+                f.write(file_data)
+            extracted.append(file_path)
+
+    log.info("Extracted %d files from %s", len(extracted), os.path.basename(xp3_path))
+    return extracted
+
+
+def find_scenario_xp3(project_dir: str) -> str | None:
+    """Find an XP3 archive containing scenario .ks files."""
+    # Look for common naming patterns
+    candidates = []
+    for root, dirs, files in os.walk(project_dir):
+        for f in files:
+            if f.lower().endswith(".xp3"):
+                full = os.path.join(root, f)
+                fl = f.lower()
+                # Prioritize archives with "scenario" in the name
+                if "scenario" in fl:
+                    candidates.insert(0, full)
+                elif "data" == fl.replace(".xp3", ""):
+                    candidates.append(full)
+        # Don't recurse too deep
+        if root != project_dir:
+            dirs.clear()
+
+    # Test each candidate for .ks content
+    for xp3_path in candidates:
+        try:
+            with open(xp3_path, "rb") as f:
+                data = f.read()
+            if data[:11] != _XP3_MAGIC:
+                continue
+            # Quick check: decompress index and look for .ks paths
+            index_offset = struct.unpack_from('<Q', data, 11)[0]
+            flag = data[index_offset]
+            if flag == _XP3_INDEX_CONTINUE:
+                real_offset = struct.unpack_from('<8xQ', data, index_offset + 1)[0]
+                flag = data[real_offset]
+                index_offset = real_offset
+            if flag == _XP3_INDEX_COMPRESSED:
+                comp_size = struct.unpack_from('<Q', data, index_offset + 1)[0]
+                comp_data = data[index_offset + 17 : index_offset + 17 + comp_size]
+                index_data = zlib.decompress(comp_data)
+            elif flag == _XP3_INDEX_UNCOMPRESSED:
+                uncomp_size = struct.unpack_from('<Q', data, index_offset + 1)[0]
+                index_data = data[index_offset + 9 : index_offset + 9 + uncomp_size]
+            else:
+                continue
+            # Check for .ks file paths in the index (UTF-16LE encoded)
+            if b'.\x00k\x00s\x00' in index_data:  # ".ks" in UTF-16LE
+                return xp3_path
+        except Exception:
+            continue
+    return None
 
 
 class KirikiriParser:
@@ -151,30 +338,59 @@ class KirikiriParser:
         log.info("Restored scenario/ from backup")
 
     def get_game_title(self, project_dir: str) -> str:
-        """Try to extract game title from startup.tjs or folder name."""
-        # Check startup.tjs for title
-        for data_dir in [
-            os.path.join(project_dir, "data"),
-            project_dir,
-        ]:
-            startup = os.path.join(data_dir, "startup.tjs")
-            if os.path.exists(startup):
-                try:
-                    text = self._read_file(startup)
-                    # Look for ;System.title = "..." or System.title = "..."
-                    m = re.search(r'System\.title\s*=\s*"([^"]+)"', text)
-                    if m:
-                        return m.group(1)
-                except Exception:
-                    pass
+        """Try to extract game title from startup.tjs/Config.tjs or folder name."""
+        title = self._find_title_in_dir(project_dir)
+        if title:
+            return title
+
+        # Check inside XP3 archives for title-setting .tjs files
+        import tempfile
+        for xp3_name in ["data.xp3", "data_system.xp3", "data_sys.xp3"]:
+            xp3_path = os.path.join(project_dir, xp3_name)
+            if not os.path.exists(xp3_path) or not is_xp3_file(xp3_path):
+                continue
+            try:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    extract_xp3(xp3_path, tmpdir, filter_ext=".tjs")
+                    title = self._find_title_in_dir(tmpdir)
+                    if title:
+                        return title
+            except Exception:
+                continue
+
         return os.path.basename(project_dir)
+
+    def _find_title_in_dir(self, search_dir: str) -> str | None:
+        """Search .tjs files in a directory for System.title assignment."""
+        for root, _dirs, files in os.walk(search_dir):
+            for fname in files:
+                if not fname.lower().endswith(".tjs"):
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    text = self._read_file(fpath)
+                    # Match uncommented System.title = "..." (skip lines starting with //)
+                    for line in text.split("\n"):
+                        stripped = line.strip()
+                        if stripped.startswith("//"):
+                            continue
+                        m = re.search(r'System\.title\s*=\s*"([^"]+)"', stripped)
+                        if m:
+                            title = m.group(1)
+                            # Skip generic engine titles
+                            if "adv game" not in title.lower():
+                                return title
+                except Exception:
+                    continue
+        return None
 
     @staticmethod
     def is_kirikiri_project(path: str) -> bool:
         """Check if path is a Kirikiri/KAG project.
 
         Looks for data/scenario/*.ks with @name chara= tags (KAG style),
-        or a startup.tjs file (Kirikiri engine marker).
+        a startup.tjs file (Kirikiri engine marker), or XP3 archives
+        containing .ks scenario files.
         """
         if not os.path.isdir(path):
             return False
@@ -193,17 +409,24 @@ class KirikiriParser:
                         with open(ks_path, "rb") as f:
                             head = f.read(4096)
                         text = head.decode("cp932", errors="replace")
-                        if "@name " in text.lower() and "chara=" in text.lower():
+                        text_lower = text.lower()
+                        # KAG3: @name chara=  |  Alternate: [cn name=
+                        if (("@name " in text_lower and "chara=" in text_lower) or
+                                ("[cn " in text_lower and "name=" in text_lower)):
                             return True
                     except Exception:
                         continue
+
+        # Check for XP3 archives containing scenario .ks files
+        if find_scenario_xp3(path):
+            return True
 
         return False
 
     # ── Private helpers ─────────────────────────────────────
 
     def _find_scenario_dir(self, project_dir: str) -> str | None:
-        """Find the data/scenario/ directory."""
+        """Find the data/scenario/ directory, extracting from XP3 if needed."""
         candidates = [
             os.path.join(project_dir, "data", "scenario"),
             os.path.join(project_dir, "scenario"),
@@ -211,6 +434,16 @@ class KirikiriParser:
         for d in candidates:
             if os.path.isdir(d):
                 return d
+
+        # No loose scenario dir — try extracting from XP3
+        xp3_path = find_scenario_xp3(project_dir)
+        if xp3_path:
+            extract_dir = os.path.join(project_dir, "data", "scenario")
+            log.info("Extracting scenario files from %s", os.path.basename(xp3_path))
+            extracted = extract_xp3(xp3_path, extract_dir, filter_ext=".ks")
+            if extracted:
+                return extract_dir
+
         return None
 
     def _detect_encoding(self, path: str) -> str:
@@ -251,28 +484,37 @@ class KirikiriParser:
                 i += 1
                 continue
 
-            # Look for @name chara="..." to start a dialogue block
+            # Look for speaker tag: @name chara="..." or [cn name="..."]
             name_m = _NAME_TAG.search(stripped)
-            if name_m:
-                speaker = name_m.group(1)
+            cn_m = _CN_TAG.search(stripped) if not name_m else None
+            if name_m or cn_m:
+                speaker = (name_m or cn_m).group(1)
+                # Strip fullwidth spaces from speaker name (e.g. "栄　太" → "栄太")
+                speaker = speaker.replace("\u3000", "")
                 text_start = i + 1
                 text_lines = []
+                is_cn_format = cn_m is not None
 
-                # Collect text lines until @e, @ve, or next command
+                # Collect text lines until end marker or next command
                 j = text_start
                 while j < len(lines):
                     tline = lines[j].rstrip()
                     tstripped = tline.strip()
 
                     if not tstripped:
-                        # Blank line might be intentional spacing
                         j += 1
                         continue
 
-                    if (_END_UNVOICED.match(tstripped) or
-                            _END_VOICED.match(tstripped)):
-                        j += 1  # consume the @e/@ve
-                        break
+                    # Check end markers
+                    if is_cn_format:
+                        if _END_CN.match(tstripped):
+                            j += 1  # consume [en]
+                            break
+                    else:
+                        if (_END_UNVOICED.match(tstripped) or
+                                _END_VOICED.match(tstripped)):
+                            j += 1  # consume @e/@ve
+                            break
 
                     if (_COMMAND_LINE.match(tstripped) or
                             _LABEL_LINE.match(tstripped) or
@@ -287,7 +529,8 @@ class KirikiriParser:
                     full_text = "\n".join(text_lines)
 
                     # Determine field type
-                    if speaker == "地":
+                    # 地 = narration, ト書き = stage directions (both = no speaker)
+                    if speaker in ("地", "ト書き"):
                         field = "narration"
                         display_speaker = ""
                     else:

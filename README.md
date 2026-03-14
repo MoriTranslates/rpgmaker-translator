@@ -26,7 +26,7 @@ Open a game folder. Hit Batch Translate. Get a playable translation. Supports 9 
 
 | | |
 |---|---|
-| **9 Game Engines** | RPG Maker MV, MZ, VX Ace, 2000/2003, Ren'Py, TyranoScript, SRPG Studio, Kirikiri, Crowd — all auto-detected |
+|1
 | **Local LLM (free)** | Ollama + [Qwen 3.5:9b](https://ollama.com/library/qwen3.5) on your GPU — auto-tuned for your hardware, no API keys, no content filters, no account bans. Your data never leaves your PC |
 | **Cloud API (experimental)** | OpenAI, Gemini, DeepSeek, Anthropic — DazedMTL-compatible batch mode with live cost tracking |
 | **Per-engine settings** | Each engine has its own context, batch size, workers, word wrap, model, and system prompt — configurable in the Engines tab |
@@ -230,7 +230,7 @@ Per-engine overrides for Context, Batch Size, Workers, Word Wrap, and Model. A *
 | Ren'Py | .rpy | Supported |
 | TyranoScript | .ks | Supported |
 | SRPG Studio | data.dts | Supported |
-| Kirikiri | .ks (KAG) | Supported |
+| Kirikiri | .ks (KAG) + .xp3 archives | Supported |
 | Crowd | .sce | Supported |
 
 All engines auto-detect when you open a game folder — no manual configuration needed.
@@ -247,7 +247,7 @@ All engines auto-detect when you open a game folder — no manual configuration 
 
 > **SRPG Studio** — Decrypts and parses `data.dts` (AES-128-CBC encrypted, zlib-compressed XML). Translates all text content and exports directly back to the encrypted format.
 
-> **Kirikiri** — Parses KAG3 script files (`@name chara=` speaker tags, `@e`/`@ve` end markers, multi-line dialogue blocks). Auto-detected via `startup.tjs` engine marker. Shares the visual novel LLM prompt with TyranoScript. Backup to `scenario_original/`, idempotent re-export.
+> **Kirikiri** — Parses KAG3 script files in both `@name chara=`/`@e` and `[cn name=]`/`[en]` dialogue formats. Built-in XP3 archive extraction — packed games are auto-extracted on open, no external tools needed. Auto-detected via `startup.tjs` engine marker or `[cn name=` tags. Shares the visual novel LLM prompt with TyranoScript. Backup to `scenario_original/`, idempotent re-export.
 
 > **Crowd** — Reverse-engineered XOR cipher for `.sce` encrypted script files (X-Change series, late 1990s–2000s). Auto-extracts the decryption key from the game exe — no manual configuration. Parses dialogue with 62+ speakers, narration, scene titles, and sound effects. Backup to `sce_original/`, idempotent re-export with re-encryption.
 

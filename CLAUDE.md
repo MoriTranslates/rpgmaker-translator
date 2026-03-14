@@ -309,10 +309,11 @@ All pushed to master. Recent commits (newest first):
 - [ ] VX Ace (.rvdata2), XP (.rxdata), VX (.rvdata) support via `rubymarshal`
 
 ### Priority 6 — Multi-Engine Support (Low Priority, Reference: DazedMTLTool MIT)
-- [ ] Ren'Py (.rpy) — text-based, large visual novel user base
-- [ ] Wolf RPG (.dat) — binary format, DazedMTL parser valuable as reference
-- [ ] Tyrano Script (.ks) — text-based, straightforward parsing
-- [ ] Kirikiri (.scn) — visual novel engine
+- [x] Ren'Py (.rpy) — text-based, large visual novel user base
+- [x] Wolf RPG (.dat) — binary format, DazedMTL parser valuable as reference
+- [x] Tyrano Script (.ks) — text-based, straightforward parsing
+- [x] Kirikiri (.ks + .xp3) — KAG3 visual novel engine with built-in XP3 archive extraction
+- [x] Crowd (.sce) — XOR-encrypted script files, auto-key extraction from exe
 
 ### Completed / Superseded
 - [x] Translation memory within batch (auto-fills duplicate strings before batch translate)
