@@ -63,6 +63,17 @@ _LABEL_LINE = re.compile(r'^\*')
 # Comment line: starts with ;
 _COMMENT_LINE = re.compile(r'^;')
 
+# Inline formatting tags that are part of dialogue text, not standalone commands
+_INLINE_TAGS = re.compile(
+    r'^\[(ruby|/ruby|font|/font|style|/style|b|/b|i|/i|u|/u|r|l|heart|'
+    r'graph|emb|ch|line|resetfont|resetstyle)\b', re.IGNORECASE
+)
+
+
+def _is_inline_tag(line: str) -> bool:
+    """Check if a [tag] line is an inline formatting tag (part of text)."""
+    return bool(_INLINE_TAGS.match(line))
+
 # ── XP3 archive constants ─────────────────────────────────────
 _XP3_MAGIC = b'XP3\x0D\x0A\x20\x0A\x1A\x8B\x67\x01'
 _XP3_INDEX_CONTINUE = 0x80
@@ -174,7 +185,8 @@ def extract_xp3(xp3_path: str, output_dir: str, filter_ext: str | None = None) -
             # Read and decompress file data from all segments
             file_data = b''
             for is_comp, seg_off, seg_uncomp, seg_comp in segments:
-                seg_raw = data[seg_off : seg_off + seg_comp]
+                read_size = seg_comp if is_comp else seg_uncomp
+                seg_raw = data[seg_off : seg_off + read_size]
                 if is_comp:
                     seg_raw = zlib.decompress(seg_raw)
                 file_data += seg_raw
@@ -315,8 +327,13 @@ class KirikiriParser:
             translated_lines = self._apply_translations(lines, trans_map)
             translated_content = "\n".join(translated_lines)
 
-            # Detect encoding from source
+            # Detect encoding from source; upgrade to UTF-8 if translations
+            # contain characters outside the source encoding (e.g. cp932)
             encoding = self._detect_encoding(source)
+            try:
+                translated_content.encode(encoding)
+            except (UnicodeEncodeError, LookupError):
+                encoding = "utf-8"
             os.makedirs(os.path.dirname(live_path), exist_ok=True)
             with open(live_path, "w", encoding=encoding, errors="replace") as f:
                 f.write(translated_content)
@@ -345,10 +362,14 @@ class KirikiriParser:
             return title
 
         # Check inside XP3 archives for title-setting .tjs files
+        # Skip archives > 50MB to avoid loading huge asset packs into memory
         import tempfile
+        _MAX_XP3_TITLE_SIZE = 50 * 1024 * 1024
         for xp3_name in ["data.xp3", "data_system.xp3", "data_sys.xp3"]:
             xp3_path = os.path.join(project_dir, xp3_name)
             if not os.path.exists(xp3_path) or not is_xp3_file(xp3_path):
+                continue
+            if os.path.getsize(xp3_path) > _MAX_XP3_TITLE_SIZE:
                 continue
             try:
                 with tempfile.TemporaryDirectory() as tmpdir:
@@ -485,19 +506,24 @@ class KirikiriParser:
                 i += 1
                 continue
 
+            # Skip comment lines
+            if _COMMENT_LINE.match(stripped):
+                i += 1
+                continue
+
             # Look for speaker tag: @name chara="..." or [cn name="..."]
-            name_m = _NAME_TAG.search(stripped)
-            cn_m = _CN_TAG.search(stripped) if not name_m else None
+            name_m = _NAME_TAG.match(stripped)
+            cn_m = _CN_TAG.match(stripped) if not name_m else None
             if name_m or cn_m:
                 speaker = (name_m or cn_m).group(1)
                 # Strip fullwidth spaces from speaker name (e.g. "栄　太" → "栄太")
                 speaker = speaker.replace("\u3000", "")
-                text_start = i + 1
+                first_text_line = -1
                 text_lines = []
                 is_cn_format = cn_m is not None
 
                 # Collect text lines until end marker or next command
-                j = text_start
+                j = i + 1
                 while j < len(lines):
                     tline = lines[j].rstrip()
                     tstripped = tline.strip()
@@ -517,11 +543,16 @@ class KirikiriParser:
                             j += 1  # consume @e/@ve
                             break
 
-                    if (_COMMAND_LINE.match(tstripped) or
-                            _LABEL_LINE.match(tstripped) or
-                            _COMMENT_LINE.match(tstripped)):
-                        break  # hit a command, don't consume it
+                    # Check for commands — but skip inline formatting tags
+                    if _LABEL_LINE.match(tstripped) or _COMMENT_LINE.match(tstripped):
+                        break
+                    if _COMMAND_LINE.match(tstripped):
+                        # Inline tags like [ruby], [font], [style] are part of text
+                        if not _is_inline_tag(tstripped):
+                            break
 
+                    if first_text_line < 0:
+                        first_text_line = j
                     text_lines.append(tline)
                     j += 1
 
@@ -540,7 +571,7 @@ class KirikiriParser:
 
                     # Only include entries with translatable text
                     if JAPANESE_RE.search(full_text) or self._has_translatable_text(full_text):
-                        entry_id = f"{rel_path}/{field}/{text_start}"
+                        entry_id = f"{rel_path}/{field}/{first_text_line}"
 
                         # Build context
                         ctx_parts = []
@@ -590,6 +621,11 @@ class KirikiriParser:
         for line_num in sorted(trans_map.keys(), reverse=True):
             entry = trans_map[line_num]
             if not entry.translation:
+                continue
+
+            # Bounds check
+            if line_num >= len(result):
+                log.warning("Line %d out of range for %s", line_num, entry.file)
                 continue
 
             # Find the extent of the original text block
