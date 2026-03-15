@@ -478,6 +478,13 @@ class CrowdParser:
             # Re-insert the delimiter
             result_parts.append(f"  {line_num} ")
 
+            # Apply scene title FIRST (SS "title" must be replaced before
+            # narration, since both share the same line and narration fallback
+            # could clobber the SS syntax)
+            scene_entry = trans_map.get(("scene_title", line_num))
+            if scene_entry and scene_entry.translation:
+                content = self._apply_scene_title_translation(content, scene_entry)
+
             # Apply dialogue/narration/sound_effect translations
             for field in ("dialogue", "narration", "sound_effect"):
                 entry = trans_map.get((field, line_num))
@@ -485,47 +492,116 @@ class CrowdParser:
                     content = self._apply_translation(content, entry)
                     break
 
-            # Apply scene title translations (independent of dialogue)
-            scene_entry = trans_map.get(("scene_title", line_num))
-            if scene_entry and scene_entry.translation:
-                content = self._apply_scene_title_translation(content, scene_entry)
-
             result_parts.append(content)
 
         return "".join(result_parts)
 
+    # Crowd engine commands with their specific argument patterns.
+    # Each command has a known argument format — avoids eating English words.
+    _CMD_STRIP_RE = re.compile(
+        r'CB\s+H-\d+'
+        r'|CF\s+[\d]+-[\d]+'
+        r'|CMA\s+[\w]+(?:\s+[\w]+)*\s+\d+'
+        r'|CFILL\s+\d+\s+\d+\s+\d+'
+        r'|RECS?\s+\d+'
+        r'|MPAUSE\b'
+        r'|MP\s+\d+'
+        r'|MM\b'
+        r'|SD\s+\d+'
+        r'|SR\s+\d+'
+        r'|V\s+\d+'
+        r'|G\s+[\d\-]+'
+        r'|GS\s+[\d\-]+'
+        r'|RT\b'
+        r'|SP\b'
+        r'|EOF\b'
+        r'|SS\s+"[^"]*"'
+        r'|SELECT_\w+'
+        r'|END_\w+'
+    )
+
+    @staticmethod
+    def _sanitize_translation(text: str) -> str:
+        """Sanitize a translation for safe insertion into a Crowd .sce file.
+
+        - Strip engine commands the LLM copies from context
+        - Strip LLM-produced @!Speaker@n patterns (engine control codes)
+        - Strip $ section $ markers
+        - Ensure double quotes are paired (unmatched " breaks the parser)
+        - Replace non-cp932 characters with safe equivalents
+        """
+        # Strip @!Speaker@n / @!Speaker\n patterns the LLM copies from context
+        text = re.sub(r'@![^\n@]+(?:@n|\n)', '', text)
+        # Strip $ section $ markers
+        text = re.sub(r'\$\s*\S+\s*\$?\s*', '', text)
+        # Strip # comment/select tokens
+        text = re.sub(r'#\s*\S+', '', text)
+        # Strip SS "title" / SS 'title' commands (LLM copies from context)
+        text = re.sub(r'SS\s+"[^"]*"', '', text)
+        text = re.sub(r"SS\s+'[^']*'", '', text)
+        # Strip malformed SS commands (LLM mangles the format, e.g. SS Name"title")
+        text = re.sub(r'SS\s+\w+"[^"]*"', '', text)
+        # Strip engine commands (CB, CF, CMA, V, MP, etc. with arguments)
+        text = CrowdParser._CMD_STRIP_RE.sub('', text)
+        # Strip * (choice separator in SELECT commands)
+        text = re.sub(r'\s*\*\s*', ' ', text)
+        # Double quotes are reserved for SS "title" syntax in Crowd engine.
+        # Any " in translations risks breaking the parser — replace with single quotes.
+        text = text.replace('"', "'")
+        # Replace non-cp932 characters with safe equivalents
+        text = text.replace('\u2014', '--')   # em dash
+        text = text.replace('\u2013', '-')    # en dash
+        text = text.replace('\u00b7', '.')    # middle dot
+        text = text.replace('\u2026', '...')  # horizontal ellipsis
+        text = text.replace('\u2018', "'")    # left single quote
+        text = text.replace('\u2019', "'")    # right single quote
+        text = text.replace('\u201c', '"')    # left double quote
+        text = text.replace('\u201d', '"')    # right double quote
+        # Catch any remaining non-cp932 characters
+        try:
+            text.encode('cp932')
+        except UnicodeEncodeError:
+            text = text.encode('cp932', errors='replace').decode('cp932')
+        # Collapse multiple spaces from stripped content
+        text = re.sub(r'  +', ' ', text)
+        return text.strip()
+
     def _apply_translation(self, content: str, entry: TranslationEntry) -> str:
         """Replace the Japanese text in content with the translation."""
-        translation = entry.translation
+        # Skip SELECT command lines — these have structural SP "choice" * "choice"
+        # syntax that must not be modified
+        if 'SP "' in content and '" * "' in content:
+            return content
+
+        translation = self._sanitize_translation(entry.translation)
 
         # Convert newlines back to @n for the game engine
         translation = translation.replace('\n', '@n')
 
-        speaker = entry.namebox
+        # 1. Voice + speaker: w000001a@!Speaker@n text
+        voice_m = _VOICE_SPEAKER.search(content)
+        if voice_m:
+            prefix = content[:voice_m.end()]
+            return prefix + translation
 
-        if speaker:
-            # Find the speaker tag and replace text after it
-            # Pattern: (voice@!Speaker@n)(text) or (@!Speaker@n)(text)
-            voice_m = _VOICE_SPEAKER.search(content)
-            bare_m = _BARE_SPEAKER.search(content) if not voice_m else None
+        # 2. Bare speaker (no voice): @!Speaker@n text (may appear after commands)
+        bare_m = re.search(r'@!.+?@n', content)
+        if bare_m:
+            prefix = content[:bare_m.end()]
+            return prefix + translation
 
-            if voice_m:
-                prefix = content[:voice_m.end()]
-                return prefix + translation
-            elif bare_m:
-                prefix = content[:bare_m.end()]
-                return prefix + translation
+        # 3. Sound effect: wse00001@? text
+        se_m = _SOUND_EFFECT.search(content)
+        if se_m:
+            prefix = content[:se_m.end()]
+            return prefix + translation
 
-        # For narration/SE — replace the Japanese text portion
-        # Find where the text starts (after commands) and replace
+        # 4. Narration — replace the Japanese text portion (after commands)
         stripped = self._strip_commands(content)
-        if stripped:
-            # Find the original text position in content and replace
-            original_display = _LINE_BREAK.sub('\n', stripped).strip()
-            if original_display == entry.original:
-                idx = content.find(stripped.strip())
-                if idx >= 0:
-                    return content[:idx] + translation
+        if stripped and stripped.strip():
+            idx = content.find(stripped.strip())
+            if idx >= 0:
+                return content[:idx] + translation
 
         # Fallback: try to replace the original text directly
         original_with_breaks = entry.original.replace('\n', '@n')
@@ -537,9 +613,12 @@ class CrowdParser:
     def _apply_scene_title_translation(self, content: str, entry: TranslationEntry) -> str:
         """Replace SS "original" with SS "translation" in content."""
         if entry.original and entry.translation:
+            title = self._sanitize_translation(entry.translation)
+            # Scene titles must not contain double quotes (breaks SS "title" syntax)
+            title = title.replace('"', "'")
             return content.replace(
                 f'SS "{entry.original}"',
-                f'SS "{entry.translation}"',
+                f'SS "{title}"',
                 1,
             )
         return content
