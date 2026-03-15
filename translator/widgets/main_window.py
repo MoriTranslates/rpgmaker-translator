@@ -13,9 +13,9 @@ log = logging.getLogger(__name__)
 
 from PyQt6.QtWidgets import (
     QMainWindow, QSplitter, QToolBar, QStatusBar, QProgressBar,
-    QFileDialog, QMessageBox, QLabel, QWidget, QVBoxLayout, QApplication,
-    QProgressDialog, QMenu, QInputDialog, QDialog, QTabWidget, QCheckBox,
-    QDialogButtonBox,
+    QFileDialog, QMessageBox, QLabel, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QProgressDialog, QMenu, QInputDialog, QDialog, QTabWidget,
+    QCheckBox, QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtGui import QAction, QPalette, QColor
@@ -1302,7 +1302,8 @@ class MainWindow(QMainWindow):
             else:
                 genders = {a["id"]: a["auto_gender"] for a in actors_raw
                            if a["auto_gender"] != "unknown"}
-            actor_ctx = self.parser.build_actor_context(actors_raw, genders)
+            _ctx_parser = self.handler.parser if hasattr(self.handler.parser, 'build_actor_context') else self.parser
+            actor_ctx = _ctx_parser.build_actor_context(actors_raw, genders)
             self.client.actor_context = actor_ctx
             self.client.actor_genders = genders
             self.client.actor_names = {a["id"]: a["name"] for a in actors_raw}
@@ -1316,7 +1317,7 @@ class MainWindow(QMainWindow):
         self._rebuild_glossary()
 
         # Update speaker contexts: replace JP actor names with EN translations
-        if self.parser.speaker_processing:
+        if self.handler.has_speaker_processing:
             self._update_speaker_names(actors_raw, actor_translations)
 
         # Offer to rename folder to English title (only on first run)
@@ -1663,13 +1664,14 @@ class MainWindow(QMainWindow):
         if self.handler.has_actors and self.project.actor_genders and self.project.project_path:
             actors_raw = self.handler.load_actors(self.project.project_path)
             if actors_raw:
-                self.client.actor_context = self.parser.build_actor_context(
+                _ctx_parser = self.handler.parser if hasattr(self.handler.parser, 'build_actor_context') else self.parser
+                self.client.actor_context = _ctx_parser.build_actor_context(
                     actors_raw, self.project.actor_genders
                 )
                 self.client.actor_genders = self.project.actor_genders
                 self.client.actor_names = {a["id"]: a["name"] for a in actors_raw}
                 # Update speaker contexts with translated actor names
-                if self.parser.speaker_processing:
+                if self.handler.has_speaker_processing:
                     actor_tl = self._actor_translations_from_entries(actors_raw)
                     self._update_speaker_names(actors_raw, actor_tl)
             self._actors_ready = True
@@ -1789,10 +1791,10 @@ class MainWindow(QMainWindow):
 
         # Context size
         ctx = overrides.get("context_size", handler.default_context_size)
-        if self.parser:
-            self.parser.context_size = ctx
+        if handler.parser:
+            handler.parser.context_size = ctx
         for h in self._engine_handlers.values():
-            if h.parser and h.parser is not self.parser:
+            if h.parser and h.parser is not handler.parser:
                 # Also set on alternate parsers for consistency
                 if hasattr(h.parser, 'context_size'):
                     h.parser.context_size = ctx
@@ -1822,8 +1824,8 @@ class MainWindow(QMainWindow):
         """Save current settings as per-engine overrides for the active engine."""
         engine_key = self._project_type
         overrides = {}
-        if self.parser:
-            overrides["context_size"] = self.parser.context_size
+        if self.handler.parser:
+            overrides["context_size"] = self.handler.parser.context_size
         if self.engine:
             overrides["batch_size"] = self.engine.batch_size
             overrides["workers"] = self.engine.num_workers
@@ -2556,7 +2558,7 @@ class MainWindow(QMainWindow):
         max_chars = self.plugin_analyzer.chars_per_line
         count = 0
         for entry in translated:
-            if entry.field not in ("dialog", "scroll_text"):
+            if entry.field not in ("dialog", "dialogue", "scroll_text"):
                 continue
             for line in entry.translation.split("\n"):
                 vis_len = self.text_processor._visual_length(line)
@@ -3508,7 +3510,7 @@ class MainWindow(QMainWindow):
 
         for entry in untranslated:
             # Only dialogue/scroll/choice entries have speaker context
-            if entry.field not in ("dialog", "scroll_text", "choice"):
+            if entry.field not in ("dialog", "dialogue", "scroll_text", "choice"):
                 non_dialog.append(entry)
                 continue
 
