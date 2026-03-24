@@ -3567,6 +3567,10 @@ class MainWindow(QMainWindow):
         dialogue without glossary terms may produce inconsistent names.
         """
         # Check if any DB names have been glossary'd
+        # Skip this check for engines without DB/dialogue split
+        if not self.handler.db_files:
+            self._start_batch(mode="dialogue")
+            return
         db_glossary_count = sum(
             1 for e in self.project.entries
             if e.file in self.handler.db_files

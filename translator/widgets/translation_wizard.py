@@ -6,6 +6,7 @@ Retranslate broken → Word wrap → Export → Patch zip.
 """
 
 import logging
+import re
 from enum import Enum, auto
 
 from PyQt6.QtCore import Qt, QTimer
@@ -179,10 +180,19 @@ class TranslationWizard(QDialog):
         self.cb_cleanup.setChecked(True)
         self.cb_export.setChecked(True)
 
-        for cb in [self.cb_db, self.cb_dialogue, self.cb_cleanup,
+        all_cbs = [self.cb_db, self.cb_dialogue, self.cb_cleanup,
                     self.cb_retranslate, self.cb_wordwrap, self.cb_export,
-                    self.cb_patch]:
+                    self.cb_patch]
+        for cb in all_cbs:
             steps_layout.addWidget(cb)
+
+        # Renumber visible steps dynamically
+        step_num = 1
+        for cb in all_cbs:
+            if cb.isVisible():
+                txt = re.sub(r'^\d+\.\s*', '', cb.text())
+                cb.setText(f'{step_num}. {txt}')
+                step_num += 1
 
         layout.addWidget(steps_group)
 
