@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -116,7 +117,12 @@ class TranslationWizard(QDialog):
         self.cb_dialogue = QCheckBox("2. Translate dialogue and events")
         self.cb_cleanup = QCheckBox("3. Clean up artifacts (spacing, codes, capitalization)")
         self.cb_retranslate = QCheckBox("4. Retranslate broken entries")
-        self.cb_wordwrap = QCheckBox("5. Apply word wrap for message windows")
+        self.cb_wordwrap = QCheckBox("5. Apply word wrap")
+        self.ww_spin = QSpinBox()
+        self.ww_spin.setRange(0, 200)
+        self.ww_spin.setSpecialValueText("Auto")
+        self.ww_spin.setToolTip("Characters per line (0 = auto-detect)")
+        self.ww_spin.setFixedWidth(80)
         self.cb_export = QCheckBox("6. Export translations to game files")
         self.cb_patch = QCheckBox("7. Create translation patch zip")
 
@@ -162,14 +168,19 @@ class TranslationWizard(QDialog):
         if export_label:
             self.cb_export.setText(export_label)
 
-        # Word wrap
+        # Word wrap — set spinner value from plugin analyzer
+        plugin_analyzer = getattr(self.mw, 'plugin_analyzer', None)
         if has_wordwrap:
-            ww_label = handler.get_wordwrap_label()
-            if ww_label:
-                self.cb_wordwrap.setText(ww_label)
+            if plugin_analyzer:
+                manual = getattr(plugin_analyzer, '_manual_chars_per_line', 0)
+                self.ww_spin.setValue(manual)
+                if manual == 0:
+                    auto_val = getattr(plugin_analyzer, 'chars_per_line', 50)
+                    self.ww_spin.setSuffix(f" (auto: {auto_val})")
             self.cb_wordwrap.setChecked(True)
         else:
             self.cb_wordwrap.setVisible(False)
+            self.ww_spin.setVisible(False)
 
         # Patch zip
         if not has_patch_zip:
@@ -184,7 +195,16 @@ class TranslationWizard(QDialog):
                     self.cb_retranslate, self.cb_wordwrap, self.cb_export,
                     self.cb_patch]
         for cb in all_cbs:
-            steps_layout.addWidget(cb)
+            if cb is self.cb_wordwrap:
+                # Word wrap row: checkbox + chars/line spinner
+                ww_row = QHBoxLayout()
+                ww_row.addWidget(cb)
+                ww_row.addWidget(QLabel("chars/line:"))
+                ww_row.addWidget(self.ww_spin)
+                ww_row.addStretch()
+                steps_layout.addLayout(ww_row)
+            else:
+                steps_layout.addWidget(cb)
 
         # Renumber visible steps dynamically
         step_num = 1
@@ -538,6 +558,14 @@ class TranslationWizard(QDialog):
 
     def _run_wordwrap(self):
         """Apply word wrap (synchronous)."""
+        # Apply the wizard's chars/line setting to the plugin analyzer
+        manual = self.ww_spin.value()
+        analyzer = getattr(self.mw, 'plugin_analyzer', None)
+        if analyzer:
+            analyzer._manual_chars_per_line = manual
+            if manual > 0:
+                analyzer.chars_per_line = manual
+
         ptype = getattr(self.mw, '_project_type', '')
 
         if ptype == 'srpgstudio':

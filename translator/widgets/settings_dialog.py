@@ -379,7 +379,7 @@ class SettingsDialog(QDialog):
         vbox.addWidget(info)
 
         # Columns: Engine | Context | Batch | Workers | Wrap | Model
-        headers = ["Engine", "Context", "Batch", "Workers", "Wrap", "Model"]
+        headers = ["Engine", "Context", "Batch", "Workers", "Model"]
         engines = list(self.engine_handlers.values())
         # +1 row for the "Default" row at top
         num_rows = 1 + len(engines)
@@ -434,21 +434,13 @@ class SettingsDialog(QDialog):
         self._default_workers.valueChanged.connect(self._on_default_changed)
         self.engine_table.setCellWidget(0, 3, self._default_workers)
 
-        self._default_ww = QSpinBox()
-        self._default_ww.setRange(0, 200)
-        self._default_ww.setSpecialValueText("Auto")
-        self._default_ww.setValue(0)
-        self._default_ww.setToolTip("Default wordwrap for all engines")
-        self._default_ww.valueChanged.connect(self._on_default_changed)
-        self.engine_table.setCellWidget(0, 4, self._default_ww)
-
         # No model combo for default row — model is always per-engine or global
         default_model_label = QLabel("  (set per engine)")
         default_model_label.setStyleSheet("color: #6c7086;")
-        self.engine_table.setCellWidget(0, 5, default_model_label)
+        self.engine_table.setCellWidget(0, 4, default_model_label)
 
         # ── Engine rows ──
-        self._engine_spins = []  # [(key, ctx, batch, workers, ww, model)]
+        self._engine_spins = []  # [(key, ctx, batch, workers, model)]
 
         for i, handler in enumerate(engines):
             row = i + 1  # offset by 1 for default row
@@ -481,15 +473,6 @@ class SettingsDialog(QDialog):
             workers_spin.setToolTip("Parallel translation threads")
             self.engine_table.setCellWidget(row, 3, workers_spin)
 
-            # Wordwrap chars spinner
-            ww_spin = QSpinBox()
-            ww_spin.setRange(0, 200)
-            ww_spin.setSpecialValueText("Auto")
-            ww_spin.setValue(overrides.get(
-                "wordwrap_chars", handler.default_wordwrap_chars))
-            ww_spin.setToolTip("Characters per line (0 = auto-detect)")
-            self.engine_table.setCellWidget(row, 4, ww_spin)
-
             # Model selector
             model_combo = QComboBox()
             model_combo.addItem("(Use global)")
@@ -500,10 +483,10 @@ class SettingsDialog(QDialog):
             if saved_model:
                 model_combo.addItem(saved_model)
                 model_combo.setCurrentText(saved_model)
-            self.engine_table.setCellWidget(row, 5, model_combo)
+            self.engine_table.setCellWidget(row, 4, model_combo)
 
             self._engine_spins.append(
-                (key, ctx_spin, batch_spin, workers_spin, ww_spin, model_combo))
+                (key, ctx_spin, batch_spin, workers_spin, model_combo))
 
         self.engine_table.resizeRowsToContents()
         vbox.addWidget(self.engine_table)
@@ -525,16 +508,14 @@ class SettingsDialog(QDialog):
         ctx = self._default_ctx.value()
         batch = self._default_batch.value()
         workers = self._default_workers.value()
-        ww = self._default_ww.value()
-        for key, ctx_spin, batch_spin, workers_spin, ww_spin, model_combo in self._engine_spins:
+        for key, ctx_spin, batch_spin, workers_spin, model_combo in self._engine_spins:
             ctx_spin.setValue(ctx)
             batch_spin.setValue(batch)
             workers_spin.setValue(workers)
-            ww_spin.setValue(ww)
 
     def _populate_engine_model_combos(self, models: list):
         """Populate all engine model combos with the fetched model list."""
-        for key, ctx, batch, workers, ww, model_combo in self._engine_spins:
+        for key, ctx, batch, workers, model_combo in self._engine_spins:
             current = model_combo.currentText()
             model_combo.blockSignals(True)
             model_combo.clear()
@@ -554,14 +535,13 @@ class SettingsDialog(QDialog):
         self._default_ctx.setValue(EngineHandler.default_context_size)
         self._default_batch.setValue(EngineHandler.default_batch_size)
         self._default_workers.setValue(EngineHandler.default_workers)
-        self._default_ww.setValue(EngineHandler.default_wordwrap_chars)
-        for key, ctx, batch, workers, ww, model_combo in self._engine_spins:
+        self.wordwrap_spin.setValue(0)  # Reset to auto-detect
+        for key, ctx, batch, workers, model_combo in self._engine_spins:
             handler = self.engine_handlers.get(key)
             if handler:
                 ctx.setValue(EngineHandler.default_context_size)
                 batch.setValue(EngineHandler.default_batch_size)
                 workers.setValue(EngineHandler.default_workers)
-                ww.setValue(handler.default_wordwrap_chars)
                 model_combo.setCurrentIndex(0)  # "(Use global)"
 
     def _load_current(self):
@@ -600,8 +580,15 @@ class SettingsDialog(QDialog):
         self.auto_tune_check.setChecked(self.engine.auto_tune if self.engine else False)
         self._on_auto_tune_toggled(self.auto_tune_check.isChecked())
         self.history_spin.setValue(self.engine.max_history if self.engine else 10)
-        if self.plugin_analyzer and getattr(self.plugin_analyzer, '_manual_chars_per_line', 0):
-            self.wordwrap_spin.setValue(self.plugin_analyzer._manual_chars_per_line)
+        if self.plugin_analyzer:
+            manual = getattr(self.plugin_analyzer, '_manual_chars_per_line', 0)
+            self.wordwrap_spin.setValue(manual)
+            if manual == 0:
+                self.wordwrap_spin.setSuffix(
+                    f"  (auto: {self.plugin_analyzer.chars_per_line})")
+            else:
+                self.wordwrap_spin.setSuffix("")
+            self.wordwrap_spin.valueChanged.connect(self._on_ww_spin_changed)
         else:
             self.wordwrap_spin.setValue(0)
         self.single_401_check.setChecked(
@@ -1023,18 +1010,28 @@ class SettingsDialog(QDialog):
             self.parser.single_401_mode = self.single_401_check.isChecked()
             self.parser.speaker_processing = self.speaker_processing_check.isChecked()
         # Save per-engine overrides from the Engines tab
-        for key, ctx, batch, workers, ww, model_combo in self._engine_spins:
+        # Sync main wordwrap spinner to the active engine's override
+        ww_val = self.wordwrap_spin.value() if self.plugin_analyzer else 0
+        for key, ctx, batch, workers, model_combo in self._engine_spins:
             model = model_combo.currentText()
             override = {
                 "context_size": ctx.value(),
                 "batch_size": batch.value(),
                 "workers": workers.value(),
-                "wordwrap_chars": ww.value(),
+                "wordwrap_chars": ww_val,
             }
             if model and model != "(Use global)":
                 override["model"] = model
             self.engine_overrides[key] = override
         self.accept()
+
+    def _on_ww_spin_changed(self, value: int):
+        """Update suffix when wordwrap spinner changes."""
+        if value == 0 and self.plugin_analyzer:
+            self.wordwrap_spin.setSuffix(
+                f"  (auto: {self.plugin_analyzer.chars_per_line})")
+        else:
+            self.wordwrap_spin.setSuffix("")
 
     def _on_auto_tune_toggled(self, checked: bool):
         """Grey out batch size spinner when auto-tune is enabled."""

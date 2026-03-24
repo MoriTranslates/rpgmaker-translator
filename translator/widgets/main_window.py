@@ -3051,6 +3051,7 @@ class MainWindow(QMainWindow):
             engine_overrides=self._engine_overrides,
             engine_handlers=self._engine_handlers,
         )
+        dlg._active_engine_key = self._project_type
         if dlg.exec():
             # Apply dark mode if changed
             if dlg.dark_mode != self._dark_mode:
