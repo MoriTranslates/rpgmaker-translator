@@ -524,6 +524,14 @@ class MainWindow(QMainWindow):
         self.consistency_action.setEnabled(False)
         advanced_menu.addAction(self.consistency_action)
 
+        self.reset_all_action = QAction("Reset All for Retranslation", self)
+        self.reset_all_action.setToolTip(
+            "Mark all translated entries as untranslated so batch translate will redo them"
+        )
+        self.reset_all_action.triggered.connect(self._reset_all_for_retranslation)
+        self.reset_all_action.setEnabled(False)
+        advanced_menu.addAction(self.reset_all_action)
+
         translate_menu.addSeparator()
 
         self.translate_images_action = QAction(
@@ -1838,6 +1846,7 @@ class MainWindow(QMainWindow):
         self.strip_actor_codes_action.setEnabled(True)
         self.polish_action.setEnabled(True)
         self.consistency_action.setEnabled(True)
+        self.reset_all_action.setEnabled(True)
         self.translate_images_action.setEnabled(True)
         # Glossary
         self.load_vocab_action.setEnabled(True)
@@ -4550,6 +4559,34 @@ class MainWindow(QMainWindow):
             )
 
     # ── Consistency Pass ──────────────────────────────────────────
+
+    def _reset_all_for_retranslation(self):
+        """Mark all translated entries as untranslated for batch retranslation."""
+        if not self.project.entries:
+            return
+        translated = [e for e in self.project.entries
+                      if e.status in ("translated", "reviewed")]
+        if not translated:
+            QMessageBox.information(self, "Nothing to Reset",
+                                   "No translated entries to reset.")
+            return
+        reply = QMessageBox.question(
+            self, "Reset All for Retranslation",
+            f"This will mark {len(translated)} translated entries as untranslated.\n"
+            f"Existing translations will be cleared.\n\n"
+            f"Batch Translate will then redo all entries.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        for entry in translated:
+            entry.status = "untranslated"
+            entry.translation = ""
+        self.trans_table.refresh()
+        self.event_viewer.refresh()
+        self.file_tree.load_project(self.project)
+        self.statusBar().showMessage(
+            f"Reset {len(translated)} entries for retranslation.", 5000)
 
     def _consistency_pass(self):
         """Fix name variants, capitalization, and term inconsistencies."""
