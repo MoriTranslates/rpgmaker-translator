@@ -109,6 +109,7 @@ Rules:
 - Translate the Japanese text naturally into English suitable for an RPG game.
 - The text may contain opaque code markers like «CODE1», «CODE2», etc. These are internal engine tags. Output them EXACTLY as-is in «guillemet» format — never remove, translate, rewrite, or replace them with names or words. NEVER convert them to <<CODE1>>, [CODE1], or any other format.
 - Keep the same line break structure as the original when possible.
+- If the first line is a speaker name followed by a colon or full-width colon (e.g. "京子：", "Name:"), translate the name and keep it on its own first line with a colon. This is the speaker label — do not merge it into the dialogue.
 - NEVER add explanations, translator notes, commentary, or parenthetical remarks — output ONLY the translated text and nothing else. No "Note:", no "TL note:", no commentary of any kind.
 - If the text is already in English or is a proper noun, keep it as-is.
 - Match the tone and style of the original (casual, formal, dramatic, etc.).
@@ -1456,6 +1457,7 @@ class AIClient:
         "plugin_param": "plugin configuration text",
         "script_variable": "quest/UI text stored in game variable",
         "speaker_name": "character name shown in dialogue name box",
+        "comment": "on-screen comment/notification text",
         "scene_title": "scene/chapter title",
         "jname": "character speaker name definition",
         "ptext": "menu/prompt text",

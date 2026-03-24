@@ -299,6 +299,14 @@ class SettingsDialog(QDialog):
         )
         export_form.addRow(self.speaker_processing_check)
 
+        self.extract_comments_check = QCheckBox("Extract comments (code 408)")
+        self.extract_comments_check.setToolTip(
+            "Some games use Comment events to display on-screen text\n"
+            "via plugins. Enable this to extract and translate them.\n\n"
+            "Leave OFF for normal games — comments are editor-only."
+        )
+        export_form.addRow(self.extract_comments_check)
+
         self.disable_splash_check = QCheckBox("Disable 'Made with RPG Maker' splash on export")
         self.disable_splash_check.setToolTip(
             "Automatically disables the MadeWithMv/MadeWithMz splash\n"
@@ -595,6 +603,9 @@ class SettingsDialog(QDialog):
         self.dazed_mode_check.setChecked(getattr(self.client, "dazed_mode", False))
         self.script_strings_check.setChecked(
             self.parser.extract_script_strings if self.parser else False
+        )
+        self.extract_comments_check.setChecked(
+            self.parser.extract_comments if self.parser else False
         )
         # Vision model removed — main model is now multimodal (handles OCR + translate)
 
@@ -986,6 +997,7 @@ class SettingsDialog(QDialog):
         self.client.dazed_mode = self.dazed_mode_check.isChecked()
         if self.parser:
             self.parser.extract_script_strings = self.script_strings_check.isChecked()
+            self.parser.extract_comments = self.extract_comments_check.isChecked()
             self.parser.single_401_mode = self.single_401_check.isChecked()
             self.parser.speaker_processing = self.speaker_processing_check.isChecked()
         # Save per-engine overrides from the Engines tab

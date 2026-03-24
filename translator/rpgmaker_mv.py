@@ -30,6 +30,8 @@ CODE_CHANGE_PROFILE = 325     # Change Actor Profile — params[0]=actorId, para
 CODE_PLUGIN_COMMAND_MV = 356  # Plugin Command (MV) — params[0]=command string
 CODE_PLUGIN_COMMAND_MZ = 357  # Plugin Command (MZ) — params vary by plugin
 CODE_CONTROL_VARIABLES = 122  # Control Variables — params[3]=operand type, params[4]=expression
+CODE_COMMENT = 408             # Comment — params[0]=text (sometimes displayed by plugins)
+CODE_COMMENT_CONT = 108        # Comment continuation — params[0]=text
 CODE_SCRIPT = 355             # Script (first line) — params[0]=JS code
 CODE_SCRIPT_CONT = 655        # Script (continuation) — params[0]=JS code
 
@@ -225,6 +227,7 @@ class RPGMakerMVParser:
         self.context_size = 3  # Number of recent dialogue entries for LLM context
         self._require_japanese = True  # False = extract all text (for import)
         self.extract_script_strings = False  # Experimental: extract strings from Script (355/655)
+        self.extract_comments = False  # Opt-in: extract Comment (408) — some plugins display them
         self.single_401_mode = False  # Merge all dialogue lines into one 401 command
         self.speaker_processing = True  # Strip nameboxes, resolve faces, update speaker names
 
@@ -1577,6 +1580,34 @@ class RPGMakerMVParser:
                     recent_ctx.append(full_text)
                 continue
 
+            # Comment (408/108) — opt-in, some games display these via plugins
+            if code == CODE_COMMENT and self.extract_comments:
+                lines = []
+                # First comment line
+                text = params[0] if params else ""
+                lines.append(str(text))
+                i += 1
+                # Gather continuation lines (108)
+                while i < len(cmd_list):
+                    c = cmd_list[i]
+                    if isinstance(c, dict) and c.get("code") == CODE_COMMENT_CONT:
+                        text = c.get("parameters", [""])[0] if c.get("parameters") else ""
+                        lines.append(str(text))
+                        i += 1
+                    else:
+                        break
+                full_text = "\n".join(lines)
+                if self._should_extract(full_text):
+                    dialog_counter += 1
+                    entries.append(TranslationEntry(
+                        id=f"{filename}/{prefix}/comment_{dialog_counter}",
+                        file=filename,
+                        field="comment",
+                        original=full_text,
+                        context="\n---\n".join(recent_ctx) if recent_ctx else "",
+                    ))
+                continue
+
             # Change Actor Name / Nickname / Profile (320, 324, 325)
             if code in (CODE_CHANGE_NAME, CODE_CHANGE_NICKNAME, CODE_CHANGE_PROFILE):
                 text = params[1] if len(params) > 1 else ""
@@ -2116,7 +2147,7 @@ class RPGMakerMVParser:
         scan_entries = []
         speaker_lookup = dict(global_speakers) if global_speakers else {}
         for entry in entries:
-            if entry.field in ("dialog", "scroll_text", "choice"):
+            if entry.field in ("dialog", "scroll_text", "choice", "comment"):
                 scan_entries.append(entry)
             elif entry.field == "speaker_name":
                 speaker_lookup[entry.original] = entry.translation
@@ -2130,12 +2161,13 @@ class RPGMakerMVParser:
         # Build lookup dicts keyed by first original line
         dialog_lookup = {}   # first_line -> deque of (orig_lines, trans_lines)
         scroll_lookup = {}
+        comment_lookup = {}
         choice_lookup = {}   # original_text -> deque of translation_text
 
         for entry in scan_entries:
             orig_lines = entry.original.split("\n")
             trans_lines = entry.translation.split("\n")
-            if entry.field in ("dialog", "scroll_text"):
+            if entry.field in ("dialog", "scroll_text", "comment"):
                 while len(trans_lines) < len(orig_lines):
                     trans_lines.append("")
                 # Restore namebox prefix for export matching & output
@@ -2158,8 +2190,9 @@ class RPGMakerMVParser:
                     trans_lines[0] = nb_translated + sep + trans_lines[0]
                 # Allow extra lines — export inserts extra 401/405 commands
                 first = orig_lines[0] if orig_lines else ""
-                lookup = dialog_lookup if entry.field == "dialog" else scroll_lookup
-                lookup.setdefault(first, deque()).append(
+                lk = {"dialog": dialog_lookup, "scroll_text": scroll_lookup,
+                       "comment": comment_lookup}[entry.field]
+                lk.setdefault(first, deque()).append(
                     (orig_lines, trans_lines))
             elif entry.field == "choice":
                 choice_lookup.setdefault(entry.original, deque()).append(
@@ -2168,6 +2201,8 @@ class RPGMakerMVParser:
         code_dialog = CODE_SHOW_TEXT
         code_scroll = CODE_SCROLL_TEXT
         code_choice = CODE_SHOW_CHOICES
+        code_comment = CODE_COMMENT
+        code_comment_cont = CODE_COMMENT_CONT
         single_401 = self.single_401_mode
 
         code_header = CODE_SHOW_TEXT_HEADER
@@ -2287,6 +2322,43 @@ class RPGMakerMVParser:
                                 del candidates[idx]
                                 if not candidates:
                                     del scroll_lookup[first_text]
+                                i += advance
+                                applied = True
+                                break
+                        if not applied:
+                            i += 1
+                    else:
+                        i += 1
+
+                # Comment block (408/108)
+                elif code == code_comment and comment_lookup:
+                    first_text = str(
+                        (cmd.get("parameters") or [""])[0])
+                    candidates = comment_lookup.get(first_text)
+                    if candidates:
+                        applied = False
+                        for idx, (ol, tl) in enumerate(candidates):
+                            if i + len(ol) > len(cmd_list):
+                                continue
+                            match = True
+                            for j, orig_line in enumerate(ol):
+                                c = cmd_list[i + j]
+                                expected_code = code_comment if j == 0 else code_comment_cont
+                                if (not isinstance(c, dict)
+                                        or c.get("code") != expected_code):
+                                    match = False
+                                    break
+                                ct = str((c.get("parameters") or [""])[0])
+                                if ct != orig_line:
+                                    match = False
+                                    break
+                            if match:
+                                for j in range(len(ol)):
+                                    cmd_list[i + j]["parameters"][0] = tl[j]
+                                advance = len(ol)
+                                del candidates[idx]
+                                if not candidates:
+                                    del comment_lookup[first_text]
                                 i += advance
                                 applied = True
                                 break
