@@ -5,3 +5,4 @@ openai
 wordninja
 pycryptodome
 rubymarshal
+pyspellchecker

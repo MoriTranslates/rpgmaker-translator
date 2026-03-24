@@ -5,7 +5,7 @@ import re
 # Regex matching RPG Maker control codes that the LLM should never touch.
 # Order matters — longer patterns first to avoid partial matches.
 CONTROL_CODE_RE = re.compile(
-    r'\\[A-Za-z]+\[\d*\]'      # \V[1], \N[2], \C[3], \FS[24], etc.
+    r'\\[A-Za-z]+\d*\[[^\]]*\]' # \V[1], \N[2], \FS[24], \F1[k_normal], \FH[ON], etc.
     r'|\\[{}$.|!><^]'           # \{, \}, \$, \., \|, \!, \>, \<, \^
     r'|<[^>]+>'                 # HTML-like tags: <br>, <WordWrap>, <B>, etc.
     r'|%\d+'                    # %1, %2, etc. — RPG Maker format specifiers

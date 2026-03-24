@@ -12,6 +12,7 @@ from PyQt6.QtCore import Qt, pyqtSignal as Signal, QEvent
 from PyQt6.QtGui import QColor, QFont
 
 from ..utils import event_prefix, extract_event_context
+from .spell_checker import SpellHighlighter, build_spell_menu_actions
 
 # Files that contain events (not database flat entries)
 _EVENT_FILES = {"CommonEvents.json", "Troops.json"}
@@ -230,6 +231,9 @@ class EventViewerPanel(QWidget):
             }
         """)
         self._trans_editor.textChanged.connect(self._on_editor_changed)
+        self._trans_editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._trans_editor.customContextMenuRequested.connect(self._show_trans_context_menu)
+        self._spell = SpellHighlighter(self._trans_editor.document())
         trans_inner.addWidget(self._trans_editor)
         editor_layout.addWidget(trans_box)
 
@@ -640,6 +644,12 @@ class EventViewerPanel(QWidget):
         self._trans_editor.blockSignals(True)
         self._trans_editor.setPlainText(entry.translation or "")
         self._trans_editor.blockSignals(False)
+
+    def _show_trans_context_menu(self, pos):
+        """Right-click on translation editor — spell suggestions + standard menu."""
+        menu = self._trans_editor.createStandardContextMenu()
+        build_spell_menu_actions(self._spell, self._trans_editor, menu, pos)
+        menu.exec(self._trans_editor.mapToGlobal(pos))
 
     def _on_editor_changed(self):
         """Sync translation edits from editor panel back to entry + table."""

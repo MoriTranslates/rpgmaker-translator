@@ -7,6 +7,7 @@ rows are rendered, so 24k+ entries load instantly.
 import re
 
 from ..utils import event_prefix, extract_event_context
+from .spell_checker import SpellHighlighter, build_spell_menu_actions
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableView, QApplication,
@@ -366,6 +367,7 @@ class TranslationTable(QWidget):
         self.trans_editor.textChanged.connect(self._on_editor_changed)
         self.trans_editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.trans_editor.customContextMenuRequested.connect(self._show_editor_context_menu)
+        self._spell = SpellHighlighter(self.trans_editor.document())
         trans_box.addWidget(self.trans_editor)
         editor_layout.addWidget(trans_group)
 
@@ -439,6 +441,10 @@ class TranslationTable(QWidget):
         self._build_speaker_lookup()
         self._populate_speaker_filter(entries)
         self._apply_filter()
+
+    def update_spell_glossary(self, glossary: dict):
+        """Feed glossary terms into spell checker as known words."""
+        self._spell.load_glossary(glossary)
 
     def _populate_speaker_filter(self, entries: list):
         """Extract unique speaker names from entry contexts and populate dropdown."""
@@ -1219,9 +1225,11 @@ class TranslationTable(QWidget):
         self._model.refresh_row(row)
 
     def _show_editor_context_menu(self, pos):
-        """Right-click menu on translation editor — glossary add + insert codes."""
+        """Right-click menu on translation editor — spell check + glossary + insert codes."""
         # Start with the standard text-edit menu (copy, paste, undo, etc.)
         menu = self.trans_editor.createStandardContextMenu()
+        # Spell checker suggestions at top
+        build_spell_menu_actions(self._spell, self.trans_editor, menu, pos)
 
         # Glossary add from selected EN text
         selected = self.trans_editor.textCursor().selectedText().strip()

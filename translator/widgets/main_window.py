@@ -743,7 +743,11 @@ class MainWindow(QMainWindow):
             if reply == QMessageBox.StandardButton.Yes:
                 if self._restore_from_state(save_path):
                     self._enable_project_actions()
+                    manual = getattr(self.plugin_analyzer, '_manual_chars_per_line', 0)
                     self.plugin_analyzer.analyze_project(path)
+                    if manual > 0:
+                        self.plugin_analyzer._manual_chars_per_line = manual
+                        self.plugin_analyzer.chars_per_line = manual
                     self.image_panel.set_project(path, self.client)
                     # Count plugin entries for status message
                     plugin_count = sum(
@@ -861,6 +865,7 @@ class MainWindow(QMainWindow):
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries(entries)
         self.event_viewer.set_entries(entries)
+        self._update_spell_glossary()
 
         # Defer actor gender dialog + pre-translate to first batch start
         self._actors_ready = not self.handler.has_actors
@@ -889,7 +894,12 @@ class MainWindow(QMainWindow):
 
         # RPG Maker MV/MZ-specific: analyze plugins for word wrap settings
         if self.handler.has_plugin_system:
+            manual = getattr(self.plugin_analyzer, '_manual_chars_per_line', 0)
             self.plugin_analyzer.analyze_project(path)
+            # Restore manual override if user set one (survives auto-detect)
+            if manual > 0:
+                self.plugin_analyzer._manual_chars_per_line = manual
+                self.plugin_analyzer.chars_per_line = manual
 
         self._enable_project_actions()
 
@@ -1346,6 +1356,14 @@ class MainWindow(QMainWindow):
                     actor_tl[aid][field] = entry.translation
         return actor_tl
 
+    def _update_spell_glossary(self):
+        """Feed project + general glossary terms into spell checker."""
+        merged = dict(self._general_glossary)
+        if self.project:
+            merged.update(self.project.glossary)
+        if merged:
+            self.trans_table.update_spell_glossary(merged)
+
     def _update_speaker_names(self, actors_raw, actor_translations):
         """Replace JP speaker names in entry contexts with EN translations."""
         # Build JP → EN name map from actors
@@ -1746,6 +1764,7 @@ class MainWindow(QMainWindow):
             self._check_vocab_file(self.project.project_path)
 
         self._rebuild_glossary()
+        self._update_spell_glossary()
 
         # Restore actor context from saved genders
         if self.handler.has_actors and self.project.actor_genders and self.project.project_path:
