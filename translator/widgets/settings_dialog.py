@@ -274,6 +274,20 @@ class SettingsDialog(QDialog):
         )
         export_form.addRow("Word wrap chars/line:", self.wordwrap_spin)
 
+        self.font_combo = QComboBox()
+        self.font_combo.addItems([
+            "Consolas (default)",
+            "M+ 1m",
+            "Arial",
+            "Courier New",
+            "No change (keep original)",
+        ])
+        self.font_combo.setToolTip(
+            "Font used for in-game text after export.\n"
+            "Replaces gamefont.css in the game's fonts folder."
+        )
+        export_form.addRow("Game font:", self.font_combo)
+
         self.inject_wordwrap_check = QCheckBox("Inject word wrap plugin on export")
         self.inject_wordwrap_check.setToolTip(
             "If the game has no word wrap plugin, inject TranslatorWordWrap.js\n"
@@ -607,6 +621,10 @@ class SettingsDialog(QDialog):
         self.extract_comments_check.setChecked(
             self.parser.extract_comments if self.parser else False
         )
+        # Font combo — map stored font name to dropdown item
+        current_font = getattr(self.parent(), "_game_font", "Consolas")
+        font_map = {"Consolas": 0, "M+ 1m": 1, "Arial": 2, "Courier New": 3}
+        self.font_combo.setCurrentIndex(font_map.get(current_font, 4))
         # Vision model removed — main model is now multimodal (handles OCR + translate)
 
         # Apply provider visibility and fetch models
@@ -994,6 +1012,10 @@ class SettingsDialog(QDialog):
             self.plugin_analyzer.inject_wordwrap = self.inject_wordwrap_check.isChecked()
         self.disable_splash = self.disable_splash_check.isChecked()
         self.show_translation_splash = self.translation_splash_check.isChecked()
+        # Font selection
+        font_names = ["Consolas", "M+ 1m", "Arial", "Courier New", None]
+        idx = self.font_combo.currentIndex()
+        self.game_font = font_names[idx] if idx < len(font_names) else "Consolas"
         self.client.dazed_mode = self.dazed_mode_check.isChecked()
         if self.parser:
             self.parser.extract_script_strings = self.script_strings_check.isChecked()

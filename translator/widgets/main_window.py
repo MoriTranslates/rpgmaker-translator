@@ -256,6 +256,7 @@ class MainWindow(QMainWindow):
         self.plugin_analyzer = PluginAnalyzer()
         self.text_processor = TextProcessor(self.plugin_analyzer)
         self._dark_mode = True
+        self._game_font = "Consolas"
         self._export_review_file = False
         self._disable_splash = True
         self._show_translation_splash = True
@@ -2732,6 +2733,9 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            # Sync font setting to parser before export
+            if hasattr(self.parser, 'game_font'):
+                self.parser.game_font = self._game_font
             self.handler.save_project(
                 self.project.project_path, self.project.entries)
 
@@ -3040,6 +3044,8 @@ class MainWindow(QMainWindow):
             self._export_review_file = dlg.export_review_file
             self._disable_splash = dlg.disable_splash
             self._show_translation_splash = dlg.show_translation_splash
+            if hasattr(dlg, 'game_font'):
+                self._game_font = dlg.game_font
             # Apply updated engine overrides from dialog
             self._engine_overrides = dlg.engine_overrides
             self._apply_engine_settings(self._project_type)
@@ -3377,6 +3383,10 @@ class MainWindow(QMainWindow):
             self._show_translation_splash = cfg["show_translation_splash"]
         if "inject_wordwrap" in cfg:
             self.plugin_analyzer.inject_wordwrap = cfg["inject_wordwrap"]
+        if "game_font" in cfg:
+            self._game_font = cfg["game_font"]
+        if "extract_comments" in cfg:
+            self.parser.extract_comments = cfg["extract_comments"]
         if "engine_settings" in cfg and isinstance(cfg["engine_settings"], dict):
             self._engine_overrides = cfg["engine_settings"]
 
@@ -3408,6 +3418,8 @@ class MainWindow(QMainWindow):
             "disable_splash": self._disable_splash,
             "show_translation_splash": self._show_translation_splash,
             "inject_wordwrap": self.plugin_analyzer.inject_wordwrap,
+            "game_font": getattr(self, "_game_font", "Consolas"),
+            "extract_comments": self.parser.extract_comments,
             "engine_settings": self._engine_overrides,
         }
         try:

@@ -229,6 +229,7 @@ class RPGMakerMVParser:
         self.extract_script_strings = False  # Experimental: extract strings from Script (355/655)
         self.extract_comments = False  # Opt-in: extract Comment (408) — some plugins display them
         self.single_401_mode = False  # Merge all dialogue lines into one 401 command
+        self.game_font = "Consolas"   # Font for gamefont.css swap (None = keep original)
         self.speaker_processing = True  # Strip nameboxes, resolve faces, update speaker names
 
     def _should_extract(self, text: str) -> bool:
@@ -502,8 +503,8 @@ class RPGMakerMVParser:
         # Export plugin translations (plugins.js is outside data/)
         self._save_plugins(project_dir, entries)
 
-        # Swap game font to Consolas for English readability
-        self._swap_gamefont(project_dir)
+        # Swap game font for English readability
+        self._swap_gamefont(project_dir, self.game_font)
 
     def export_patch_zip(self, project_dir: str, entries: list,
                          zip_path: str, game_title: str = "",
@@ -667,20 +668,16 @@ class RPGMakerMVParser:
                 arc = f"_translation/{js_rel}/plugins/{self.INJECTED_PLUGIN_NAME}.js"
                 zf.writestr(arc, WORDWRAP_PLUGIN_JS.strip() + "\n")
 
-            # Always include Consolas gamefont.css for English readability
-            if js_rel:
+            # Include gamefont.css for English readability
+            if js_rel and self.game_font:
                 fonts_rel = js_rel.rsplit("/", 1)[0] + "/fonts"
-                font_src = os.path.join(
-                    os.path.dirname(__file__), "resources", "gamefont.css")
-                if os.path.isfile(font_src):
-                    zf.write(font_src, f"_translation/{fonts_rel}/gamefont.css")
-                else:
-                    zf.writestr(f"_translation/{fonts_rel}/gamefont.css",
-                        '@font-face {\n'
-                        '    font-family: GameFont;\n'
-                        '    src: local("Consolas"), local("Courier New");\n'
-                        '}\n'
-                    )
+                fallback = "Courier New" if self.game_font != "Courier New" else "Consolas"
+                zf.writestr(f"_translation/{fonts_rel}/gamefont.css",
+                    '@font-face {\n'
+                    '    font-family: GameFont;\n'
+                    f'    src: local("{self.game_font}"), local("{fallback}");\n'
+                    '}\n'
+                )
 
             total_entries = sum(len(v) for v in by_file.values())
 
@@ -1038,12 +1035,14 @@ class RPGMakerMVParser:
             ) from exc
 
     @staticmethod
-    def _swap_gamefont(project_dir: str):
-        """Replace gamefont.css with Consolas for English readability.
+    def _swap_gamefont(project_dir: str, font_name: str = "Consolas"):
+        """Replace gamefont.css with a chosen font for English readability.
 
         Backs up the original as gamefont_original.css on first call.
-        Uses the bundled CSS from translator/resources/.
+        If font_name is None, skips the swap (keeps original font).
         """
+        if font_name is None:
+            return
         content_root = RPGMakerMVParser.find_content_root(project_dir)
         if not content_root:
             return
@@ -1057,11 +1056,17 @@ class RPGMakerMVParser:
         # Back up original
         if not os.path.isfile(backup):
             shutil.copy2(target, backup)
-        # Copy bundled font CSS
-        src = os.path.join(os.path.dirname(__file__), "resources", "gamefont.css")
-        if os.path.isfile(src):
-            shutil.copy2(src, target)
-            log.info("Swapped gamefont.css to Consolas")
+        # Write font CSS
+        fallback = "Courier New" if font_name != "Courier New" else "Consolas"
+        css = (
+            '@font-face {\n'
+            '    font-family: GameFont;\n'
+            f'    src: local("{font_name}"), local("{fallback}");\n'
+            '}\n'
+        )
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(css)
+        log.info("Swapped gamefont.css to %s", font_name)
 
     # ── Static helpers ────────────────────────────────────────────────
 
@@ -3339,14 +3344,16 @@ class RPGMakerMVParser:
                 if not os.path.exists(backup_css):
                     import shutil
                     shutil.copy2(gamefont_css, backup_css)
+            font = self.game_font or "Consolas"
+            fallback = "Courier New" if font != "Courier New" else "Consolas"
             with open(gamefont_css, "w", encoding="utf-8") as f:
                 f.write(
                     '@font-face {\n'
                     '    font-family: GameFont;\n'
-                    '    src: local("Consolas"), local("Courier New");\n'
+                    f'    src: local("{font}"), local("{fallback}");\n'
                     '}\n'
                 )
-            log.info("inject_wordwrap_plugin: wrote gamefont.css with Consolas")
+            log.info("inject_wordwrap_plugin: wrote gamefont.css with %s", font)
 
         # Read from the LIVE plugins.js (not backup) because
         # save_project may have already written translated plugin
