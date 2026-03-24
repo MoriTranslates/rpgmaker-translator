@@ -180,11 +180,13 @@ from ..renpy import RenPyParser
 from ..wolfrpg import WolfRPGParser
 from ..crowd import CrowdParser
 from ..kirikiri import KirikiriParser
+from ..csv_game import CSVGameParser
 from ..engine_handler import (
     EngineHandler, detect_engine, get_handler_by_key,
     RPGMakerMVHandler, RPGMakerMZHandler, RPGMakerAceHandler,
     RPGMaker2KHandler, TyranoScriptHandler, SRPGStudioHandler,
     RenPyHandler, WolfRPGHandler, CrowdHandler, KirikiriHandler,
+    CSVGameHandler,
 )
 from ..project_model import TranslationProject
 from ..translation_engine import TranslationEngine
@@ -235,6 +237,7 @@ class MainWindow(QMainWindow):
         self.wolf_parser = WolfRPGParser()
         self.crowd_parser = CrowdParser()
         self.kirikiri_parser = KirikiriParser()
+        self.csv_parser = CSVGameParser()
         # Engine handler registry — maps key -> handler with parser
         self._engine_handlers = {
             "rpgmaker_mv": RPGMakerMVHandler(self.parser),
@@ -247,6 +250,7 @@ class MainWindow(QMainWindow):
             "wolfrpg": WolfRPGHandler(self.wolf_parser),
             "crowd": CrowdHandler(self.crowd_parser),
             "kirikiri": KirikiriHandler(self.kirikiri_parser),
+            "csv_game": CSVGameHandler(self.csv_parser),
         }
         self.handler: EngineHandler = self._engine_handlers["rpgmaker_mv"]
         self._engine_overrides: dict[str, dict] = {}  # per-engine setting overrides

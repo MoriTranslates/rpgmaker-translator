@@ -478,6 +478,34 @@ class WolfRPGHandler(EngineHandler):
                 f"Data.wolf renamed to .bak — game reads from Data/ folder.")
 
 
+# ── CSV Game ────────────────────────────────────────────────
+
+class CSVGameHandler(EngineHandler):
+    key = "csv_game"
+    display_name = "CSV Game"
+    backup_description = "data_original/"
+
+    system_prompt_key = "rpgmaker_mv"  # generic RPG prompt works fine
+
+    pipeline_steps = [
+        ("dialogue", "Translate"),
+        ("cleanup", "Clean Up"),
+        ("export", "Export"),
+    ]
+
+    @staticmethod
+    def detect(path: str) -> bool:
+        from .csv_game import CSVGameParser
+        return CSVGameParser.is_csv_game_project(path)
+
+    def get_export_label(self):
+        return "Export translations to CSV game files"
+
+    def get_export_message(self, count: int) -> str:
+        return (f"Exported {count} translations to data files.\n"
+                f"Originals backed up in data_original/.")
+
+
 # ── Registry ─────────────────────────────────────────────────
 # Detection order matters: more specific engines first (RM2K before MV/MZ)
 
@@ -487,6 +515,7 @@ ENGINE_REGISTRY: list[type[EngineHandler]] = [
     RenPyHandler,
     TyranoScriptHandler,  # Must be after Kirikiri (both use .ks)
     SRPGStudioHandler,
+    CSVGameHandler,      # CSV-based games (.x files in data/)
     WolfRPGHandler,
     RPGMakerAceHandler,
     RPGMaker2KHandler,
