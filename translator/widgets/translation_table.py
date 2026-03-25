@@ -307,10 +307,6 @@ class TranslationTable(QWidget):
         self._replace_bar.hide()
         layout.addWidget(self._replace_bar)
 
-        # Ctrl+H shortcut
-        shortcut = QShortcut(QKeySequence("Ctrl+H"), self)
-        shortcut.activated.connect(self.show_replace_bar)
-
         # Track position for one-by-one replacement
         self._replace_index = 0
 

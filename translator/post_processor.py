@@ -927,7 +927,32 @@ _COMPOUND_FIXES = {
     "any where": "anywhere",
     "no where": "nowhere",
     "some where": "somewhere",
+    "about us": "about us",  # keep — but "aboutus" needs fixing below
+    "aboutus": "about us",
+    "topicon": "topic on",
+    "sen pai": "senpai",
+    "sei za": "seiza",
+    "under standing": "understanding",
 }
+
+# Multi-fragment tokenization fixes — LLM outputs like "Des per at ely"
+# These are regex patterns that rejoin fragments into proper words.
+_FRAGMENT_FIXES = [
+    (re.compile(r'\bDes\s+per\s+at\s+ely\b', re.IGNORECASE), "desperately"),
+    (re.compile(r'\bFor\s+tun\s+at\s+ely\b', re.IGNORECASE), "fortunately"),
+    (re.compile(r'\bUn\s*for\s+tun\s+at\s+ely\b', re.IGNORECASE), "unfortunately"),
+    (re.compile(r'\bRes\s+is\s+t(?:ing|ance|ed|s)?\b', re.IGNORECASE), lambda m: "resist" + m.group(0).split()[-1][len("t"):] if len(m.group(0).split()) > 1 else m.group(0)),
+    (re.compile(r'\bRes\s+is\s+ting\b', re.IGNORECASE), "resisting"),
+    (re.compile(r'\bRes\s+is\s+tance\b', re.IGNORECASE), "resistance"),
+    (re.compile(r'\bAb\s+sol\s+ut\s+ely\b', re.IGNORECASE), "absolutely"),
+    (re.compile(r'\bDef\s+in\s+it\s+ely\b', re.IGNORECASE), "definitely"),
+    (re.compile(r'\bSep\s+ar\s+at\s+ely\b', re.IGNORECASE), "separately"),
+    (re.compile(r'\bIm\s+med\s+i\s+at\s+ely\b', re.IGNORECASE), "immediately"),
+    (re.compile(r'\bAp\s+par\s+ent\s+ly\b', re.IGNORECASE), "apparently"),
+    (re.compile(r'\bAc\s+ci\s+dent\s+ally?\b', re.IGNORECASE), "accidentally"),
+    (re.compile(r'\bCom\s+plet\s+ely\b', re.IGNORECASE), "completely"),
+    (re.compile(r'\bIn\s+cred\s+ib\s+ly\b', re.IGNORECASE), "incredibly"),
+]
 
 # Build regex: match each key as a whole word (case-insensitive)
 _COMPOUND_RE = re.compile(
@@ -952,6 +977,14 @@ def _fix_compound_words(entry) -> bool:
         return fix
 
     new = _COMPOUND_RE.sub(_replace, trans)
+
+    # Apply multi-fragment tokenization fixes
+    for pattern, replacement in _FRAGMENT_FIXES:
+        if isinstance(replacement, str):
+            new = pattern.sub(lambda m, r=replacement: r[0].upper() + r[1:] if m.group(0)[0].isupper() else r, new)
+        else:
+            new = pattern.sub(replacement, new)
+
     if new != trans:
         entry.translation = new
         return True
