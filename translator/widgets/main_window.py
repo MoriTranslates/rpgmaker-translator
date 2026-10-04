@@ -203,6 +203,7 @@ from .queue_panel import QueuePanel
 from .event_viewer import EventViewerPanel
 from .model_suggestion_dialog import ModelSuggestionDialog
 from .pipeline_bar import PipelineBar
+from .background_task import run_in_thread, running_count, wait_all
 
 
 class MainWindow(QMainWindow):
@@ -273,6 +274,21 @@ class MainWindow(QMainWindow):
         self._wizard_active = False
         self._last_save_path = ""
         self._general_glossary = {}  # persists across all projects
+        # Batch run bookkeeping
+        self._run_kind = "batch"        # "batch" | "selected" | "polish"
+        self._current_batch_mode = "all"
+        self._batch_project = None      # project the running batch belongs to
+        self._user_stopped = False      # Stop pressed — no auto-retranslate/chaining
+        self._is_cleanup_retranslation = False
+        self._server_down_dialog_open = False
+        self._finished_during_server_down = False
+        self._old_translations = {}
+        self._vocab_genders = {}
+        self._busy = False              # re-entrancy guard (actor pre-translate etc.)
+        self._closing = False
+        # Global (non per-engine) model / word wrap — what gets persisted
+        self._global_model = self.client.model
+        self._global_wordwrap = 0
 
         # Restore persistent settings before building UI
         self._load_settings()
@@ -719,7 +735,11 @@ class MainWindow(QMainWindow):
         self.trans_table.status_changed.connect(self._on_status_changed)
         self.trans_table.glossary_add.connect(self._on_glossary_add)
 
-        # Event Viewer
+        # Event Viewer (status_changed fires per keystroke — debounce refresh)
+        self._ev_status_timer = QTimer(self)
+        self._ev_status_timer.setSingleShot(True)
+        self._ev_status_timer.setInterval(150)
+        self._ev_status_timer.timeout.connect(self._refresh_after_event_viewer_change)
         self.event_viewer.status_changed.connect(self._on_event_viewer_status_changed)
 
         # Engine
@@ -734,11 +754,15 @@ class MainWindow(QMainWindow):
 
     def _open_project(self):
         """Open an RPG Maker MV/MZ or TyranoScript project folder."""
+        if not self._ensure_idle_for_project_change():
+            return
         path = QFileDialog.getExistingDirectory(
             self, "Select Game Project Folder"
         )
         if not path:
             return
+        # Save the outgoing project before anything replaces it
+        self._autosave()
 
         # Check for existing save state in project folder
         default_save = os.path.join(path, "_translation_state.json")
@@ -874,6 +898,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        self._reset_project_runtime_state()
         self.project = TranslationProject(
             project_path=path, project_type=self._project_type, entries=entries
         )
@@ -949,7 +974,7 @@ class MainWindow(QMainWindow):
 
         # Offer folder rename for engines without actors (no pre-translate step)
         if not self.handler.has_actors:
-            self._srpg_pre_translate_title(path)
+            self._pre_translate_folder_title(path)
 
         # Offer window scaler for VX Ace projects
         if self._project_type == "rpgmaker_ace":
@@ -999,113 +1024,155 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        # Stop any running batch translation first
-        if self.engine._workers:
-            self.engine.cancel()
+        # Stop any running batch translation first (refuses if it won't stop)
+        if not self._ensure_idle_for_project_change():
+            return
+        self._autosave()
 
         # Reset project
+        self._reset_project_runtime_state()
         self.project = TranslationProject()
         self._sync_project_type("rpgmaker_mv")
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries([])
         self.event_viewer.set_entries([])
-        self._actors_ready = False
-        self._last_save_path = ""
-
-        # Clear client actor context
-        self.client.actor_genders = {}
-        self.client.actor_names = {}
-        self.client.actor_context = ""
 
         # Disable project-dependent actions
-        self.close_action.setEnabled(False)
-        self.save_action.setEnabled(False)
-        self.save_as_action.setEnabled(False)
-        self.rename_action.setEnabled(False)
-        self.import_action.setEnabled(False)
-        self.import_folder_action.setEnabled(False)
-        self.scan_plugin_edits_action.setEnabled(False)
-        self.batch_db_action.setEnabled(False)
-        self.batch_dialogue_action.setEnabled(False)
-        self.batch_action.setEnabled(False)
-        self.batch_actor_action.setEnabled(False)
-        self.wordwrap_action.setEnabled(False)
-        self.find_replace_action.setEnabled(False)
-        self.cleanup_action.setEnabled(False)
-        self.strip_actor_codes_action.setEnabled(False)
-        self.polish_action.setEnabled(False)
-        self.consistency_action.setEnabled(False)
-        self.translate_images_action.setEnabled(False)
-        self.load_vocab_action.setEnabled(False)
-        self.export_vocab_action.setEnabled(False)
-        self.scan_glossary_action.setEnabled(False)
-        self.scan_project_glossary_action.setEnabled(False)
-        self.apply_glossary_action.setEnabled(False)
-        self.export_action.setEnabled(False)
-        self.restore_action.setEnabled(False)
-        self.open_rpgmaker_action.setEnabled(False)
-        self.txt_export_action.setEnabled(False)
-        self.create_patch_action.setEnabled(False)
-        self.export_zip_action.setEnabled(False)
+        for action in self._project_actions():
+            action.setEnabled(False)
+        self.stop_action.setEnabled(False)
 
         self.pipeline_bar.setVisible(False)
 
         self.setWindowTitle("RPG Maker Translator")
         self.statusbar.showMessage("Project closed.", 5000)
 
-    def _inject_protag_profile(self, project_path: str, gender: str):
-        """Inject a JP gender description into Actor 1's profile in data_original.
+    # ── Project lifecycle helpers ─────────────────────────────────
 
-        When Actor 1 has no profile, the LLM has no way to know the
-        protagonist's gender, causing widespread pronoun errors.  Adding a
-        minimal JP line like '男性。本作の主人公。' gives the LLM explicit
-        context and eliminates most he/she mistakes.
+    def _project_actions(self) -> list:
+        """All menu actions that require an open project."""
+        return [
+            # Project
+            self.close_action, self.save_action, self.save_as_action,
+            self.rename_action, self.import_action, self.import_folder_action,
+            self.scan_plugin_edits_action,
+            # Translate
+            self.batch_db_action, self.batch_dialogue_action,
+            self.batch_action, self.batch_actor_action, self.wordwrap_action,
+            self.find_replace_action, self.cleanup_action,
+            self.strip_actor_codes_action, self.polish_action,
+            self.consistency_action, self.reset_all_action,
+            self.translate_images_action,
+            # Glossary
+            self.load_vocab_action, self.export_vocab_action,
+            self.scan_glossary_action, self.scan_project_glossary_action,
+            self.apply_glossary_action,
+            # Game
+            self.export_action, self.restore_action, self.open_rpgmaker_action,
+            self.txt_export_action, self.create_patch_action,
+            self.export_zip_action,
+        ]
+
+    def _set_batch_running(self, running: bool):
+        """Enable/disable every action that starts an engine run."""
+        has_project = bool(self.project.entries)
+        for action in (self.batch_action, self.batch_db_action,
+                       self.batch_dialogue_action, self.batch_actor_action,
+                       self.polish_action):
+            action.setEnabled(has_project and not running)
+        self.stop_action.setEnabled(running)
+
+    def _reset_batch_ui(self):
+        """Return the batch controls / progress display to the idle state."""
+        self.queue_panel.mark_batch_finished()
+        self._set_batch_running(False)
+        self.progress_bar.setVisible(False)
+        self.progress_label.setText("")
+        self.file_tree.refresh_stats(self.project)
+
+    def _begin_run(self, kind: str):
+        """Shared bookkeeping for every engine run started from this window.
+
+        kind: "batch" (full/DB/dialogue/actor batch), "selected"
+        (Translate Selected / cleanup retranslation) or "polish".
+        Batch callers set self._batch_dupe_map after calling this.
         """
-        import json as _json
+        self._run_kind = kind
+        self._batch_project = self.project
+        self._user_stopped = False
+        self._batch_dupe_map = {}
+        self._dupe_fill_count = 0
+        self._batch_start_time = time.time()
+        self._batch_done_count = 0
+        self._set_batch_running(True)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
 
-        data_dir = self.parser._find_data_dir(project_path)
-        if not data_dir:
-            return
+    def _reset_project_runtime_state(self):
+        """Forget per-project runtime state before another project replaces it."""
+        self._last_save_path = ""
+        self._actors_ready = False
+        self.client.actor_genders = {}
+        self.client.actor_names = {}
+        self.client.actor_names_en = {}
+        self.client.actor_context = ""
+        self._batch_all_chained = False
+        self._batch_dupe_map = {}
+        self._dupe_fill_count = 0
+        self._old_translations = {}
+        self._vocab_genders = {}
+        self._is_cleanup_retranslation = False
+        self._user_stopped = False
+        self._batch_project = None
 
-        # Prefer data_original (backup) so re-exports stay clean
-        original_dir = os.path.join(os.path.dirname(data_dir), "data_original")
-        actors_path = os.path.join(
-            original_dir if os.path.isdir(original_dir) else data_dir,
-            "Actors.json",
+    def _check_engine_idle(self) -> bool:
+        """Return True if a new engine run may start (nothing else in flight)."""
+        if self._busy:
+            self.statusbar.showMessage("Busy — please wait for the current step to finish.", 5000)
+            return False
+        if self.engine.is_running:
+            self.statusbar.showMessage(
+                "A translation run is already in progress — stop it first.", 5000)
+            return False
+        return True
+
+    def _wait_for_engine_stop(self, timeout_s: float) -> bool:
+        """Pump events until the engine's threads have exited (or timeout)."""
+        deadline = time.monotonic() + timeout_s
+        while self.engine.is_running and time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.05)
+        return not self.engine.is_running
+
+    def _ensure_idle_for_project_change(self) -> bool:
+        """Before open/load/close: stop a running batch (after confirming).
+
+        Returns False if the user declined or the batch didn't stop in time,
+        so results from the old project can never land in a new one.
+        """
+        if self._busy:
+            self.statusbar.showMessage("Busy — please wait for the current step to finish.", 5000)
+            return False
+        if not self.engine.is_running:
+            return True
+        reply = QMessageBox.question(
+            self, "Translation Running",
+            "A translation run is in progress.\n\n"
+            "Stop it now? Completed entries are kept.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        if not os.path.isfile(actors_path):
-            return
-
-        try:
-            with open(actors_path, "r", encoding="utf-8") as f:
-                actors = _json.load(f)
-        except Exception:
-            return
-
-        # Find Actor 1
-        actor1 = None
-        for a in actors:
-            if isinstance(a, dict) and a.get("id") == 1:
-                actor1 = a
-                break
-        if not actor1:
-            return
-
-        # Only inject if profile is empty or whitespace
-        current = (actor1.get("profile") or "").strip()
-        if current:
-            return  # already has a profile, don't overwrite
-
-        if gender == "male":
-            actor1["profile"] = "男性。本作の主人公。"
-        else:
-            actor1["profile"] = "女性。本作のヒロイン。"
-
-        try:
-            with open(actors_path, "w", encoding="utf-8") as f:
-                _json.dump(actors, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass  # non-critical — translation still works without it
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+        self._stop_translation()
+        self.statusbar.showMessage("Stopping translation...")
+        if not self._wait_for_engine_stop(15):
+            QMessageBox.information(
+                self, "Still Stopping",
+                "The translation workers are finishing their current request.\n"
+                "Please try again in a moment.",
+            )
+            return False
+        return True
 
     def _pre_translate_info(self, entries, actors_raw):
         """Translate game title + actor names/profiles before the gender dialog.
@@ -1255,7 +1322,28 @@ class MainWindow(QMainWindow):
         """
         if self._actors_ready:
             return True
+        if self._busy:
+            return False
+        self._busy = True
+        try:
+            return self._run_actor_setup()
+        finally:
+            self._busy = False
 
+    @staticmethod
+    def _add_protagonist_hint(actors_raw: list):
+        """Mark Actor 1 as the protagonist in the in-memory actor list.
+
+        Without a profile the LLM has no hint that Actor 1 is the main
+        character.  The hint only feeds client.actor_context — game files
+        (including the data_original backup) are never modified.
+        """
+        actor1 = next((a for a in actors_raw if a.get("id") == 1), None)
+        if actor1 and not (actor1.get("profile") or "").strip():
+            actor1["profile"] = "Protagonist of the game."
+
+    def _run_actor_setup(self) -> bool:
+        """Body of _ensure_actors_ready (runs under the _busy guard)."""
         path = self.project.project_path
         if not path:
             return False
@@ -1313,15 +1401,8 @@ class MainWindow(QMainWindow):
                 box.exec()
                 if box.clickedButton() == male_btn:
                     actor1["auto_gender"] = "male"
-                    protag_gender = "male"
                 else:
                     actor1["auto_gender"] = "female"
-                    protag_gender = "female"
-
-                # Inject JP gender profile into data_original so LLM has context
-                # (MV/MZ only — writes to Actors.json)
-                if self.handler.has_plugin_system:
-                    self._inject_protag_profile(path, protag_gender)
 
         # Show gender assignment dialog with translated names
         if actors_raw:
@@ -1331,16 +1412,22 @@ class MainWindow(QMainWindow):
             else:
                 genders = {a["id"]: a["auto_gender"] for a in actors_raw
                            if a["auto_gender"] != "unknown"}
+            # Protagonist hint goes into the LLM context only (never to disk)
+            self._add_protagonist_hint(actors_raw)
             _ctx_parser = self.handler.parser if hasattr(self.handler.parser, 'build_actor_context') else self.parser
             actor_ctx = _ctx_parser.build_actor_context(actors_raw, genders)
             self.client.actor_context = actor_ctx
             self.client.actor_genders = genders
             self.client.actor_names = {a["id"]: a["name"] for a in actors_raw}
+            self.client.actor_names_en = {
+                aid: tl["name"] for aid, tl in actor_translations.items()
+                if tl.get("name")}
             self.project.actor_genders = genders
         else:
             self.client.actor_context = ""
             self.client.actor_genders = {}
             self.client.actor_names = {}
+            self.client.actor_names_en = {}
 
         # Rebuild glossary with any new actor name entries
         self._rebuild_glossary()
@@ -1348,11 +1435,14 @@ class MainWindow(QMainWindow):
         # Update speaker contexts: replace JP actor names with EN translations
         if self.handler.has_speaker_processing:
             self._update_speaker_names(actors_raw, actor_translations)
+            self.trans_table.refresh_speaker_filter()
 
         # Offer to rename folder to English title (only on first run)
         if translated_title:
             new_path = self._rename_project_folder(path, translated_title)
             self.project.project_path = new_path
+            if new_path != path:
+                self.image_panel.set_project(new_path, self.client)
 
         self._actors_ready = True
         return True
@@ -1560,8 +1650,8 @@ class MainWindow(QMainWindow):
                 "Check that Data/Scripts.rvdata2 is writable."
             )
 
-    def _srpg_pre_translate_title(self, path: str):
-        """Pre-translate game title and offer folder rename for SRPG Studio."""
+    def _pre_translate_folder_title(self, path: str):
+        """Pre-translate the folder name and offer a rename (actor-less engines)."""
         folder_name = os.path.basename(path.rstrip("/\\"))
         if not self.client.is_available():
             return
@@ -1574,7 +1664,9 @@ class MainWindow(QMainWindow):
             self.project.project_path = new_path
             if new_path != path:
                 folder = os.path.basename(new_path)
-                self.setWindowTitle(f"SRPG Studio Translator \u2014 {folder}")
+                self.setWindowTitle(
+                    f"{self.handler.display_name} Translator \u2014 {folder}")
+                self.image_panel.set_project(new_path, self.client)
 
     def _rename_project_folder(self, path: str, translated_title: str) -> str:
         """Offer to rename the project folder to 'English Title - WIP'.
@@ -1689,6 +1781,7 @@ class MainWindow(QMainWindow):
                     new_path, os.path.basename(self._last_save_path)
                 )
             self.setWindowTitle(f"{self.handler.display_name} Translator \u2014 {new_name}")
+            self.image_panel.set_project(new_path, self.client)
             self.statusbar.showMessage(f"Renamed folder to: {new_name}", 5000)
         except OSError as e:
             QMessageBox.warning(self, "Rename Failed",
@@ -1723,11 +1816,15 @@ class MainWindow(QMainWindow):
 
     def _load_state(self):
         """Load a previously saved translation state via file dialog."""
+        if not self._ensure_idle_for_project_change():
+            return
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Translation State", "", "JSON Files (*.json)"
         )
         if not path:
             return
+        # Save the outgoing project before it is replaced
+        self._autosave()
         if not self._restore_from_state(path):
             return
         self._enable_project_actions()
@@ -1749,10 +1846,12 @@ class MainWindow(QMainWindow):
         Returns True on success, False on error (shows warning dialog).
         """
         try:
-            self.project = TranslationProject.load_state(path)
+            project = TranslationProject.load_state(path)
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to load state:\n{e}")
             return False
+        self._reset_project_runtime_state()
+        self.project = project
 
         # Restore project type from saved state
         self._sync_project_type(self.project.project_type)
@@ -1774,9 +1873,9 @@ class MainWindow(QMainWindow):
         self.trans_table.set_entries(self.project.entries)
         self.event_viewer.set_entries(self.project.entries)
 
-        # Check for vocab.txt in project folder
-        if self.project.project_path:
-            self._check_vocab_file(self.project.project_path)
+        # vocab.txt is only auto-offered on a fresh open (Glossary > Import
+        # Vocab File covers resumed projects) so a resume never alters the
+        # saved project glossary.
 
         self._rebuild_glossary()
         self._update_spell_glossary()
@@ -1785,16 +1884,22 @@ class MainWindow(QMainWindow):
         if self.handler.has_actors and self.project.actor_genders and self.project.project_path:
             actors_raw = self.handler.load_actors(self.project.project_path)
             if actors_raw:
+                actor_names = {a["id"]: a["name"] for a in actors_raw}
+                self._add_protagonist_hint(actors_raw)
                 _ctx_parser = self.handler.parser if hasattr(self.handler.parser, 'build_actor_context') else self.parser
                 self.client.actor_context = _ctx_parser.build_actor_context(
                     actors_raw, self.project.actor_genders
                 )
                 self.client.actor_genders = self.project.actor_genders
-                self.client.actor_names = {a["id"]: a["name"] for a in actors_raw}
+                self.client.actor_names = actor_names
+                actor_tl = self._actor_translations_from_entries(actors_raw)
+                self.client.actor_names_en = {
+                    aid: tl["name"] for aid, tl in actor_tl.items()
+                    if tl.get("name")}
                 # Update speaker contexts with translated actor names
                 if self.handler.has_speaker_processing:
-                    actor_tl = self._actor_translations_from_entries(actors_raw)
                     self._update_speaker_names(actors_raw, actor_tl)
+                    self.trans_table.refresh_speaker_filter()
             self._actors_ready = True
         else:
             self._actors_ready = not self.handler.has_actors
@@ -1821,45 +1926,23 @@ class MainWindow(QMainWindow):
         added = [e for e in new_entries if e.id not in existing_ids]
         if added:
             self.project.entries.extend(added)
+            # Keep get_entry_by_id() in sync, or results for these are dropped
+            self.project._build_index()
         return len(added)
 
     def _enable_project_actions(self):
         """Enable all project-dependent menu actions."""
         has_path = bool(self.project.project_path)
-        # Project
-        self.close_action.setEnabled(True)
-        self.save_action.setEnabled(True)
-        self.save_as_action.setEnabled(True)
-        self.rename_action.setEnabled(has_path)
-        self.import_action.setEnabled(True)
-        self.import_folder_action.setEnabled(True)
-        self.scan_plugin_edits_action.setEnabled(True)
-        # Translate
-        self.batch_db_action.setEnabled(True)
-        self.batch_dialogue_action.setEnabled(True)
-        self.batch_action.setEnabled(True)
-        self.batch_actor_action.setEnabled(True)
-        self.wordwrap_action.setEnabled(True)
-        self.find_replace_action.setEnabled(True)
-        self.cleanup_action.setEnabled(True)
-        self.strip_actor_codes_action.setEnabled(True)
-        self.polish_action.setEnabled(True)
-        self.consistency_action.setEnabled(True)
-        self.reset_all_action.setEnabled(True)
-        self.translate_images_action.setEnabled(True)
-        # Glossary
-        self.load_vocab_action.setEnabled(True)
-        self.export_vocab_action.setEnabled(True)
-        self.scan_glossary_action.setEnabled(True)
-        self.scan_project_glossary_action.setEnabled(True)
-        self.apply_glossary_action.setEnabled(True)
-        # Game
-        self.export_action.setEnabled(has_path)
-        self.restore_action.setEnabled(has_path)
-        self.open_rpgmaker_action.setEnabled(has_path)
-        self.txt_export_action.setEnabled(True)
-        self.create_patch_action.setEnabled(True)
-        self.export_zip_action.setEnabled(True)
+        for action in self._project_actions():
+            action.setEnabled(True)
+        # Actions that need the game folder on disk
+        for action in (self.rename_action, self.export_action,
+                       self.restore_action, self.open_rpgmaker_action):
+            action.setEnabled(has_path)
+        # Install package uses the MV/MZ exporter
+        self.export_zip_action.setEnabled(
+            bool(getattr(self.handler, "has_plugin_system", False)))
+        self._set_batch_running(self.engine.is_running)
 
         # Reset pipeline bar for manual mode (wizard controls its own flow)
         if not self._wizard_active:
@@ -1937,10 +2020,10 @@ class MainWindow(QMainWindow):
             if ww > 0:
                 self.plugin_analyzer.chars_per_line = ww
 
-        # Per-engine model override
+        # Per-engine model override (falls back to the global model so an
+        # override from a previous engine never sticks)
         model = overrides.get("model", "")
-        if model:
-            self.client.model = model
+        self.client.model = model or self._global_model
 
     def _save_engine_settings(self):
         """Save current settings as per-engine overrides for the active engine."""
@@ -1978,26 +2061,30 @@ class MainWindow(QMainWindow):
         then sends a blank request with keep_alive=-1 so the model
         stays resident and ready for instant inference.
         """
-        # Clear other models from VRAM first
-        unloaded = self.client.unload_models()
-        if unloaded:
+        model = self.client.model
+        self.statusbar.showMessage(f"Loading {model} into VRAM...", 5000)
+
+        def work():
+            # Clear other models from VRAM first, then load the active one
+            unloaded = self.client.unload_models()
+            return unloaded, self.client.preload_model()
+
+        def on_done(result):
+            unloaded, ok = result
+            cleared = f"Cleared {unloaded} model(s) from VRAM — " if unloaded else ""
+            if ok:
+                self.statusbar.showMessage(
+                    f"{cleared}{model} loaded — ready to translate", 5000)
+            else:
+                self.statusbar.showMessage(
+                    f"Could not preload {model} — will load on first translate", 5000)
+
+        def on_error(err):
             self.statusbar.showMessage(
-                f"Cleared {unloaded} model(s) from VRAM, loading {self.client.model}...", 3000
-            )
-        else:
-            self.statusbar.showMessage(
-                f"Loading {self.client.model} into VRAM...", 3000
-            )
-        QApplication.processEvents()
-        ok = self.client.preload_model()
-        if ok:
-            self.statusbar.showMessage(
-                f"{self.client.model} loaded — ready to translate", 5000
-            )
-        else:
-            self.statusbar.showMessage(
-                f"Could not preload {self.client.model} — will load on first translate", 5000
-            )
+                f"Could not preload {model} — will load on first translate", 5000)
+
+        # Fire-and-forget: loading can take up to ~2 minutes
+        run_in_thread(self, work, on_done=on_done, on_error=on_error)
 
     def _import_translations(self):
         """Import translations from an older version's save state."""
@@ -2362,17 +2449,15 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return False
 
-        # Replace project glossary: vocab first, then backfill project terms
-        self.project.glossary.clear()
+        # Merge vocab into the project glossary (existing terms are kept),
+        # then backfill project terms
         for jp, en in glossary.items():
-            self.project.glossary[jp] = en
+            self.project.glossary.setdefault(jp, en)
         # Re-add auto-glossary from already-translated DB entries on top
         backfilled = self._backfill_db_glossary()
 
         # Store gender info for actor detection
         if genders:
-            if not hasattr(self, "_vocab_genders"):
-                self._vocab_genders = {}
             for jp_name, gender in genders.items():
                 en_name = glossary.get(jp_name, jp_name)
                 self._vocab_genders[jp_name] = gender
@@ -2672,6 +2757,7 @@ class MainWindow(QMainWindow):
     def _stop_translation(self):
         """Cancel the running batch translation."""
         self._batch_all_chained = False  # Don't auto-chain to dialogue
+        self._user_stopped = True        # No auto-retranslate / chaining on finish
         self.engine.cancel()
         self.stop_action.setEnabled(False)
 
@@ -2853,8 +2939,8 @@ class MainWindow(QMainWindow):
         if not self.project or not self.project.project_path:
             return
 
-        # Engines with simple parser-based restore (SRPG, Ace, RM2K)
-        if hasattr(self.handler.parser, 'restore_originals') and self._project_type not in ("rpgmaker_mv", "rpgmaker_mz", "tyranoscript"):
+        # Engines with parser-based restore (everything except MV/MZ)
+        if hasattr(self.handler.parser, 'restore_originals') and self._project_type not in ("rpgmaker_mv", "rpgmaker_mz"):
             try:
                 self.handler.restore_originals(self.project.project_path)
                 QMessageBox.information(
@@ -2867,24 +2953,18 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Restore Failed", str(e))
             return
 
-        # MV/MZ and TyranoScript: directory-based restore with atomic swap
-        if self._project_type == "tyranoscript":
-            data_dir = self.tyrano_parser._find_scenario_dir(self.project.project_path)
-            backup_dir = os.path.join(
-                os.path.dirname(data_dir), "scenario_original") if data_dir else None
-        else:
-            data_dir = self.parser._find_data_dir(self.project.project_path)
-            backup_dir = data_dir + "_original" if data_dir else None
+        # MV/MZ: directory-based restore with atomic swap
+        data_dir = self.parser._find_data_dir(self.project.project_path)
+        backup_dir = data_dir + "_original" if data_dir else None
 
         if not data_dir:
             QMessageBox.warning(self, "Error", "Could not find data directory.")
             return
 
         if not backup_dir or not os.path.isdir(backup_dir):
-            backup_name = "scenario_original/" if self._project_type == "tyranoscript" else "data_original/"
             QMessageBox.information(
                 self, "No Backup Found",
-                f"No {backup_name} backup exists. Export to game first to create one."
+                "No data_original/ backup exists. Export to game first to create one."
             )
             return
 
@@ -2917,20 +2997,19 @@ class MainWindow(QMainWindow):
 
             # RPG Maker: also restore plugins.js if backup exists
             plugins_restored = False
-            if self._project_type != "tyranoscript":
-                plugins_path = self.parser._find_plugins_file(self.project.project_path)
-                if plugins_path:
-                    backup_path = os.path.join(
-                        os.path.dirname(plugins_path),
-                        os.path.basename(plugins_path).replace("plugins.", "plugins_original.")
-                    )
-                    if os.path.isfile(backup_path):
-                        shutil.copy2(backup_path, plugins_path)
-                        plugins_restored = True
+            plugins_path = self.parser._find_plugins_file(self.project.project_path)
+            if plugins_path:
+                backup_path = os.path.join(
+                    os.path.dirname(plugins_path),
+                    os.path.basename(plugins_path).replace("plugins.", "plugins_original.")
+                )
+                if os.path.isfile(backup_path):
+                    shutil.copy2(backup_path, plugins_path)
+                    plugins_restored = True
 
-                # Clean up injected word wrap plugin
-                self.parser.remove_wordwrap_plugin(self.project.project_path)
-                self.plugin_analyzer.inject_wordwrap = False
+            # Clean up injected word wrap plugin
+            self.parser.remove_wordwrap_plugin(self.project.project_path)
+            self.plugin_analyzer.inject_wordwrap = False
 
             msg = "Original Japanese files have been restored.\n"
             if plugins_restored:
@@ -3041,6 +3120,9 @@ class MainWindow(QMainWindow):
         """Open the settings dialog."""
         # Capture current engine settings before showing dialog
         self._save_engine_settings()
+        # The dialog's main model field is the global model; per-engine
+        # overrides live on its Engines tab and are re-applied afterwards.
+        self.client.model = self._global_model
         dlg = SettingsDialog(
             self.client, self, parser=self.parser, dark_mode=self._dark_mode,
             plugin_analyzer=self.plugin_analyzer, engine=self.engine,
@@ -3062,6 +3144,10 @@ class MainWindow(QMainWindow):
             self._show_translation_splash = dlg.show_translation_splash
             if hasattr(dlg, 'game_font'):
                 self._game_font = dlg.game_font
+            # Capture global values before per-engine overrides are applied
+            self._global_model = self.client.model
+            self._global_wordwrap = getattr(
+                self.plugin_analyzer, "_manual_chars_per_line", 0)
             # Apply updated engine overrides from dialog
             self._engine_overrides = dlg.engine_overrides
             self._apply_engine_settings(self._project_type)
@@ -3069,6 +3155,9 @@ class MainWindow(QMainWindow):
             # Preload model into VRAM if model changed (avoids cold-start delay)
             if not self.client.is_cloud:
                 self._preload_model()
+        else:
+            # Cancelled: restore the active engine's model override
+            self._apply_engine_settings(self._project_type)
 
     def _open_glossary(self):
         """Open the standalone glossary editor."""
@@ -3108,11 +3197,17 @@ class MainWindow(QMainWindow):
 
     def _on_server_down(self, reason: str):
         """Translation engine detected the server is down. Pause and prompt."""
+        if self._closing or not self._is_batch_project_current():
+            return
         self._autosave()
         # Don't pile multiple dialogs on top of each other if more signals fire
-        if getattr(self, "_server_down_dialog_open", False):
+        if self._server_down_dialog_open:
             return
         self._server_down_dialog_open = True
+        self._finished_during_server_down = False
+        # Resume replays the engine's last job (same mode + entries)
+        can_resume = bool(getattr(self.engine, "last_job", None))
+        resume = False
         try:
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Icon.Warning)
@@ -3123,65 +3218,120 @@ class MainWindow(QMainWindow):
                 "stopped to avoid grinding through failed batches.\n\n"
                 f"Last error: {reason[:200]}\n\n"
                 "Progress has been auto-saved. Restart Ollama (or check your "
-                "API key/connection) and click Resume to continue from where "
-                "we left off."
+                "API key/connection)"
+                + (" and click Resume to continue from where we left off."
+                   if can_resume else ", then start the run again.")
             )
-            resume_btn = box.addButton("Resume Translation", QMessageBox.ButtonRole.AcceptRole)
-            cancel_btn = box.addButton("Stop", QMessageBox.ButtonRole.RejectRole)
+            resume_btn = None
+            if can_resume:
+                resume_btn = box.addButton("Resume Translation", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("Stop", QMessageBox.ButtonRole.RejectRole)
             box.exec()
-            if box.clickedButton() is resume_btn:
-                # Re-run batch — completed entries auto-skip
-                self.engine.translate_batch(self.project.entries)
+            resume = resume_btn is not None and box.clickedButton() is resume_btn
         finally:
             self._server_down_dialog_open = False
 
+        finished_already = self._finished_during_server_down
+        self._finished_during_server_down = False
+        if resume:
+            # Replays the same job once the cancelled workers have exited —
+            # completed entries are skipped automatically, and no finished
+            # signal is emitted in between.
+            self.engine.resume_last_job()
+        else:
+            self._stop_translation()
+            if finished_already:
+                self._on_batch_finished()
+
+    def _is_batch_project_current(self) -> bool:
+        """False if the running batch belongs to a project that was replaced."""
+        return self._batch_project is None or self._batch_project is self.project
+
+    def _deferred_start(self, starter, delay_ms: int = 500):
+        """Start a follow-up run after a short delay; reset the UI if it can't.
+
+        Aborts if the user pressed Stop, the window is closing, or the
+        project changed in the meantime.
+        """
+        project = self.project
+
+        def run():
+            if self._user_stopped or self._closing or self.project is not project:
+                self._user_stopped = False
+                self._is_cleanup_retranslation = False
+                self._batch_all_chained = False
+                self._reset_batch_ui()
+                return
+            if not starter():
+                self._is_cleanup_retranslation = False
+                self._reset_batch_ui()
+
+        QTimer.singleShot(delay_ms, run)
+
     def _on_batch_finished(self):
         """Handle batch translation/polish completing."""
+        if self._closing:
+            return
+        # Results of a batch from a replaced project must not touch this one
+        if not self._is_batch_project_current():
+            self._batch_project = None
+            self._reset_batch_ui()
+            return
+        # Server-down dialog still open: decide after the user answers
+        if self._server_down_dialog_open:
+            self._finished_during_server_down = True
+            return
+
         # When wizard controls the pipeline, let it handle progression
         if self._wizard_active:
+            self._set_batch_running(False)
             return
+
+        stopped = self._user_stopped
+        self._user_stopped = False
+        run_kind = self._run_kind
+        is_cleanup_pass = self._is_cleanup_retranslation
+        self._is_cleanup_retranslation = False
 
         # Final pass: restore any control codes the LLM dropped
         codes_fixed = self._restore_missing_codes()
 
-        # Run automated post-processing cleanup (skip if this IS the cleanup pass)
+        # Run automated post-processing cleanup
         from ..post_processor import run_post_processing
-        pp_kwargs = dict(glossary=self.project.glossary,
-                         project_type=self._project_type)
-        is_cleanup_pass = getattr(self, "_is_cleanup_retranslation", False)
-        if is_cleanup_pass:
-            self._is_cleanup_retranslation = False
-            pp_result = run_post_processing(self.project.entries, **pp_kwargs)
-            # Don't chain another retranslation — one pass is enough
-        else:
-            pp_result = run_post_processing(self.project.entries, **pp_kwargs)
+        pp_result = run_post_processing(self.project.entries,
+                                        glossary=self.project.glossary,
+                                        project_type=self._project_type)
 
-            # Auto-retranslate flagged entries (one pass only)
-            if pp_result.retranslate_ids:
-                self._autosave()
-                count = len(pp_result.retranslate_ids)
-                self.statusbar.showMessage(
-                    f"Cleanup found {pp_result.total_entries_fixed} issues, "
-                    f"retranslating {count} broken entries...",
-                    5000,
-                )
-                self._is_cleanup_retranslation = True
-                from PyQt6.QtCore import QTimer
-                QTimer.singleShot(500, lambda: self._start_batch(mode="all"))
-                return
+        # Only a completed (not stopped) full batch — or the cleanup
+        # retranslation it spawned — continues the pipeline.
+        completed_batch = not stopped and (
+            run_kind == "batch" or (run_kind == "selected" and is_cleanup_pass))
 
-        mode = getattr(self, "_current_batch_mode", "all")
-        chained = getattr(self, "_batch_all_chained", False)
+        # Auto-retranslate flagged entries (one pass only, only those entries)
+        if (completed_batch and not is_cleanup_pass
+                and pp_result.retranslate_ids):
+            self._autosave()
+            ids = list(pp_result.retranslate_ids)
+            self.statusbar.showMessage(
+                f"Cleanup found {pp_result.total_entries_fixed} issues, "
+                f"retranslating {len(ids)} broken entries...",
+                5000,
+            )
+            self._is_cleanup_retranslation = True
+            self._deferred_start(lambda: self._translate_selected(ids))
+            return
+
+        mode = self._current_batch_mode
+        chained = self._batch_all_chained
 
         # Batch All: DB phase done → rebuild glossary → start dialogue phase
-        if chained and mode == "db":
+        if completed_batch and chained and mode == "db":
             self._batch_all_chained = False
             self._backfill_db_glossary()
             self._rebuild_glossary()
             self._autosave()
             self.file_tree.refresh_stats(self.project)
-            if not self._wizard_active:
-                self.pipeline_bar.mark_done("db")
+            self.pipeline_bar.mark_done("db")
 
             # Check if there are dialogue entries left
             untranslated_dialogue = [
@@ -3202,29 +3352,27 @@ class MainWindow(QMainWindow):
                     5000,
                 )
                 # Small delay so the user sees the status message
-                from PyQt6.QtCore import QTimer
-                QTimer.singleShot(500, lambda: self._start_batch(mode="dialogue"))
+                self._deferred_start(lambda: self._start_batch(mode="dialogue"))
                 return
             # else: no dialogue left, fall through to normal finish
+        if not completed_batch:
+            self._batch_all_chained = False
 
-        self.queue_panel.mark_batch_finished()
-        self.batch_db_action.setEnabled(True)
-        self.batch_dialogue_action.setEnabled(True)
-        self.batch_action.setEnabled(True)
-        self.batch_actor_action.setEnabled(True)
-        self.polish_action.setEnabled(True)
-        self.stop_action.setEnabled(False)
-        self.progress_bar.setVisible(False)
-        self.progress_label.setText("")
-        self.file_tree.refresh_stats(self.project)
+        self._reset_batch_ui()
 
         # Update pipeline bar
-        if not self._wizard_active:
+        if completed_batch:
             if mode in ("db", "all"):
                 self.pipeline_bar.mark_done("db")
             if mode in ("dialogue", "all"):
                 self.pipeline_bar.mark_done("dialogue")
-        msg = f"Batch complete — {self.project.translated_count}/{self.project.total} translated"
+        if stopped:
+            msg = "Stopped"
+        elif run_kind == "polish":
+            msg = "Polish complete"
+        else:
+            msg = "Batch complete"
+        msg += f" — {self.project.translated_count}/{self.project.total} translated"
         if codes_fixed:
             msg += f" ({codes_fixed} codes restored)"
         if pp_result.total_entries_fixed:
@@ -3234,12 +3382,19 @@ class MainWindow(QMainWindow):
         if cost_str:
             msg += f" | {cost_str}"
         self.statusbar.showMessage(msg, 15000)
-        # After DB batch, warn about name collisions (different JP → same EN)
-        if mode in ("db", "all", "dialogue"):
+        # After a full batch, warn about name collisions (different JP → same EN)
+        if completed_batch and mode in ("db", "all", "dialogue"):
             self._warn_name_collisions()
         # Auto-export review file if enabled
-        if self._export_review_file:
+        if self._export_review_file and not stopped:
             self._auto_export_review()
+
+    def _is_name_entry(self, entry) -> bool:
+        """True for DB name-type fields and map display names."""
+        fields = self.handler.auto_glossary_fields.get(entry.file)
+        return bool((fields and entry.field in fields) or (
+            entry.file.startswith("Map") and entry.field == self._AUTO_GLOSSARY_MAP_FIELD
+        ))
 
     def _warn_name_collisions(self):
         """Detect different JP names that translated to the same EN text.
@@ -3252,11 +3407,7 @@ class MainWindow(QMainWindow):
         for entry in self.project.entries:
             if entry.status not in ("translated", "reviewed"):
                 continue
-            fields = self.handler.auto_glossary_fields.get(entry.file)
-            is_name = (fields and entry.field in fields) or (
-                entry.file.startswith("Map") and entry.field == self._AUTO_GLOSSARY_MAP_FIELD
-            )
-            if not is_name or not entry.translation:
+            if not self._is_name_entry(entry) or not entry.translation:
                 continue
             en = entry.translation.strip()
             if not en:
@@ -3315,7 +3466,7 @@ class MainWindow(QMainWindow):
         for entry in self.project.entries:
             if entry.status not in ("translated", "reviewed"):
                 continue
-            if not entry.translation:
+            if not entry.translation or not self._is_name_entry(entry):
                 continue
             tl = entry.translation.strip()
             if any(tl == en for en, _ in collisions):
@@ -3408,7 +3559,8 @@ class MainWindow(QMainWindow):
         for entry in self.project.entries:
             if entry.status not in ("translated", "reviewed"):
                 continue
-            if not entry.translation:
+            # Same filter as collision detection — never touch dialogue
+            if not entry.translation or not self._is_name_entry(entry):
                 continue
             tl = entry.translation.strip()
             en_to_entries.setdefault(tl, []).append(entry)
@@ -3457,8 +3609,17 @@ class MainWindow(QMainWindow):
             f"Batch All to retranslate them.",
         )
 
+    def _is_polish_run(self) -> bool:
+        """True while a grammar-polish run is active (ours or the wizard's)."""
+        if self._run_kind == "polish":
+            return True
+        return any(getattr(w, "mode", "") == "polish"
+                   for w in getattr(self.engine, "_workers", []))
+
     def _on_checkpoint(self):
         """Auto-save during batch translation (every 25 entries)."""
+        if self._closing or not self._is_batch_project_current():
+            return
         # Auto-fix dropped control codes before saving
         self._restore_missing_codes()
         self._autosave()
@@ -3470,7 +3631,14 @@ class MainWindow(QMainWindow):
         self.event_viewer.refresh_current_event()
 
     def _on_event_viewer_status_changed(self):
-        """Handle status change from Event Viewer (mark reviewed, inline edits)."""
+        """Handle status change from Event Viewer (mark reviewed, inline edits).
+
+        Fires per keystroke, so the refresh is debounced (~150ms).
+        """
+        self._ev_status_timer.start()
+
+    def _refresh_after_event_viewer_change(self):
+        """Debounced refresh for Event Viewer edits."""
         self.file_tree.refresh_stats(self.project)
         self.trans_table._model.refresh_all()
         self.trans_table._update_stats()
@@ -3516,13 +3684,33 @@ class MainWindow(QMainWindow):
         try:
             with open(self._SETTINGS_FILE, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except FileNotFoundError:
             return  # No saved settings — use defaults
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            # Keep the broken file so the user's settings aren't silently lost
+            backup = self._SETTINGS_FILE + ".bak"
+            try:
+                shutil.copy2(self._SETTINGS_FILE, backup)
+            except OSError:
+                backup = ""
+            log.warning("Settings file is corrupt (%s) — using defaults", e)
+            msg = ("Your settings file could not be read and defaults are "
+                   "being used.\n\n" + str(e))
+            if backup:
+                msg += f"\n\nThe unreadable file was copied to:\n{backup}"
+            QTimer.singleShot(
+                0, lambda: QMessageBox.warning(self, "Settings Reset", msg))
+            return
+        except OSError:
+            return
+        if not isinstance(cfg, dict):
+            return
 
         if "ollama_url" in cfg:
             self.client.base_url = cfg["ollama_url"]
         if "model" in cfg:
             self.client.model = cfg["model"]
+            self._global_model = cfg["model"]
         if "system_prompt" in cfg:
             self.client.system_prompt = cfg["system_prompt"]
         if "workers" in cfg:
@@ -3534,6 +3722,7 @@ class MainWindow(QMainWindow):
         if "wordwrap_override" in cfg and cfg["wordwrap_override"] > 0:
             self.plugin_analyzer._manual_chars_per_line = cfg["wordwrap_override"]
             self.plugin_analyzer.chars_per_line = cfg["wordwrap_override"]
+            self._global_wordwrap = cfg["wordwrap_override"]
         if "general_glossary" in cfg and isinstance(cfg["general_glossary"], dict):
             self._general_glossary = cfg["general_glossary"]
         if "target_language" in cfg:
@@ -3577,7 +3766,8 @@ class MainWindow(QMainWindow):
         self._save_engine_settings()
         cfg = {
             "ollama_url": self.client.base_url,
-            "model": self.client.model,
+            # Global values — per-engine overrides live in engine_settings
+            "model": self._global_model,
             "system_prompt": self.client.system_prompt,
             "provider": self.client.provider,
             "api_key": self.client.api_key,
@@ -3588,7 +3778,7 @@ class MainWindow(QMainWindow):
             "max_history": self.engine.max_history,
             "context_size": self.parser.context_size,
             "dark_mode": self._dark_mode,
-            "wordwrap_override": getattr(self.plugin_analyzer, "_manual_chars_per_line", 0),
+            "wordwrap_override": self._global_wordwrap,
             "general_glossary": self._general_glossary,
             "target_language": self.client.target_language,
             # vision_model removed — main model handles image OCR
@@ -3602,9 +3792,12 @@ class MainWindow(QMainWindow):
             "extract_comments": self.parser.extract_comments,
             "engine_settings": self._engine_overrides,
         }
+        # Atomic write: a crash mid-write must never leave a truncated file
+        tmp = self._SETTINGS_FILE + ".tmp"
         try:
-            with open(self._SETTINGS_FILE, "w", encoding="utf-8") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._SETTINGS_FILE)
         except OSError:
             pass  # Non-critical — settings just won't persist
 
@@ -3640,6 +3833,7 @@ class MainWindow(QMainWindow):
     def _on_suggested_model(self, tag: str):
         """Apply model from suggestion dialog."""
         self.client.model = tag
+        self._global_model = tag
         self._save_settings()
         self.statusbar.showMessage(f"Model set to {tag}", 5000)
 
@@ -3702,8 +3896,11 @@ class MainWindow(QMainWindow):
 
     def _batch_translate(self):
         """Batch All: DB first → auto-glossary → dialogue second."""
+        if not self._check_engine_idle():
+            return
         self._batch_all_chained = True
-        self._start_batch(mode="db")
+        if not self._start_batch(mode="db"):
+            self._batch_all_chained = False
 
     def _batch_translate_db(self):
         """Stage 1: Translate only DB entries (names, descriptions, terms).
@@ -3760,6 +3957,8 @@ class MainWindow(QMainWindow):
         This gives the LLM strong, consistent gender context per character
         and lets the user QA one character's lines at a time.
         """
+        if not self._check_engine_idle():
+            return
         if not self._ensure_ollama_ready():
             return
 
@@ -3826,7 +4025,6 @@ class MainWindow(QMainWindow):
         to_translate, dupe_map = self._dedup_entries(ordered)
         total_with_dupes = len(ordered)
         dupe_total = total_with_dupes - len(to_translate)
-        self._batch_dupe_map = dupe_map
 
         # Build summary for confirmation
         parts = []
@@ -3858,23 +4056,16 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        self.batch_action.setEnabled(False)
-        self.batch_db_action.setEnabled(False)
-        self.batch_dialogue_action.setEnabled(False)
-        self.batch_actor_action.setEnabled(False)
-        self.stop_action.setEnabled(True)
-        self.progress_bar.setVisible(True)
+        self._begin_run("batch")
+        self._batch_dupe_map = dupe_map
         self.progress_bar.setMaximum(total_with_dupes)
-        self.progress_bar.setValue(0)
-        self._batch_start_time = time.time()
-        self._batch_done_count = 0
-        self._dupe_fill_count = 0
 
         # Queue panel shows unique entries only
         self.queue_panel.load_queue(to_translate)
         self.tabs.setCurrentWidget(self.queue_panel)
 
-        self.engine.translate_batch(to_translate)
+        self.engine.translate_batch(to_translate,
+                                    memory_source=self.project.entries)
 
     def _run_glossary_prefill(self) -> int:
         """Fill untranslated entries whose full text is an exact glossary key.
@@ -3901,12 +4092,13 @@ class MainWindow(QMainWindow):
             if stripped in glossary:
                 e.translation = glossary[stripped]
                 e.status = "translated"
-                self.trans_table.update_entry(e.id, e.translation)
+                self.trans_table.update_entry(e.id, e.translation, emit=False)
                 self.queue_panel.mark_prefill(e.id, e.translation, "Glossary")
                 self._maybe_add_to_glossary(e)
                 count += 1
 
         if count:
+            self.trans_table._notify_status_changed()
             self.file_tree.refresh_stats(self.project)
 
         return count
@@ -3960,6 +4152,8 @@ class MainWindow(QMainWindow):
         Returns:
             True if batch was started, False if skipped/cancelled.
         """
+        if not self._check_engine_idle():
+            return False
         if not self._ensure_ollama_ready():
             return False
 
@@ -4001,24 +4195,15 @@ class MainWindow(QMainWindow):
         to_translate, dupe_map = self._dedup_entries(untranslated)
         total_with_dupes = len(untranslated)
         dupe_total = total_with_dupes - len(to_translate)
-        self._batch_dupe_map = dupe_map  # used by _on_entry_done
 
         if dupe_total:
             self.statusbar.showMessage(
                 f"Queuing {len(to_translate)} unique entries "
                 f"({dupe_total} duplicates will auto-fill)", 5000)
 
-        self.batch_action.setEnabled(False)
-        self.batch_db_action.setEnabled(False)
-        self.batch_dialogue_action.setEnabled(False)
-        self.batch_actor_action.setEnabled(False)
-        self.stop_action.setEnabled(True)
-        self.progress_bar.setVisible(True)
+        self._begin_run("batch")
+        self._batch_dupe_map = dupe_map  # used by _on_entry_done
         self.progress_bar.setMaximum(total_with_dupes)
-        self.progress_bar.setValue(0)
-        self._batch_start_time = time.time()
-        self._batch_done_count = 0
-        self._dupe_fill_count = 0
 
         # Reset cost tracking for this batch
         if self.client.is_cloud:
@@ -4028,13 +4213,16 @@ class MainWindow(QMainWindow):
         self.queue_panel.load_queue(to_translate)
         self.tabs.setCurrentWidget(self.queue_panel)
 
-        self.engine.translate_batch(to_translate)
+        self.engine.translate_batch(to_translate,
+                                    memory_source=self.project.entries)
         return True
 
     # ── Polish Grammar ──────────────────────────────────────────────
 
     def _polish_translations(self):
         """Run all translated entries through the LLM for grammar cleanup."""
+        if not self._check_engine_idle():
+            return
         if not self._ensure_ollama_ready():
             return
 
@@ -4060,17 +4248,8 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        self.batch_action.setEnabled(False)
-        self.batch_db_action.setEnabled(False)
-        self.batch_dialogue_action.setEnabled(False)
-        self.batch_actor_action.setEnabled(False)
-        self.polish_action.setEnabled(False)
-        self.stop_action.setEnabled(True)
-        self.progress_bar.setVisible(True)
+        self._begin_run("polish")
         self.progress_bar.setMaximum(len(to_polish))
-        self.progress_bar.setValue(0)
-        self._batch_start_time = time.time()
-        self._batch_done_count = 0
 
         # Populate queue panel for polish
         self.queue_panel.load_queue(to_polish)
@@ -4404,27 +4583,6 @@ class MainWindow(QMainWindow):
         if not self._wizard_active:
             self.pipeline_bar.mark_done("cleanup")
 
-    def _strip_wordwrap_tags(self):
-        """Remove all <WordWrap> tags from translations."""
-        if not self.project.entries:
-            return
-        count = 0
-        for entry in self.project.entries:
-            if not entry.translation:
-                continue
-            stripped = re.sub(r'<WordWrap>', '', entry.translation, flags=re.IGNORECASE)
-            if stripped != entry.translation:
-                entry.translation = stripped
-                count += 1
-        if count:
-            self.trans_table.refresh()
-            self.plugin_analyzer.inject_wordwrap = False
-        QMessageBox.information(
-            self, "Strip Word Wrap Tags",
-            f"Removed <WordWrap> tags from {count} entries." if count
-            else "No <WordWrap> tags found."
-        )
-
     # ── Strip Duplicate Actor Codes ────────────────────────────────
 
     # Matches leading \n[N] or \N[N], optionally wrapped in \c[N]...\c[0]
@@ -4539,20 +4697,6 @@ class MainWindow(QMainWindow):
 
         return fixed
 
-    def _fix_missing_codes(self):
-        """Manual menu action — runs _restore_missing_codes() with a result dialog."""
-        fixed = self._restore_missing_codes()
-
-        if fixed:
-            self.trans_table.refresh()
-            self.file_tree.refresh_stats(self.project)
-
-        QMessageBox.information(
-            self, "Fix Missing Codes",
-            f"Fixed {fixed} entries with missing control codes."
-            if fixed else "All entries have their control codes intact."
-        )
-
     # ── Apply Glossary ─────────────────────────────────────────────
 
     def _apply_glossary(self):
@@ -4583,9 +4727,10 @@ class MainWindow(QMainWindow):
                     old_translations.setdefault(jp, set()).add(en)
 
         # Build list of mismatches: (entry, jp_term, expected_en)
+        # Reviewed entries are user-approved — never rewritten here
         mismatches = []
         for entry in self.project.entries:
-            if entry.status not in ("translated", "reviewed"):
+            if entry.status != "translated":
                 continue
             if not entry.translation:
                 continue
@@ -4623,11 +4768,9 @@ class MainWindow(QMainWindow):
         for entry, _jp, _en in mismatches:
             mismatch_ids.add(entry.id)
 
-        # Build replacement map: old_en → new_en (longest first to avoid partial matches)
-        replacements: dict[str, str] = {}
-        for jp_term, en_term in self.client.glossary.items():
-            for old_en in old_translations.get(jp_term, set()):
-                replacements[old_en] = en_term
+        # Replacement count (old_en → glossary EN), scoped per JP term
+        replacements = sum(
+            len(old_translations.get(jp, ())) for jp in term_counts)
 
         can_replace = bool(replacements)
         summary = (
@@ -4638,7 +4781,7 @@ class MainWindow(QMainWindow):
         if can_replace:
             summary += (
                 f"\n\nApply will replace old terms with glossary terms "
-                f"({len(replacements)} replacements). No LLM needed."
+                f"({replacements} replacements). No LLM needed."
             )
         else:
             summary += (
@@ -4660,17 +4803,25 @@ class MainWindow(QMainWindow):
 
         clicked = msg.clickedButton()
         if clicked == apply_btn and can_replace:
-            # Direct string replacement — sort longest old terms first
-            sorted_replacements = sorted(
-                replacements.items(), key=lambda x: len(x[0]), reverse=True)
+            # Per entry, replace only the old renderings of JP terms that
+            # actually occur in that entry's original — whole words only,
+            # longest old term first.
             fixed = 0
             for entry in self.project.entries:
                 if entry.id not in mismatch_ids:
                     continue
                 original_translation = entry.translation
-                for old_en, new_en in sorted_replacements:
-                    if old_en in entry.translation:
-                        entry.translation = entry.translation.replace(old_en, new_en)
+                pairs = []
+                for jp_term, olds in old_translations.items():
+                    if jp_term not in entry.original:
+                        continue
+                    new_en = self.client.glossary[jp_term]
+                    pairs.extend((old_en, new_en) for old_en in olds)
+                pairs.sort(key=lambda x: len(x[0]), reverse=True)
+                for old_en, new_en in pairs:
+                    pattern = r'(?<!\w)' + re.escape(old_en) + r'(?!\w)'
+                    entry.translation = re.sub(
+                        pattern, lambda _m, n=new_en: n, entry.translation)
                 if entry.translation != original_translation:
                     fixed += 1
             self.trans_table.refresh()
@@ -4692,17 +4843,12 @@ class MainWindow(QMainWindow):
                 )
             QMessageBox.information(self, "Apply Glossary", msg_text)
         elif clicked == retranslate_btn:
-            # Reset mismatched entries to untranslated and start batch
-            for entry in self.project.entries:
-                if entry.id in mismatch_ids:
-                    entry.status = "untranslated"
-                    entry.translation = ""
-            self.trans_table.refresh()
-            self.file_tree.load_project(self.project)
+            # Retranslate only the mismatched entries (not the whole project)
             self.statusbar.showMessage(
-                f"Reset {len(mismatch_ids)} entries. Starting retranslation...", 3000
+                f"Retranslating {len(mismatch_ids)} entries...", 3000
             )
-            self._start_batch("all")
+            ids = [e.id for e in self.project.entries if e.id in mismatch_ids]
+            self._translate_selected(ids)
         elif clicked == view_btn:
             # Filter table to show only mismatch entries
             mismatch_entries = [e for e in self.project.entries if e.id in mismatch_ids]
@@ -4896,19 +5042,17 @@ class MainWindow(QMainWindow):
                 if en_canonical in modified:
                     continue  # Already correct
 
-                # Tokenize and fuzzy-match each word
-                words = modified.split()
-                new_words = []
-                replaced = False
-                for word in words:
+                # Fuzzy-match each word in place (re.sub keeps the original
+                # whitespace — newlines between dialogue lines survive)
+                def _fix_word(m, en_canonical=en_canonical):
+                    word = m.group(0)
                     # Strip trailing punctuation for comparison
                     stripped = word.rstrip(".,!?;:'\")-]}")
                     suffix = word[len(stripped):]
 
                     # Skip if this word is itself a canonical name
                     if stripped in canonical_en:
-                        new_words.append(word)
-                        continue
+                        return word
 
                     # Only match proper-noun-like words (capitalized)
                     if (
@@ -4921,13 +5065,10 @@ class MainWindow(QMainWindow):
                             None, stripped.lower(), en_canonical.lower()
                         ).ratio() > 0.75
                     ):
-                        new_words.append(en_canonical + suffix)
-                        replaced = True
-                    else:
-                        new_words.append(word)
+                        return en_canonical + suffix
+                    return word
 
-                if replaced:
-                    modified = " ".join(new_words)
+                modified = re.sub(r'\S+', _fix_word, modified)
 
             if modified != entry.translation:
                 entry.translation = modified
@@ -5086,86 +5227,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to create patch:\n{e}")
 
-    def _apply_patch(self):
-        """Apply a translation patch zip to the current project."""
-        if not self.project.entries:
-            return
-
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Translation Patch", "", "Zip Files (*.zip)"
-        )
-        if not path:
-            return
-
-        try:
-            patch_project = TranslationProject.import_patch(path)
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to read patch:\n{e}")
-            return
-
-        # Show patch info and confirm
-        meta = getattr(patch_project, "_patch_metadata", {})
-        patch_translated = sum(
-            1 for e in patch_project.entries
-            if e.status in ("translated", "reviewed")
-        )
-        current_untranslated = self.project.untranslated_count
-
-        info = (
-            f"Patch: {meta.get('game_title', 'Unknown')}"
-            f" v{meta.get('patch_version', '?')}\n"
-            f"Created: {meta.get('created', 'Unknown')}\n\n"
-            f"Patch contains: {patch_translated} translations, "
-            f"{len(patch_project.glossary)} glossary entries\n"
-            f"Current project: {self.project.total} entries "
-            f"({current_untranslated} untranslated)\n\n"
-            f"Apply patch translations to untranslated entries?"
-        )
-
-        reply = QMessageBox.question(
-            self, "Apply Translation Patch", info,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        # Reuse existing import_translations logic
-        stats = self.project.import_translations(patch_project)
-
-        # Import glossary entries that don't conflict
-        imported_glossary = 0
-        for jp, en in patch_project.glossary.items():
-            if jp not in self.project.glossary:
-                self.project.glossary[jp] = en
-                imported_glossary += 1
-        self._rebuild_glossary()
-
-        # Import actor genders if not already set
-        imported_genders = 0
-        for actor_id, gender in patch_project.actor_genders.items():
-            if actor_id not in self.project.actor_genders:
-                self.project.actor_genders[actor_id] = gender
-                imported_genders += 1
-
-        # Refresh UI
-        self.trans_table.set_entries(self.project.entries)
-        self.event_viewer.set_entries(self.project.entries)
-        self.file_tree.load_project(self.project)
-
-        total_imported = stats["by_id"] + stats["by_text"]
-        QMessageBox.information(
-            self, "Patch Applied",
-            f"Imported {total_imported} translations:\n"
-            f"  \u2022 {stats['by_id']} matched by exact position\n"
-            f"  \u2022 {stats['by_text']} matched by identical text\n"
-            f"  \u2022 {stats['new']} entries not in patch (need translation)\n"
-            f"  \u2022 {stats['skipped']} already translated (kept)\n"
-            + (f"  \u2022 {imported_glossary} glossary entries imported\n"
-               if imported_glossary else "")
-            + (f"  \u2022 {imported_genders} actor genders imported\n"
-               if imported_genders else "")
-        )
-
     def _export_patch_zip(self):
         """Export translated game files + install.bat as a distributable zip."""
         if not self.project.entries:
@@ -5256,16 +5317,23 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            # Strip <WordWrap> tags if no plugin to handle them
+            # Strip <WordWrap> tags if no plugin to handle them — on copies,
+            # so the project's own translations are left untouched
+            import copy
             inject_ww = self.plugin_analyzer.should_inject_plugin()
+            export_entries = self.project.entries
             if not self.plugin_analyzer.has_wordwrap_plugin and not inject_ww:
+                export_entries = []
                 for e in self.project.entries:
-                    if e.translation and "<WordWrap>" in e.translation:
+                    if e.translation and re.search(r'<WordWrap>', e.translation,
+                                                   flags=re.IGNORECASE):
+                        e = copy.copy(e)
                         e.translation = re.sub(
                             r'<WordWrap>', '', e.translation, flags=re.IGNORECASE)
+                    export_entries.append(e)
 
             self.parser.export_patch_zip(
-                self.project.project_path, self.project.entries,
+                self.project.project_path, export_entries,
                 path, game_title=game_title,
                 inject_wordwrap=self.plugin_analyzer.should_inject_plugin())
             QMessageBox.information(
@@ -5376,16 +5444,19 @@ class MainWindow(QMainWindow):
     # ── Re-translate with diff ─────────────────────────────────────
 
     def _translate_selected(self, entry_ids: list):
-        """Translate specific selected entries (allows re-translation)."""
+        """Translate specific selected entries (allows re-translation).
+
+        Returns True if a run was started.
+        """
+        if not self._check_engine_idle():
+            return False
         if not self._ensure_ollama_ready():
-            return
+            return False
 
         entries = [self.project.get_entry_by_id(eid) for eid in entry_ids]
         entries = [e for e in entries if e is not None]
         if not entries:
-            return
-
-        self._batch_dupe_map = {}  # no dupe-filling for manual retranslate
+            return False
 
         # Store old translations for diff display
         self._old_translations = {e.id: e.translation for e in entries if e.translation}
@@ -5395,25 +5466,28 @@ class MainWindow(QMainWindow):
             if e.status in ("translated", "reviewed"):
                 e.status = "untranslated"
 
-        self.batch_db_action.setEnabled(False)
-        self.batch_dialogue_action.setEnabled(False)
-        self.batch_action.setEnabled(False)
-        self.batch_actor_action.setEnabled(False)
-        self.stop_action.setEnabled(True)
-        self.progress_bar.setVisible(True)
+        self._begin_run("selected")  # no dupe-filling for manual retranslate
         self.progress_bar.setMaximum(len(entries))
-        self.progress_bar.setValue(0)
-        self._batch_start_time = time.time()
-        self._batch_done_count = 0
 
+        # No project-wide memory_source here: an explicit retranslate must not
+        # be pre-filled with the (possibly bad) translation of a duplicate.
         self.engine.translate_batch(entries)
+        return True
 
     def _on_entry_done(self, entry_id: str, translation: str):
         """Handle a single entry translation completing, with diff info."""
+        # Late results from a replaced project must not land in this one
+        # (results arriving while closing still land so they get saved)
+        if not self._is_batch_project_current():
+            return
         entry = self.project.get_entry_by_id(entry_id)
-        if entry:
+        if entry and self._is_polish_run():
+            # Polish only rewrites the English text: keep status (reviewed
+            # stays reviewed), no title-casing, no dupe filling.
+            entry.translation = translation
+        elif entry:
             # Check for diff with previous translation
-            old = getattr(self, '_old_translations', {}).get(entry_id, "")
+            old = self._old_translations.get(entry_id, "")
             if old and old != translation:
                 self.statusbar.showMessage(
                     f"Re-translated: was \"{old[:40]}...\" -> now \"{translation[:40]}...\"",
@@ -5433,14 +5507,14 @@ class MainWindow(QMainWindow):
         self.queue_panel.mark_entry_done(entry_id, translation, source="LLM")
 
         # Instantly fill duplicates — no checkpoint delay
-        dupe_map = getattr(self, '_batch_dupe_map', {})
+        dupe_map = self._batch_dupe_map
         if entry and entry.original in dupe_map:
             dupes = dupe_map[entry.original]
             for dupe in dupes:
                 if dupe.status == "untranslated":
                     dupe.translation = translation
                     dupe.status = "translated"
-                    self.trans_table.update_entry(dupe.id, translation)
+                    self.trans_table.update_entry(dupe.id, translation, emit=False)
                     self._maybe_add_to_glossary(dupe)
                     self._dupe_fill_count += 1
             # Update progress bar with dupe fills
@@ -5461,45 +5535,12 @@ class MainWindow(QMainWindow):
             return
 
         old_translation = entry.translation
+        project = self.project
         self.statusbar.showMessage(f"Retranslating with correction: {correction}...")
 
-        # Run in a background thread to avoid freezing the UI
-        from PyQt6.QtCore import QThread, QObject, pyqtSignal as Signal
-
-        class _RetranslateWorker(QObject):
-            done = Signal(str)
-            failed = Signal(str)
-
-            def __init__(self, client, text, context, correction, old_trans, field):
-                super().__init__()
-                self.client = client
-                self.text = text
-                self.context = context
-                self.correction = correction
-                self.old_trans = old_trans
-                self.field = field
-
-            def run(self):
-                try:
-                    result = self.client.translate(
-                        text=self.text,
-                        context=self.context,
-                        correction=self.correction,
-                        old_translation=self.old_trans,
-                        field=self.field,
-                    )
-                    self.done.emit(result)
-                except Exception as e:
-                    self.failed.emit(str(e))
-
-        thread = QThread(self)
-        worker = _RetranslateWorker(
-            self.client, entry.original, entry.context, correction, old_translation,
-            entry.field,
-        )
-        worker.moveToThread(thread)
-
         def on_done(new_translation):
+            if self.project is not project:
+                return  # project was replaced meanwhile
             entry.translation = new_translation
             entry.status = "translated"
             self.trans_table.update_entry(entry_id, new_translation)
@@ -5510,25 +5551,18 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self.statusbar.showMessage("Retranslation complete", 3000)
-            thread.quit()
 
         def on_failed(err):
             self.statusbar.showMessage(f"Retranslation failed: {err}", 5000)
-            thread.quit()
 
-        def on_thread_finished():
-            self._correction_thread = None
-            self._correction_worker = None
-
-        worker.done.connect(on_done)
-        worker.failed.connect(on_failed)
-        thread.started.connect(worker.run)
-        thread.finished.connect(on_thread_finished)
-        thread.start()
-
-        # Keep references alive until thread completes
-        self._correction_thread = thread
-        self._correction_worker = worker
+        # Run in a background thread to avoid freezing the UI
+        run_in_thread(
+            self, self.client.translate,
+            text=entry.original, context=entry.context,
+            correction=correction, old_translation=old_translation,
+            field=entry.field,
+            on_done=on_done, on_error=on_failed,
+        )
 
     # ── Polish selected entries ───────────────────────────────────
 
@@ -5542,57 +5576,43 @@ class MainWindow(QMainWindow):
         if not entries:
             return
 
+        project = self.project
+        jobs = [(e.id, e.translation) for e in entries]
         self.statusbar.showMessage(f"Polishing {len(entries)} entries...")
 
-        from PyQt6.QtCore import QThread, QObject, pyqtSignal as Signal
+        def work():
+            # Each call may raise (ConnectionError / ValueError) — report it
+            # and keep going so the task always finishes.
+            results, errors = [], []
+            for eid, text in jobs:
+                try:
+                    polished = self.client.polish(text=text)
+                except Exception as e:  # noqa: BLE001
+                    errors.append(str(e) or e.__class__.__name__)
+                    continue
+                if polished and polished != text:
+                    results.append((eid, polished))
+            return results, errors
 
-        class _PolishWorker(QObject):
-            entry_done = Signal(str, str)  # entry_id, polished_text
-            finished = Signal(int)         # count polished
-
-            def __init__(self, client, entries_to_polish):
-                super().__init__()
-                self.client = client
-                self.entries = entries_to_polish
-
-            def run(self):
-                count = 0
-                for e in self.entries:
-                    result = self.client.polish(text=e.translation)
-                    if result and result != e.translation:
-                        self.entry_done.emit(e.id, result)
-                        count += 1
-                self.finished.emit(count)
-
-        thread = QThread(self)
-        worker = _PolishWorker(self.client, entries)
-        worker.moveToThread(thread)
-
-        def on_entry(eid, polished):
-            entry = self.project.get_entry_by_id(eid)
-            if entry:
-                entry.translation = polished
-                self.trans_table.update_entry(eid, polished)
-
-        def on_finished(count):
+        def on_done(result):
+            results, errors = result
+            if self.project is not project:
+                return
+            for eid, polished in results:
+                entry = self.project.get_entry_by_id(eid)
+                if entry:
+                    entry.translation = polished
+                    self.trans_table.update_entry(eid, polished)
             self.file_tree.refresh_stats(self.project)
-            self.statusbar.showMessage(
-                f"Polished {count}/{len(entries)} entries", 5000
-            )
-            thread.quit()
+            msg = f"Polished {len(results)}/{len(entries)} entries"
+            if errors:
+                msg += f" ({len(errors)} failed: {errors[-1][:80]})"
+            self.statusbar.showMessage(msg, 8000 if errors else 5000)
 
-        def on_polish_thread_finished():
-            self._polish_thread = None
-            self._polish_worker = None
+        def on_failed(err):
+            self.statusbar.showMessage(f"Polish failed: {err}", 5000)
 
-        worker.entry_done.connect(on_entry)
-        worker.finished.connect(on_finished)
-        thread.started.connect(worker.run)
-        thread.finished.connect(on_polish_thread_finished)
-        thread.start()
-
-        self._polish_thread = thread
-        self._polish_worker = worker
+        run_in_thread(self, work, on_done=on_done, on_error=on_failed)
 
     # ── Translation variants ──────────────────────────────────────
 
@@ -5605,41 +5625,12 @@ class MainWindow(QMainWindow):
         if not entry:
             return
 
+        project = self.project
         self.statusbar.showMessage("Generating 3 translation variants...")
 
-        from PyQt6.QtCore import QThread, QObject, pyqtSignal as Signal
-
-        class _VariantWorker(QObject):
-            done = Signal(list)
-            failed = Signal(str)
-
-            def __init__(self, client, text, context, field):
-                super().__init__()
-                self.client = client
-                self.text = text
-                self.context = context
-                self.field = field
-
-            def run(self):
-                try:
-                    variants = self.client.translate_variants(
-                        text=self.text,
-                        context=self.context,
-                        field=self.field,
-                        count=3,
-                    )
-                    self.done.emit(variants)
-                except Exception as e:
-                    self.failed.emit(str(e))
-
-        thread = QThread(self)
-        worker = _VariantWorker(
-            self.client, entry.original, entry.context, entry.field,
-        )
-        worker.moveToThread(thread)
-
         def on_done(variants):
-            thread.quit()
+            if self.project is not project:
+                return
             self.statusbar.showMessage(
                 f"Generated {len(variants)} variant(s)", 3000
             )
@@ -5670,20 +5661,12 @@ class MainWindow(QMainWindow):
 
         def on_failed(err):
             self.statusbar.showMessage(f"Variant generation failed: {err}", 5000)
-            thread.quit()
 
-        def on_variant_thread_finished():
-            self._variant_thread = None
-            self._variant_worker = None
-
-        worker.done.connect(on_done)
-        worker.failed.connect(on_failed)
-        thread.started.connect(worker.run)
-        thread.finished.connect(on_variant_thread_finished)
-        thread.start()
-
-        self._variant_thread = thread
-        self._variant_worker = worker
+        run_in_thread(
+            self, self.client.translate_variants,
+            text=entry.original, context=entry.context, field=entry.field,
+            count=3, on_done=on_done, on_error=on_failed,
+        )
 
     # ── Image Translation ─────────────────────────────────────────
 
@@ -5699,24 +5682,52 @@ class MainWindow(QMainWindow):
     # ── Window close cleanup ──────────────────────────────────────
 
     def closeEvent(self, event):
-        """Clean up background threads and managed Ollama on window close."""
+        """Save, stop background threads and managed Ollama on window close."""
+        if self._closing:
+            event.accept()
+            return
+        if self.engine.is_running:
+            reply = QMessageBox.question(
+                self, "Translation Running",
+                "A translation run is in progress.\n\n"
+                "Stop it and exit? Completed entries will be saved.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        self._closing = True
+        self._autosave_timer.stop()
+
+        # Stop batch translation (also interrupts in-flight client waits)
+        self._batch_all_chained = False
+        self._user_stopped = True
+        self.engine.cancel()
+        self.client.cancel_event.set()  # also wakes single-entry tasks
         # Stop image translation worker if running
         self.image_panel.stop_worker()
-        # Stop batch translation if running
-        self.engine.cancel()
-        for thread in self.engine._threads:
-            if thread.isRunning():
-                thread.quit()
-                thread.wait(3000)
 
-        # Stop correction/polish/variant threads if running
-        for attr in ("_correction_thread", "_polish_thread", "_variant_thread"):
-            thread = getattr(self, attr, None)
-            if thread is not None:
-                thread.quit()
-                thread.wait(3000)
+        # Let workers finish their current request (entry_done still lands
+        # so that work gets saved) — up to ~15s
+        deadline = time.monotonic() + 15
+        while ((self.engine.is_running or running_count())
+               and time.monotonic() < deadline):
+            QApplication.processEvents()
+            time.sleep(0.05)
+        all_done = (not self.engine.is_running
+                    and wait_all(max(0, int((deadline - time.monotonic()) * 1000))))
+
+        self._autosave()
+        self._save_settings()
 
         # Clean up managed Ollama subprocess (if we started one)
         self.client.cleanup()
+
+        if not all_done:
+            # A thread is stuck in a blocking request; destroying a running
+            # QThread aborts the process, so exit hard (state is saved).
+            log.warning("Background threads still running on close — forcing exit")
+            logging.shutdown()
+            os._exit(0)
 
         super().closeEvent(event)

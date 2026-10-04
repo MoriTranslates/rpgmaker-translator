@@ -1,6 +1,7 @@
 """Spell checker for translation editors — red underlines + right-click suggestions."""
 
 import re
+import weakref
 from spellchecker import SpellChecker
 
 from PyQt6.QtCore import Qt
@@ -37,16 +38,36 @@ _DEFAULT_KNOWN = {
 }
 
 
+# Shared across all highlighters: loading the dictionary is slow and
+# "Add to Dictionary" / glossary words should apply to every editor.
+_CHECKER: SpellChecker | None = None
+_CUSTOM_WORDS: set[str] = set(_DEFAULT_KNOWN)
+_HIGHLIGHTERS: "weakref.WeakSet[SpellHighlighter]" = weakref.WeakSet()
+
+
+def _shared_checker() -> SpellChecker:
+    global _CHECKER
+    if _CHECKER is None:
+        _CHECKER = SpellChecker()
+    return _CHECKER
+
+
+def _rehighlight_all():
+    for h in list(_HIGHLIGHTERS):
+        h.rehighlight()
+
+
 class SpellHighlighter(QSyntaxHighlighter):
     """QSyntaxHighlighter that underlines misspelled English words."""
 
     def __init__(self, document, custom_words: set[str] | None = None):
         super().__init__(document)
-        self._checker = SpellChecker()
-        self._custom_words: set[str] = set(_DEFAULT_KNOWN)
+        self._checker = _shared_checker()
+        self._custom_words: set[str] = _CUSTOM_WORDS
         if custom_words:
             self._custom_words.update(custom_words)
         self._enabled = True
+        _HIGHLIGHTERS.add(self)
 
         self._fmt = QTextCharFormat()
         self._fmt.setUnderlineStyle(
@@ -94,7 +115,7 @@ class SpellHighlighter(QSyntaxHighlighter):
 
     def add_word(self, word: str):
         self._custom_words.add(word.lower())
-        self.rehighlight()
+        _rehighlight_all()
 
     def load_glossary(self, glossary: dict[str, str]):
         """Add English glossary values as known words."""
@@ -102,7 +123,7 @@ class SpellHighlighter(QSyntaxHighlighter):
             for word in _WORD_RE.findall(en_term):
                 if len(word) > 1:
                     self._custom_words.add(word.lower())
-        self.rehighlight()
+        _rehighlight_all()
 
     def set_enabled(self, enabled: bool):
         self._enabled = enabled

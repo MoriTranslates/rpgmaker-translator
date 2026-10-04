@@ -96,6 +96,19 @@ def _str(val) -> str:
     return ""
 
 
+def _block_has_text(line_cmds: list) -> bool:
+    """True if any 401/405 line in the block has non-empty text.
+
+    Mirrors the load-side rule: a block whose lines are all empty produces
+    no entry and does NOT consume a dialogue_index.
+    """
+    for c in line_cmds:
+        lp = _attr(c, "parameters") or []
+        if lp and _str(lp[0]):
+            return True
+    return False
+
+
 def _has_japanese(text: str) -> bool:
     return bool(JAPANESE_RE.search(text))
 
@@ -277,10 +290,13 @@ class RPGMakerAceParser:
         """Restore Data_original/ → Data/."""
         data_dir = self._find_data_dir(project_dir)
         if not data_dir:
-            return
+            raise FileNotFoundError(
+                f"No Data/ folder found in {project_dir}")
         backup_dir = data_dir + "_original"
         if not os.path.isdir(backup_dir):
-            return
+            raise FileNotFoundError(
+                f"No backup found at {backup_dir}. Export the game at "
+                "least once before restoring.")
         shutil.rmtree(data_dir)
         shutil.copytree(backup_dir, data_dir)
 
@@ -866,7 +882,7 @@ class RPGMakerAceParser:
                     j += 1
 
                 orig_count = j - start_401
-                if orig_count == 0:
+                if not _block_has_text(cmd_list[start_401:j]):
                     i = j
                     continue
 
@@ -911,7 +927,7 @@ class RPGMakerAceParser:
                     j += 1
 
                 orig_count = j - start_405
-                if orig_count == 0:
+                if not _block_has_text(cmd_list[start_405:j]):
                     i = j
                     continue
 

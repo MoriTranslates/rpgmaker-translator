@@ -11,6 +11,7 @@ Binary format reference: WolfTL by Sinflower (MIT), Wolf_RPG_Decompyler by Davii
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import struct
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Optional
 
 from .project_model import TranslationEntry
+
+log = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────
 
@@ -64,6 +67,13 @@ _DB_SKIP_RE = re.compile(
     r'|^$',                     # empty
     re.MULTILINE
 )
+
+
+# Message speaker prefix: optional "@N" face line, then a short "Name：" line.
+# Shared by _extract_speaker / _clean_message / _rebuild_message so load and
+# export always agree on what the prefix is.
+_SPEAKER_PREFIX_RE = re.compile(r'^(@\d+\r?\n)?([^\n：]{1,20})：\r?\n')
+_FACE_PREFIX_RE = re.compile(r'^@\d+\r?\n')
 
 
 # ── Wolf RPG file decryption ─────────────────────────────────────────────
@@ -725,10 +735,10 @@ class WolfDatabase:
         if len(dat_data) > 5 and dat_data[1] == 0x50:
             crypt_ver = dat_data[5]
             if crypt_ver >= 0x57:
-                print(f'  Skipping {self.name}: V3.5 encryption not supported yet')
+                log.warning('Skipping %s: V3.5 encryption not supported yet', self.name)
                 return
             elif crypt_ver >= 0x55:
-                print(f'  Skipping {self.name}: V3.3 encryption not supported yet')
+                log.warning('Skipping %s: V3.3 encryption not supported yet', self.name)
                 return
             # V3.2: seeded XOR
             dat_data, _header, proj_key = _decrypt_dat_v32(
@@ -887,6 +897,20 @@ class WolfDatabase:
                     self.strings.append((type_idx, data_idx, si, text))
 
 
+def _apply_string_patches(data: bytearray,
+                          patches: list[tuple[int, int, bytes]]):
+    """Replace length-prefixed NUL-terminated strings in ``data`` in place.
+
+    Each patch is (offset_of_length_prefix, old_total_len, new_bytes) where
+    old_total_len = 4 + stored length (stored length includes the NUL).
+    Applied in descending offset order so earlier offsets stay valid.
+    """
+    for offset, old_total_len, new_bytes in sorted(
+            patches, key=lambda p: p[0], reverse=True):
+        data[offset:offset + old_total_len] = (
+            struct.pack('<I', len(new_bytes) + 1) + new_bytes + b'\x00')
+
+
 # ── DXArchive unpacker ───────────────────────────────────────────────────
 
 def unpack_data_wolf(game_dir: Path) -> Path:
@@ -993,45 +1017,6 @@ class WolfRPGParser:
 
         return False
 
-    def get_game_title(self, project_dir: str) -> str:
-        """Read game title from Game.dat or folder name."""
-        p = Path(project_dir)
-        game_dat = p / 'Game.dat'
-        if game_dat.is_file():
-            try:
-                data = game_dat.read_bytes()
-                # Game.dat starts with title string in Wolf RPG format
-                reader = BinaryReader(data)
-                # Skip magic bytes (varies), try to read first string
-                # Wolf RPG Game.dat: 4 bytes magic + title string
-                if len(data) > 20:
-                    reader.skip(4)
-                    title = reader.read_string()
-                    if title and len(title) < 200:
-                        return title
-            except Exception:
-                pass
-        return p.name
-
-    def restore_originals(self, project_dir: str):
-        """Restore original game files from backup."""
-        if not self.data_dir:
-            self.game_dir = Path(project_dir)
-            self.data_dir = self._find_data_dir()
-        if not self.data_dir:
-            log.warning("No data directory found for restore")
-            return
-
-        backup_dir = self.data_dir.parent / (self.data_dir.name + '_original')
-        if not backup_dir.is_dir():
-            log.warning("No backup found at %s", backup_dir)
-            return
-
-        import shutil
-        shutil.rmtree(self.data_dir)
-        shutil.copytree(backup_dir, self.data_dir)
-        log.info("Restored %s from backup", self.data_dir.name)
-
     # ── Loading ───────────────────────────────────────────────────────
 
     def load_project(self, folder: str, context_size: int | None = None) -> list[TranslationEntry]:
@@ -1040,6 +1025,9 @@ class WolfRPGParser:
             self.context_size = context_size
         self.game_dir = Path(folder)
         entries: list[TranslationEntry] = []
+        self.maps = []
+        self.common_events = None
+        self.databases = []
 
         # Reset global decryption state
         _reset_proj_key()
@@ -1057,7 +1045,7 @@ class WolfRPGParser:
                     self.maps.append(wolf_map)
                     entries.extend(self._extract_map_entries(wolf_map, self.context_size))
                 except Exception as e:
-                    print(f'Warning: failed to parse {mps_file.name}: {e}')
+                    log.warning('Failed to parse %s: %s', mps_file.name, e)
 
         # Parse common events
         basic_dir = self.data_dir / 'BasicData'
@@ -1068,7 +1056,7 @@ class WolfRPGParser:
                 self.common_events.load()
                 entries.extend(self._extract_ce_entries(self.context_size))
             except Exception as e:
-                print(f'Warning: failed to parse CommonEvent.dat: {e}')
+                log.warning('Failed to parse CommonEvent.dat: %s', e)
 
         # Parse databases (skip SysDataBaseBasic — system config only, no text)
         if basic_dir and basic_dir.is_dir():
@@ -1082,7 +1070,7 @@ class WolfRPGParser:
                         self.databases.append(db)
                         entries.extend(self._extract_db_entries(db))
                     except Exception as e:
-                        print(f'Warning: failed to parse {db_name}: {e}')
+                        log.warning('Failed to parse %s: %s', db_name, e)
 
         # Assign IDs as string paths (file/field) for event viewer compatibility
         for entry in entries:
@@ -1296,57 +1284,51 @@ class WolfRPGParser:
 
         Format: @N\\nSpeaker：\\nText  or  Speaker：\\nText
         """
-        # Try multi-line pattern first: @N\nSpeaker：\n
-        match = re.match(r'@\d+\r?\n(.+?)：', text)
-        if match:
-            return match.group(1).strip()
-        # Try single-line pattern: Speaker：
-        lines = text.split('\n')
-        for line in lines:
-            if line.startswith('@'):
-                continue
-            match = re.match(r'^(.+?)：', line)
-            if match:
-                return match.group(1).strip()
-        return ''
+        match = _SPEAKER_PREFIX_RE.match(text)
+        return match.group(2).strip() if match else ''
 
     @staticmethod
     def _clean_message(text: str) -> str:
         """Clean message text for display.
 
         Removes @N prefixes and speaker：prefix, keeps just the dialogue.
+        Only the first line (after an optional @N line) is treated as a
+        speaker line, matching _rebuild_message exactly.
         """
-        # Try to extract just the dialogue part
-        match = re.search(r'@\d+\r?\n.*?：\r?\n(.*)', text, re.DOTALL)
+        match = _SPEAKER_PREFIX_RE.match(text)
         if match:
-            return match.group(1).strip()
-        match = re.search(r'^.*?：\r?\n(.*)', text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
+            return text[match.end():].strip()
         # No speaker format, return as-is but strip @N prefix
-        text = re.sub(r'^@\d+\r?\n', '', text)
+        text = _FACE_PREFIX_RE.sub('', text)
         return text.strip()
 
     # ── Export ────────────────────────────────────────────────────────
 
     def save_project(self, project_dir: str, entries: list[TranslationEntry]):
         """Write translations back into game files."""
-        if not self.data_dir:
-            return
+        # Don't rely on load_project state — export can run straight after
+        # restoring a saved project state.
+        self.game_dir = Path(project_dir)
+        self.data_dir = self._find_data_dir()
 
         # Create backup on first export
         backup_dir = self.data_dir.parent / (self.data_dir.name + '_original')
         if not backup_dir.exists():
             shutil.copytree(self.data_dir, backup_dir)
 
-        # Re-read from backup for idempotent re-export
+        # Re-read maps, common events and DB structure from backup for
+        # idempotent re-export
         self._reload_from_backup(backup_dir)
 
-        # Build lookup: field → translation
+        # Build lookup: field → translation (+ the cleaned original it came from)
         translations = {}
+        originals = {}
         for entry in entries:
             if entry.translation and entry.status in ('translated', 'reviewed'):
-                translations[f'{entry.file}/{entry.field}'] = entry.translation
+                key = f'{entry.file}/{entry.field}'
+                translations[key] = entry.translation
+                originals[key] = entry.original
+        skipped: list[str] = []
 
         # Apply to maps
         for wolf_map in self.maps:
@@ -1362,7 +1344,7 @@ class WolfRPGParser:
                                 original = cmd.string_args[0]
                                 translated = translations[key]
                                 cmd.string_args[0] = self._rebuild_message(
-                                    original, translated)
+                                    original, translated, originals.get(key))
                                 modified = True
 
                         elif cmd.code == CMD_CHOICES:
@@ -1402,7 +1384,7 @@ class WolfRPGParser:
                             original = cmd.string_args[0]
                             translated = translations[key]
                             cmd.string_args[0] = self._rebuild_message(
-                                original, translated)
+                                original, translated, originals.get(key))
                             modified = True
 
                     elif cmd.code == CMD_CHOICES:
@@ -1426,7 +1408,7 @@ class WolfRPGParser:
                             modified = True
 
             if modified:
-                live_ce = self.data_dir / 'CommonEvent.dat'
+                live_ce = self.data_dir / 'BasicData' / 'CommonEvent.dat'
                 self.common_events.save(live_ce)
 
         # Apply to databases
@@ -1442,19 +1424,39 @@ class WolfRPGParser:
                 backup_dat = backup_dir / 'BasicData' / f'{db.name}.dat'
                 live_dat = self.data_dir / 'BasicData' / f'{db.name}.dat'
                 if backup_dat.is_file():
-                    self._export_database(db, backup_dat, live_dat, db_trans)
+                    reason = self._export_database(
+                        db, backup_dat, live_dat, db_trans)
+                    if reason:
+                        log.warning('DB %s not exported: %s', db.name, reason)
+                        skipped.append(f'{db.name}.dat ({reason}, '
+                                       f'{len(db_trans)} translations)')
+        loaded_dbs = {f'Database/{db.name}/' for db in self.databases}
+        unloaded = sorted({
+            key.split('/')[1] for key in translations
+            if key.startswith('Database/')
+            and not any(key.startswith(p) for p in loaded_dbs)})
+        for name in unloaded:
+            skipped.append(f'{name}.dat (could not be re-read from backup)')
 
         # Delete Data.wolf so game reads from folder
         wolf_file = self.game_dir / 'Data.wolf'
         if wolf_file.is_file():
             wolf_file.rename(self.game_dir / 'Data.wolf.bak')
 
+        if skipped:
+            raise RuntimeError(
+                'Maps and common events were exported, but these database '
+                'files could not be written and are still in Japanese:\n  '
+                + '\n  '.join(skipped))
+
     def _export_database(self, db: WolfDatabase, src_path: Path,
-                         dst_path: Path, translations: dict[str, str]):
+                         dst_path: Path, translations: dict[str, str]
+                         ) -> Optional[str]:
         """Patch database .dat file with translations.
 
         Reads from src_path, replaces strings, writes to dst_path.
         translations keys are like "Type0/Data1/F2".
+        Returns None on success, or a short reason string if skipped.
         """
         data = bytearray(src_path.read_bytes())
 
@@ -1463,7 +1465,7 @@ class WolfRPGParser:
         if len(data) > 5 and data[1] == 0x50:
             crypt_ver = data[5]
             if crypt_ver >= 0x55:
-                return  # Can't handle V3.3+ encryption
+                return 'V3.3+ encrypted DB export not supported'
             dec_data, crypt_header, _proj_key = _decrypt_dat_v32(
                 bytes(data), _DAT_SEED_INDICES)
             data = bytearray(dec_data)
@@ -1473,11 +1475,11 @@ class WolfRPGParser:
         version = reader.read_byte()
 
         if version == 0xC4:
-            return  # LZ4 DB export not supported yet
+            return 'LZ4-compressed DB export not supported'
 
         type_count = reader.read_uint32()
         if type_count != len(db._types):
-            return
+            return 'type count mismatch with .project'
 
         # Build list of (byte_offset, old_len_bytes, new_string) patches
         patches = []
@@ -1485,7 +1487,7 @@ class WolfRPGParser:
             type_info = db._types[type_idx]
             sep = reader.read(4)
             if sep != db.DAT_TYPE_SEP:
-                return  # format error
+                return 'unexpected DB layout'
 
             unknown1 = reader.read_uint32()
             fields_size = reader.read_uint32()
@@ -1514,17 +1516,14 @@ class WolfRPGParser:
                     text = reader.read_string()
                     key = f'Type{type_idx}/Data{data_idx}/F{si}'
                     if key in translations:
-                        # Calculate old string byte length (4-byte length + encoded string)
+                        # Stored length prefix includes the trailing NUL that
+                        # read_string strips -- use the raw on-disk length.
+                        raw_len = struct.unpack_from('<I', data, str_offset)[0]
                         enc = 'utf-8' if reader.is_utf8 else 'cp932'
-                        old_bytes = text.encode(enc, errors='replace')
                         new_bytes = translations[key].encode(enc, errors='replace')
-                        # Patch: replace length(4) + old_bytes with length(4) + new_bytes
-                        patches.append((str_offset, 4 + len(old_bytes), new_bytes))
+                        patches.append((str_offset, 4 + raw_len, new_bytes))
 
-        # Apply patches in reverse order to preserve offsets
-        for offset, old_total_len, new_bytes in reversed(patches):
-            new_len_prefix = struct.pack('<I', len(new_bytes))
-            data[offset:offset + old_total_len] = new_len_prefix + new_bytes
+        _apply_string_patches(data, patches)
 
         # Re-encrypt if needed
         if crypt_header:
@@ -1535,6 +1534,7 @@ class WolfRPGParser:
         dst_path.parent.mkdir(parents=True, exist_ok=True)
         dst_path.write_bytes(bytes(data))
         log.info("Exported DB translations to %s", dst_path.name)
+        return None
 
     def _reload_from_backup(self, backup_dir: Path):
         """Re-read maps and common events from backup for idempotent re-export."""
@@ -1550,35 +1550,68 @@ class WolfRPGParser:
                 except Exception:
                     log.debug("Skip map %s on reload", mps.name, exc_info=True)
 
-        # Reload common events
-        ce_path = backup_dir / 'CommonEvent.dat'
+        # Reload common events (same BasicData/ layout as load_project)
+        _reset_proj_key()
+        self.common_events = None
+        ce_path = backup_dir / 'BasicData' / 'CommonEvent.dat'
         if ce_path.is_file():
             try:
                 self.common_events = WolfCommonEvents(ce_path)
                 self.common_events.load()
             except Exception:
+                self.common_events = None
                 log.debug("Skip CE reload", exc_info=True)
 
+        # Reload database structure (.project types) — needed when export
+        # runs after restoring a saved state without load_project.
+        self.databases = []
+        basic_dir = backup_dir / 'BasicData'
+        for db_name in ('DataBase.dat', 'CDataBase.dat', 'SysDatabase.dat'):
+            db_path = basic_dir / db_name
+            if db_path.is_file():
+                try:
+                    db = WolfDatabase(db_path)
+                    db.load()
+                    self.databases.append(db)
+                except Exception:
+                    log.debug("Skip DB %s on reload", db_name, exc_info=True)
+
     @staticmethod
-    def _rebuild_message(original: str, translated: str) -> str:
-        """Rebuild full message with original speaker prefix + translated text."""
-        # Check if original had @N\nSpeaker：\n prefix
-        match = re.match(r'(@\d+\r?\n.*?：\r?\n)', original)
+    def _rebuild_message(original: str, translated: str,
+                         cleaned: Optional[str] = None) -> str:
+        """Rebuild full message with original speaker prefix + translated text.
+
+        ``cleaned`` is the entry.original the translation was made from.
+        When given and found in the raw message, everything before it is
+        kept verbatim as the prefix. This keeps projects saved under the
+        older (multi-line) cleaning regex exporting correctly: the prefix is
+        whatever that version stripped, so nothing is duplicated or lost.
+        """
+        if cleaned:
+            idx = original.rfind(cleaned)
+            if idx >= 0:
+                return original[:idx] + translated
+        match = _SPEAKER_PREFIX_RE.match(original)
         if match:
-            return match.group(1) + translated
-        match = re.match(r'(.*?：\r?\n)', original)
+            return match.group(0) + translated
+        match = _FACE_PREFIX_RE.match(original)
         if match:
-            return match.group(1) + translated
+            return match.group(0) + translated
         return translated
 
     def restore_originals(self, folder: str):
         """Restore original files from backup."""
         game_dir = Path(folder)
-        data_dir = self.data_dir or self._find_data_dir()
+        self.game_dir = game_dir
+        data_dir = self._find_data_dir()
+        self.data_dir = data_dir
         backup_dir = data_dir.parent / (data_dir.name + '_original')
-        if backup_dir.exists():
-            shutil.rmtree(data_dir)
-            shutil.copytree(backup_dir, data_dir)
+        if not backup_dir.is_dir():
+            raise FileNotFoundError(
+                f'No backup found at {backup_dir}. Export the game at least '
+                'once before restoring.')
+        shutil.rmtree(data_dir)
+        shutil.copytree(backup_dir, data_dir)
 
         # Restore Data.wolf if we renamed it
         wolf_bak = game_dir / 'Data.wolf.bak'

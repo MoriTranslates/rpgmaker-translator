@@ -55,23 +55,31 @@ class TranslationProject:
         for e in self.entries:
             self._by_file[e.file].append(e)
             self._by_id[e.id] = e
+        # Remember what the index was built from so accessors can detect
+        # entries being appended/extended or the list being replaced.
+        self._index_src = self.entries
+        self._index_len = len(self.entries)
+
+    def _ensure_index(self):
+        """Rebuild the lookup index if missing or stale (cheap guard)."""
+        if (not hasattr(self, "_by_id")
+                or getattr(self, "_index_src", None) is not self.entries
+                or getattr(self, "_index_len", -1) != len(self.entries)):
+            self._build_index()
 
     def get_entries_for_file(self, filename: str) -> list:
         """Return entries belonging to a specific file."""
-        if not hasattr(self, "_by_file"):
-            self._build_index()
+        self._ensure_index()
         return self._by_file.get(filename, [])
 
     def get_files(self) -> list:
         """Return sorted unique filenames."""
-        if not hasattr(self, "_by_file"):
-            self._build_index()
+        self._ensure_index()
         return sorted(self._by_file.keys())
 
     def get_entry_by_id(self, entry_id: str) -> Optional[TranslationEntry]:
         """Find an entry by its unique ID."""
-        if not hasattr(self, "_by_id"):
-            self._build_index()
+        self._ensure_index()
         return self._by_id.get(entry_id)
 
     def search(self, query: str) -> list:
@@ -94,6 +102,8 @@ class TranslationProject:
         tmp_path = path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         # os.replace is atomic on the same filesystem
         os.replace(tmp_path, path)
 
@@ -104,7 +114,7 @@ class TranslationProject:
             data = json.load(f)
         project = cls(
             project_path=data.get("project_path", ""),
-            project_type=data.get("project_type", "rpgmaker"),
+            project_type=data.get("project_type", "rpgmaker_mv"),
         )
         # Filter to known fields — forward-compatible with newer save files
         known = {f.name for f in TranslationEntry.__dataclass_fields__.values()}
@@ -138,8 +148,7 @@ class TranslationProject:
         Returns:
             Dict with stats: {"by_id": int, "by_text": int, "skipped": int, "new": int}
         """
-        if not hasattr(self, "_by_id"):
-            self._build_index()
+        self._ensure_index()
 
         old_by_id = {}
         old_by_text = defaultdict(list)
@@ -206,8 +215,7 @@ class TranslationProject:
             Dict with stats: {"imported": int, "by_text": int,
                               "identical": int, "skipped": int, "new": int}
         """
-        if not hasattr(self, "_by_id"):
-            self._build_index()
+        self._ensure_index()
 
         donor_by_id = {e.id: e.original for e in donor_entries}
 
@@ -341,7 +349,11 @@ class TranslationProject:
                 metadata = json.loads(zf.read("metadata.json"))
 
         project = cls()
-        project.entries = [TranslationEntry(**e) for e in data.get("entries", [])]
+        known = {f.name for f in TranslationEntry.__dataclass_fields__.values()}
+        project.entries = [
+            TranslationEntry(**{k: v for k, v in e.items() if k in known})
+            for e in data.get("entries", [])
+        ]
         project.glossary = data.get("glossary", {})
         raw_genders = data.get("actor_genders", {})
         actor_genders = {}

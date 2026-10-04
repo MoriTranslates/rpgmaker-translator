@@ -1,0 +1,12 @@
+[
+  null,
+  {
+    "id": 1,
+    "name": "革の盾",
+    "description": "軽い盾。",
+    "note": "",
+    "atypeId": 1,
+    "etypeId": 2,
+    "price": 10
+  }
+]

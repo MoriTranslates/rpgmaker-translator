@@ -1,0 +1,60 @@
+{
+  "gameTitle": "勇者と魔王の物語",
+  "locale": "ja_JP",
+  "currencyUnit": "G",
+  "elements": [
+    "",
+    "物理",
+    "炎"
+  ],
+  "skillTypes": [
+    "",
+    "魔法"
+  ],
+  "weaponTypes": [
+    "",
+    "剣"
+  ],
+  "armorTypes": [
+    "",
+    "一般防具"
+  ],
+  "equipTypes": [
+    "",
+    "武器",
+    "盾"
+  ],
+  "switches": [
+    "",
+    ""
+  ],
+  "variables": [
+    "",
+    "",
+    "",
+    "所持金"
+  ],
+  "terms": {
+    "basic": [
+      "レベル",
+      "Lv",
+      "ＨＰ",
+      "HP"
+    ],
+    "commands": [
+      "戦う",
+      "逃げる",
+      null,
+      "アイテム"
+    ],
+    "params": [
+      "最大ＨＰ",
+      "最大ＭＰ"
+    ],
+    "messages": {
+      "actionFailure": "%1には効かなかった！",
+      "obtainGold": "お金を %1\\G 手に入れた！",
+      "victory": "%1の勝利！"
+    }
+  }
+}

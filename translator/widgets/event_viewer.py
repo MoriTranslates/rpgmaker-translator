@@ -269,8 +269,10 @@ class EventViewerPanel(QWidget):
         if entry.status == "reviewed":
             # Un-review: go back to translated (or untranslated if empty)
             entry.status = "translated" if entry.translation else "untranslated"
-        else:
+        elif (entry.translation or "").strip():
             entry.status = "reviewed"
+        else:
+            return  # Nothing to review — keep it untranslated
         # Update table
         self._detail_table.blockSignals(True)
         status_item = self._detail_table.item(row, 0)
@@ -321,17 +323,37 @@ class EventViewerPanel(QWidget):
                 break
 
     def refresh_current_event(self):
-        """Re-render the current event detail (called after external edits)."""
-        if self._current_prefix:
-            # Preserve scroll and selection
-            saved_row = self._selected_row
-            scroll_val = self._detail_table.verticalScrollBar().value()
+        """Refresh the current event detail in place (after external edits).
+
+        Updates cells without rebuilding the table, and only touches the
+        editor when its text actually differs and the user isn't typing
+        in it — so the cursor never jumps while editing.
+        """
+        entries = self._current_entries
+        if (self._current_prefix
+                and self._detail_table.rowCount() == len(entries)):
+            self._detail_table.blockSignals(True)
+            for row, entry in enumerate(entries):
+                status_item = self._detail_table.item(row, 0)
+                if status_item:
+                    status_item.setText(_STATUS_ICONS.get(entry.status, ""))
+                trans_item = self._detail_table.item(row, 3)
+                text = entry.translation or ""
+                if trans_item and trans_item.text() != text:
+                    trans_item.setText(text)
+                self._apply_row_colors(row, entry)
+            self._detail_table.blockSignals(False)
+            self._update_event_label()
+            row = self._selected_row
+            if (0 <= row < len(entries)
+                    and not self._trans_editor.hasFocus()):
+                text = entries[row].translation or ""
+                if self._trans_editor.toPlainText() != text:
+                    self._trans_editor.blockSignals(True)
+                    self._trans_editor.setPlainText(text)
+                    self._trans_editor.blockSignals(False)
+        elif self._current_prefix:
             self._show_event(self._current_prefix)
-            if 0 <= saved_row < len(self._current_entries):
-                self._detail_table.setCurrentCell(saved_row, 0)
-                # Qt skips currentCellChanged if same row — update editors manually
-                self._on_row_selected(saved_row, 0, -1, -1)
-            self._detail_table.verticalScrollBar().setValue(scroll_val)
         self._refresh_tree_stats()
 
     def refresh_stats(self):
@@ -575,9 +597,23 @@ class EventViewerPanel(QWidget):
 
         self._detail_table.blockSignals(False)
 
-        # Auto-select first row so editors populate
+        # Auto-select first row so editors populate.  setCurrentCell is a
+        # no-op when already at (0, 0), so sync the editors explicitly.
         if entries:
             self._detail_table.setCurrentCell(0, 0)
+            self._on_row_selected(0, 0, -1, -1)
+
+    def _update_event_label(self):
+        """Refresh the 'N/M reviewed' header for the current event."""
+        if not self._current_entries:
+            return
+        total = len(self._current_entries)
+        reviewed = sum(1 for e in self._current_entries
+                       if e.status == "reviewed")
+        display = extract_event_context(self._current_entries[0].id)
+        filename = self._current_prefix.split("/")[0].replace(".json", "")
+        self._event_label.setText(
+            f"{filename} \u2014 {display}  ({reviewed}/{total} reviewed)")
 
     def _apply_row_colors(self, row: int, entry):
         """Apply Catppuccin colors to a detail table row."""
@@ -685,7 +721,9 @@ class EventViewerPanel(QWidget):
 
         self._detail_table.blockSignals(True)
         for row, entry in enumerate(self._current_entries):
-            if entry.status in ("translated", "untranslated"):
+            # Only promote entries that actually have a translation
+            if (entry.status in ("translated", "untranslated")
+                    and (entry.translation or "").strip()):
                 entry.status = "reviewed"
             # Update icon
             status_item = self._detail_table.item(row, 0)
@@ -694,14 +732,7 @@ class EventViewerPanel(QWidget):
             self._apply_row_colors(row, entry)
         self._detail_table.blockSignals(False)
 
-        # Update header
-        total = len(self._current_entries)
-        reviewed = sum(1 for e in self._current_entries
-                       if e.status == "reviewed")
-        display = extract_event_context(self._current_entries[0].id)
-        filename = self._current_prefix.split("/")[0].replace(".json", "")
-        self._event_label.setText(
-            f"{filename} \u2014 {display}  ({reviewed}/{total} reviewed)")
+        self._update_event_label()
 
         # Update tree badge
         self._refresh_tree_stats()

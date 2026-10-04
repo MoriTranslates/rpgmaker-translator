@@ -76,6 +76,56 @@ _TITLE_RE = re.compile(
     r'define\s+config\.name\s*=\s*_?\(\s*"([^"]*)"\s*\)')
 
 
+def _read_rpy(fpath: str, lines: bool = False):
+    """Read a .rpy file (UTF-8, BOM-tolerant, lossy fallback)."""
+    try:
+        with open(fpath, "r", encoding="utf-8-sig") as f:
+            return f.readlines() if lines else f.read()
+    except UnicodeDecodeError:
+        with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+            return f.readlines() if lines else f.read()
+
+
+def _classify_line(line: str):
+    """Classify one script line (without newline) for load AND export.
+
+    Returns (kind, match).  kind is one of "label", "define", "choice",
+    "dialog", "narration" or None.  Only choice/dialog/narration consume a
+    dialogue index — load and export must number entries identically.
+    """
+    m = _LABEL_RE.match(line)
+    if m:
+        return "label", m
+    stripped = line.strip()
+    if not stripped or _SKIP_RE.match(stripped):
+        return None, None
+    if stripped.startswith("define "):
+        return "define", _CHAR_DEF_RE.match(stripped)
+    m = _CHOICE_RE.match(line)
+    if m:
+        return ("choice", m) if m.group(2).strip() else (None, None)
+    m = _DIALOGUE_RE.match(line)
+    if m:
+        return ("dialog", m) if m.group(3).strip() else (None, None)
+    m = _NARRATION_RE.match(line)
+    if m:
+        text = m.group(2).strip()
+        if text and not _STYLE_VALUE_RE.match(text):
+            return "narration", m
+    return None, None
+
+
+def _escape_rpy(text: str) -> str:
+    """Escape bare double quotes for a Ren'Py string literal.
+
+    Originals are captured raw (an already-escaped \\" stays as is), so
+    only unescaped quotes are touched; backslashes are never doubled.
+    Real newlines become the \\n escape so the literal stays on one line.
+    """
+    text = text.replace("\r\n", "\n").replace("\n", "\\n")
+    return re.sub(r'(?<!\\)"', r'\\"', text)
+
+
 # ── Parser ────────────────────────────────────────────────────────────
 
 class RenPyParser:
@@ -139,12 +189,7 @@ class RenPyParser:
 
     def _parse_char_defs(self, fpath: str):
         """Extract character alias → name mappings from a file."""
-        try:
-            with open(fpath, "r", encoding="utf-8-sig") as f:
-                content = f.read()
-        except UnicodeDecodeError:
-            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
+        content = _read_rpy(fpath)
         for match in _CHAR_DEF_RE.finditer(content):
             alias, name = match.group(1), match.group(2)
             if name:  # skip empty names (narrator variants)
@@ -154,12 +199,7 @@ class RenPyParser:
                                    fname: str) -> list[TranslationEntry]:
         """Extract character name definitions as translatable entries."""
         entries = []
-        try:
-            with open(fpath, "r", encoding="utf-8-sig") as f:
-                content = f.read()
-        except UnicodeDecodeError:
-            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
+        content = _read_rpy(fpath)
         for match in _CHAR_DEF_RE.finditer(content):
             alias, name = match.group(1), match.group(2)
             if name and not name.startswith("{"):  # skip styled names
@@ -183,98 +223,53 @@ class RenPyParser:
         current_label = "start"
         dialogue_index = 0
 
-        try:
-            with open(fpath, "r", encoding="utf-8-sig") as f:
-                lines = f.readlines()
-        except UnicodeDecodeError:
-            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
+        lines = _read_rpy(fpath, lines=True)
 
-        for line_num, raw_line in enumerate(lines, 1):
+        for raw_line in lines:
             line = raw_line.rstrip("\n\r")
+            kind, m = _classify_line(line)
 
             # Track labels for entry IDs
-            label_match = _LABEL_RE.match(line)
-            if label_match:
-                current_label = label_match.group(1)
+            if kind == "label":
+                current_label = m.group(1)
                 dialogue_index = 0
                 continue
-
-            # Track menu blocks
-            if re.match(r'\s+menu\s*:', line):
+            # Character definitions are extracted separately
+            if kind not in ("choice", "dialog", "narration"):
                 continue
 
-            # Skip non-translatable lines (including define)
-            stripped = line.strip()
-            if not stripped or _SKIP_RE.match(stripped):
-                continue
-            # Also skip character definitions (handled separately)
-            if stripped.startswith("define "):
-                continue
+            ctx_parts = recent_context[-context_size:]
+            if kind == "choice":
+                text = m.group(2)
+                entry_id = f"{fname}/{current_label}/choice_{dialogue_index}"
+                field = "choice"
+            elif kind == "dialog":
+                alias = m.group(2)
+                text = m.group(3)
+                speaker = self._char_names.get(alias, alias)
+                entry_id = f"{fname}/{current_label}/dialog_{dialogue_index}"
+                field = "dialog"
+                if speaker:
+                    ctx_parts.insert(0, f"[Speaker: {speaker}]")
+            else:
+                text = m.group(2)
+                entry_id = f"{fname}/{current_label}/dialog_{dialogue_index}"
+                field = "dialog"
 
-            # Menu choices
-            choice_match = _CHOICE_RE.match(line)
-            if choice_match:
-                text = choice_match.group(2)
-                if text.strip():
-                    entry_id = f"{fname}/{current_label}/choice_{dialogue_index}"
-                    entries.append(TranslationEntry(
-                        id=entry_id,
-                        file=fname,
-                        field="choice",
-                        original=text,
-                        translation="",
-                        status="untranslated",
-                        context="\n".join(recent_context[-context_size:]),
-                    ))
-                    dialogue_index += 1
-                continue
-
-            # Dialogue: character "text"
-            dlg_match = _DIALOGUE_RE.match(line)
-            if dlg_match:
-                alias = dlg_match.group(2)
-                text = dlg_match.group(3)
-                if text.strip():
-                    speaker = self._char_names.get(alias, alias)
-                    entry_id = (f"{fname}/{current_label}/"
-                                f"dialog_{dialogue_index}")
-                    ctx_parts = recent_context[-context_size:]
-                    if speaker:
-                        ctx_parts.insert(0, f"[Speaker: {speaker}]")
-                    entries.append(TranslationEntry(
-                        id=entry_id,
-                        file=fname,
-                        field="dialog",
-                        original=text,
-                        translation="",
-                        status="untranslated",
-                        context="\n".join(ctx_parts),
-                    ))
-                    recent_context.append(f"{speaker}: {text[:60]}")
-                    dialogue_index += 1
-                continue
-
-            # Narration: "text"
-            narr_match = _NARRATION_RE.match(line)
-            if narr_match:
-                text = narr_match.group(2)
-                if text.strip() and not _STYLE_VALUE_RE.match(text.strip()):
-                    entry_id = (f"{fname}/{current_label}/"
-                                f"dialog_{dialogue_index}")
-                    entries.append(TranslationEntry(
-                        id=entry_id,
-                        file=fname,
-                        field="dialog",
-                        original=text,
-                        translation="",
-                        status="untranslated",
-                        context="\n".join(
-                            recent_context[-context_size:]),
-                    ))
-                    recent_context.append(text[:60])
-                    dialogue_index += 1
-                continue
+            entries.append(TranslationEntry(
+                id=entry_id,
+                file=fname,
+                field=field,
+                original=text,
+                translation="",
+                status="untranslated",
+                context="\n".join(ctx_parts),
+            ))
+            if kind == "dialog":
+                recent_context.append(f"{speaker}: {text[:60]}")
+            elif kind == "narration":
+                recent_context.append(text[:60])
+            dialogue_index += 1
 
         return entries
 
@@ -343,7 +338,6 @@ class RenPyParser:
 
         if not trans_map:
             log.warning("No translations to export")
-            return
 
         # Process each .rpy file
         exported = 0
@@ -363,13 +357,7 @@ class RenPyParser:
     def _export_file(self, source_path: str, target_path: str,
                      fname: str, trans_map: dict) -> int:
         """Apply translations to a single .rpy file. Returns count."""
-        try:
-            with open(source_path, "r", encoding="utf-8-sig") as f:
-                lines = f.readlines()
-        except UnicodeDecodeError:
-            with open(source_path, "r", encoding="utf-8",
-                      errors="replace") as f:
-                lines = f.readlines()
+        lines = _read_rpy(source_path, lines=True)
 
         current_label = "start"
         dialogue_index = 0
@@ -378,83 +366,53 @@ class RenPyParser:
 
         for line_idx, raw_line in enumerate(lines):
             line = raw_line.rstrip("\n\r")
+            kind, m = _classify_line(line)
 
-            # Track labels
-            label_match = _LABEL_RE.match(line)
-            if label_match:
-                current_label = label_match.group(1)
+            if kind == "label":
+                current_label = m.group(1)
                 dialogue_index = 0
                 continue
 
-            stripped = line.strip()
-            if not stripped or _SKIP_RE.match(stripped):
-                continue
-
-            # Menu choices
-            choice_match = _CHOICE_RE.match(line)
-            if choice_match:
-                entry_id = f"{fname}/{current_label}/choice_{dialogue_index}"
-                if entry_id in trans_map:
-                    entry = trans_map[entry_id]
-                    indent = choice_match.group(1)
-                    condition = choice_match.group(3) or ""
-                    new_line = f'{indent}"{entry.translation}"{condition}:\n'
-                    output_lines[line_idx] = new_line
-                    changed = True
-                dialogue_index += 1
-                continue
-
-            # Character definitions
-            char_match = _CHAR_DEF_RE.match(stripped)
-            if char_match:
-                alias = char_match.group(1)
-                entry_id = f"{fname}/define/{alias}"
-                if entry_id in trans_map:
-                    entry = trans_map[entry_id]
-                    old_name = char_match.group(2)
-                    new_line = raw_line.replace(
-                        f'"{old_name}"', f'"{entry.translation}"', 1)
-                    output_lines[line_idx] = new_line
+            if kind == "define":
+                if m is None:
+                    continue
+                entry = trans_map.get(f"{fname}/define/{m.group(1)}")
+                if entry:
+                    output_lines[line_idx] = raw_line.replace(
+                        f'"{m.group(2)}"', f'"{_escape_rpy(entry.translation)}"', 1)
                     changed = True
                 continue
 
-            # Dialogue
-            dlg_match = _DIALOGUE_RE.match(line)
-            if dlg_match:
-                entry_id = (f"{fname}/{current_label}/"
-                            f"dialog_{dialogue_index}")
-                if entry_id in trans_map:
-                    entry = trans_map[entry_id]
-                    indent = dlg_match.group(1)
-                    alias = dlg_match.group(2)
-                    # Escape any quotes in translation
-                    escaped = entry.translation.replace('\\', '\\\\')
-                    escaped = escaped.replace('"', '\\"')
-                    new_line = f'{indent}{alias} "{escaped}"\n'
-                    output_lines[line_idx] = new_line
-                    changed = True
-                dialogue_index += 1
+            if kind is None:
                 continue
 
-            # Narration
-            narr_match = _NARRATION_RE.match(line)
-            if narr_match:
-                entry_id = (f"{fname}/{current_label}/"
-                            f"dialog_{dialogue_index}")
-                if entry_id in trans_map:
-                    entry = trans_map[entry_id]
-                    indent = narr_match.group(1)
-                    escaped = entry.translation.replace('\\', '\\\\')
-                    escaped = escaped.replace('"', '\\"')
-                    new_line = f'{indent}"{escaped}"\n'
-                    output_lines[line_idx] = new_line
-                    changed = True
-                dialogue_index += 1
+            prefix = "choice" if kind == "choice" else "dialog"
+            entry = trans_map.get(
+                f"{fname}/{current_label}/{prefix}_{dialogue_index}")
+            dialogue_index += 1
+            if not entry:
                 continue
+
+            escaped = _escape_rpy(entry.translation)
+            indent = m.group(1)
+            if kind == "choice":
+                condition = m.group(3) or ""
+                new_line = f'{indent}"{escaped}"{condition}:\n'
+            elif kind == "dialog":
+                new_line = f'{indent}{m.group(2)} "{escaped}"\n'
+            else:
+                new_line = f'{indent}"{escaped}"\n'
+            output_lines[line_idx] = new_line
+            changed = True
 
         if changed:
             with open(target_path, "w", encoding="utf-8") as f:
                 f.writelines(output_lines)
+        elif (os.path.normcase(os.path.abspath(source_path)) !=
+              os.path.normcase(os.path.abspath(target_path))):
+            # No translations (or all reverted) — restore pristine backup so
+            # stale English from a previous export doesn't linger.
+            shutil.copy2(source_path, target_path)
 
         return sum(1 for eid in trans_map
                    if eid.startswith(f"{fname}/"))
@@ -466,8 +424,8 @@ class RenPyParser:
         game_dir = os.path.join(project_dir, "game")
         backup_dir = os.path.join(project_dir, "game_original")
         if not os.path.isdir(backup_dir):
-            log.warning("No backup found at %s", backup_dir)
-            return
+            raise FileNotFoundError(
+                "No game_original/ backup exists. Export to game first to create one.")
         restored = 0
         for fname in os.listdir(backup_dir):
             if fname.endswith(".rpy"):

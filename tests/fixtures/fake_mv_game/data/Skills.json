@@ -1,0 +1,21 @@
+[
+  null,
+  {
+    "id": 1,
+    "name": "攻撃",
+    "description": "",
+    "message1": "の攻撃！",
+    "message2": "",
+    "note": "",
+    "mpCost": 0
+  },
+  {
+    "id": 2,
+    "name": "ファイア",
+    "description": "敵単体に炎のダメージ。",
+    "message1": "はファイアを唱えた！",
+    "message2": "",
+    "note": "",
+    "mpCost": 5
+  }
+]

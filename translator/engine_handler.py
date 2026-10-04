@@ -58,10 +58,17 @@ class EngineHandler:
 
     def load_project(self, path: str, context_size: int = 3) -> list:
         """Parse project, return list[TranslationEntry]."""
-        # Set context_size on parser instance (all parsers store it as attribute)
+        import inspect
+        # Parsers that take context_size as an argument (Ren'Py, RM2K, ...)
+        # get it passed; others read it from an attribute.
         if hasattr(self.parser, 'context_size'):
             self.parser.context_size = context_size
-        # Call load_project without context_size kwarg — not all parsers accept it
+        try:
+            params = inspect.signature(self.parser.load_project).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "context_size" in params:
+            return self.parser.load_project(path, context_size=context_size)
         return self.parser.load_project(path)
 
     def load_actors(self, path: str) -> list[dict]:

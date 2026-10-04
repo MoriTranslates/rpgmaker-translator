@@ -4,12 +4,24 @@ Runs automatically after batch translate and on-demand via menu.
 All fixes are pure string operations — no LLM needed.
 """
 
+import math
 import re
 from dataclasses import dataclass
 
 import wordninja
 
 from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
+
+# wordninja's frequency model: cost = log((rank + 1) * log(N)), so a word's
+# dictionary rank can be recovered from its cost.
+_WN_COST = wordninja.DEFAULT_LANGUAGE_MODEL._wordcost
+_WN_LOG_N = math.log(len(_WN_COST))
+
+
+def _is_common_word(word: str, max_rank: int) -> bool:
+    """True if ``word`` is among the ``max_rank`` most frequent English words."""
+    cost = _WN_COST.get(word.lower())
+    return cost is not None and math.exp(cost) / _WN_LOG_N - 1 < max_rank
 
 
 @dataclass
@@ -135,10 +147,17 @@ _DOUBLE_SPACE_RE = re.compile(r'  +')
 # This catches "\\n[1]She" but not "\\n[1] She" or "\\n[1]\n"
 # Only \N[n] needs this fix — it expands to an actor name inline,
 # so "\\N[1]She" would render as "HeroShe" in-game.
-_NAME_CODE_NO_SPACE_RE = re.compile(r'(\\n\[\d+\])(?=[A-Za-z])')
+_NAME_CODE_NO_SPACE_RE = re.compile(r'(\\[nN]\[\d+\])(?=[A-Za-z])')
 
 # Collapsed color codes: \c[N]\c[0] with nothing meaningful between them
-_COLLAPSED_COLOR_RE = re.compile(r'(\\c\[\d+\])(\\c\[0\])')
+_COLLAPSED_COLOR_RE = re.compile(r'(\\[cC]\[\d+\])(\\[cC]\[0\])')
+
+# Spaces/tabs (never newlines) before punctuation, and before a newline
+_SPACE_BEFORE_PUNCT_RE = re.compile(r'[ \t]+([.,!?;:])')
+_SPACE_BEFORE_NEWLINE_RE = re.compile(r'[ \t]+\n')
+
+# TyranoScript-style [tag ...] — text inside is markup, not prose
+_BRACKET_TAG_RE = re.compile(r'\[[^\]]+\]')
 
 # Mid-word space patterns (LLM splits words with spaces: "Dan cer", "Pos it ion")
 # Pattern A: word + short fragment(s): "Sque eze", "Pos it ion", "Act ive"
@@ -164,8 +183,9 @@ _COMMON_WORDS = {
 }
 
 # System term fields that should be title-cased
+# Field strings as produced by rpgmaker_mv: "terms.commands[0]", "elements"
 _SYSTEM_TERM_FIELDS = {
-    "terms/commands", "terms/params", "terms/basic",
+    "terms.commands", "terms.params", "terms.basic",
     "elements", "skillTypes", "weaponTypes", "armorTypes", "equipTypes",
 }
 
@@ -175,26 +195,11 @@ def _is_system_term(entry) -> bool:
     if entry.file != "System.json":
         return False
     field = entry.field
-    # Direct match: "terms/commands/5", "elements/2", etc.
+    # Prefix match: "terms.commands[5]", "elements", etc.
     for prefix in _SYSTEM_TERM_FIELDS:
         if field.startswith(prefix):
             return True
     return False
-
-
-def _is_db_short_field(entry) -> bool:
-    """Check if entry is a short DB field (name, label) vs dialogue."""
-    # Dialogue fields contain "dialog" or are from Map/CommonEvents/Troops
-    field = entry.field
-    if "dialog" in field or "choice" in field:
-        return False
-    # DB files: names, descriptions, terms, etc.
-    db_files = {
-        "Actors.json", "Classes.json", "Skills.json", "Items.json",
-        "Weapons.json", "Armors.json", "Enemies.json", "States.json",
-        "System.json", "Tilesets.json", "MapInfos.json", "Types.json",
-    }
-    return entry.file in db_files
 
 
 def _count_newlines(text: str) -> int:
@@ -249,20 +254,10 @@ def _fix_word_per_line(entry) -> bool:
     # If 70%+ of lines are single words and we have way more \n than original,
     # this is almost certainly a word-per-line artifact
     if word_per_line_ratio >= 0.7 and trans_newlines >= orig_newlines + 3:
-        # Rejoin: replace all \n with spaces, then restore original line breaks
-        # For DB/short fields: just join everything with spaces
-        if _is_db_short_field(entry):
-            fixed = ' '.join(line.strip() for line in lines if line.strip())
-            # Collapse multiple spaces
-            fixed = _DOUBLE_SPACE_RE.sub(' ', fixed).strip()
-            entry.translation = fixed
-            return True
-        else:
-            # For dialogue: join everything, then we'll let word wrap handle it
-            fixed = ' '.join(line.strip() for line in lines if line.strip())
-            fixed = _DOUBLE_SPACE_RE.sub(' ', fixed).strip()
-            entry.translation = fixed
-            return True
+        # Rejoin everything with spaces (word wrap re-flows dialogue later)
+        fixed = ' '.join(line.strip() for line in lines if line.strip())
+        entry.translation = _DOUBLE_SPACE_RE.sub(' ', fixed).strip()
+        return True
 
     return False
 
@@ -282,7 +277,8 @@ def _fix_code_leaks(entry, retranslate_ids: list) -> bool:
     if new != trans:
         # Clean up artifacts: double spaces, space before punctuation
         new = _DOUBLE_SPACE_RE.sub(' ', new)
-        new = re.sub(r'\s+([.,!?;:])', r'\1', new)
+        new = _SPACE_BEFORE_PUNCT_RE.sub(r'\1', new)
+        new = _SPACE_BEFORE_NEWLINE_RE.sub('\n', new)
         new = new.strip()
         # Check if stripping left orphaned text (starts with 's, possessive, etc.)
         # or if a line starts with lowercase after removal (missing subject)
@@ -316,7 +312,7 @@ def _fix_tyrano_tag_leaks(entry) -> bool:
         return False
     new = TYRANO_CODE_RE.sub(' ', trans)
     if new != trans:
-        new = re.sub(r'  +', ' ', new).strip()
+        new = _DOUBLE_SPACE_RE.sub(' ', new).strip()
         entry.translation = new
         return True
     return False
@@ -374,7 +370,7 @@ def _fix_hallucinated_tags(entry) -> bool:
         return False
     new = _HALLUCINATED_TAG_RE.sub('', trans)
     if new != trans:
-        new = re.sub(r'  +', ' ', new).strip()
+        new = _DOUBLE_SPACE_RE.sub(' ', new).strip()
         entry.translation = new
         return True
     return False
@@ -404,7 +400,7 @@ def _fix_extra_tyrano_tags(entry) -> bool:
                     trans = trans[:idx] + trans[idx + len(tag):]
                     changed = True
     if changed:
-        trans = re.sub(r'  +', ' ', trans).strip()
+        trans = _DOUBLE_SPACE_RE.sub(' ', trans).strip()
         entry.translation = trans
     return changed
 
@@ -422,12 +418,21 @@ def _fix_llm_refusal(entry, retranslate_ids: list) -> bool:
     trans = entry.translation
     if not trans:
         return False
-    if _REFUSAL_RE.search(trans):
+    # A refusal either opens the response, or is boilerplate far longer than
+    # the source line.  A phrase merely appearing inside a normal-length
+    # translation ("This book is sexually explicit.") is legitimate content.
+    if (_REFUSAL_RE.match(trans.lstrip())
+            or (len(trans) > 3 * len(entry.original or "")
+                and _REFUSAL_RE.search(trans))):
         entry.translation = ""
         entry.status = "untranslated"
         retranslate_ids.append(entry.id)
         return True
     return False
+
+
+# Characters that mark an original line as quoted speech / thought
+_DIALOGUE_OPENERS = ('「', '『', '"', '\u201c', '\u301d', '（', '(')
 
 
 def _fix_quote_mismatch(entry, retranslate_ids: list) -> bool:
@@ -443,12 +448,13 @@ def _fix_quote_mismatch(entry, retranslate_ids: list) -> bool:
     trans = entry.translation
     if not trans:
         return False
-    # Original is dialogue (has Japanese quotes) — skip
-    if '「' in orig or '『' in orig:
+    # Original is dialogue (has any opening quote/paren style) — skip
+    if any(q in orig for q in _DIALOGUE_OPENERS):
         return False
-    # Translation starts with quote marks — suspicious for narration
+    # Translation starts with double quote marks — suspicious for narration
+    # ("'" is excluded: "'Tis", "'Cause" are ordinary narration openings)
     stripped = trans.lstrip()
-    if stripped and stripped[0] in ('"', '\u201c', "'"):
+    if stripped and stripped[0] in ('"', '\u201c'):
         entry.translation = ""
         entry.status = "untranslated"
         retranslate_ids.append(entry.id)
@@ -582,6 +588,9 @@ def _fix_skill_message_space(entry) -> bool:
     trans = entry.translation
     if not trans or trans.startswith(' '):
         return False
+    # MZ-style "%1 casts %2!" templates place the name themselves
+    if '%1' in entry.original:
+        return False
     entry.translation = ' ' + trans
     return True
 
@@ -695,71 +704,59 @@ def _fix_dialogue_quotes(entry) -> bool:
     trans = entry.translation
     if not trans or '"' not in trans:
         return False
-    new = trans.replace('"', '')
+    # Strip quotes from prose only — [emb exp="f.name"] attributes need them
+    tags = _BRACKET_TAG_RE.findall(trans)
+    segs = [s.replace('"', '') for s in _BRACKET_TAG_RE.split(trans)]
+    new = segs[0] + ''.join(t + s for t, s in zip(tags, segs[1:]))
     # Clean up: collapse double spaces, strip leading/trailing whitespace
-    new = re.sub(r'  +', ' ', new).strip()
+    new = _DOUBLE_SPACE_RE.sub(' ', new).strip()
     if new != trans:
         entry.translation = new
         return True
     return False
 
 
-def _fix_missing_spaces(entry) -> bool:
+# A run of letters that is a whole word on its own (not the tail of a longer
+# token, not right after a backslash control code like \pX[100]).
+_MISSING_SPACE_WORD_RE = re.compile(r'(?<![A-Za-z\\])[A-Za-z][a-z]{4,}(?![A-Za-z])')
+_COMMA_NO_SPACE_RE = re.compile(r',([a-zA-Z])')
+
+
+def _fix_missing_spaces(entry, glossary_words: set | None = None) -> bool:
     """Fix concatenated words (missing spaces) using wordninja segmentation.
 
     LLMs sometimes drop spaces between words, producing runs like
-    "usingher" or "itseems". Uses wordninja's word frequency model
-    to detect and split these.
+    "usingher" or "wantedto".  A whole word is split only when it is NOT
+    itself in wordninja's dictionary, is not a glossary term, and every
+    part is a common English word of 3+ letters — so real words
+    ("Nevertheless"), names ("Seraphina") and romaji ("nakadashi",
+    "oniichan") are left alone.
     """
     trans = entry.translation
     if not trans:
         return False
 
-    try:
-        import wordninja
-    except ImportError:
-        return False
-
-    tag_re = re.compile(r'\[[^\]]+\]')
-
     def try_split(match):
         word = match.group()
+        low = word.lower()
+        if low in _WN_COST or (glossary_words and low in glossary_words):
+            return word
         parts = wordninja.split(word)
-        if len(parts) > 1 and all(len(p) >= 2 for p in parts):
-            if ''.join(parts).lower() == word.lower():
-                return ' '.join(parts)
+        if (len(parts) > 1
+                and all(len(p) >= 3 and _is_common_word(p, 10000) for p in parts)
+                and ''.join(parts) == word):
+            return ' '.join(parts)
         return word
 
-    segments = tag_re.split(trans)
-    tags = tag_re.findall(trans)
+    tags = _BRACKET_TAG_RE.findall(trans)
+    segs = []
+    for seg in _BRACKET_TAG_RE.split(trans):
+        seg = _MISSING_SPACE_WORD_RE.sub(try_split, seg)
+        # Comma without space after (but not in numbers like 1,000)
+        segs.append(_COMMA_NO_SPACE_RE.sub(r', \1', seg))
+    result = segs[0] + ''.join(t + s for t, s in zip(tags, segs[1:]))
 
-    new_segments = []
-    for seg in segments:
-        seg = re.sub(r'[a-z]{5,}', try_split, seg)
-        new_segments.append(seg)
-
-    result = ''
-    for i, seg in enumerate(new_segments):
-        result += seg
-        if i < len(tags):
-            result += tags[i]
-
-    # Also fix camelCase joins (lowercase immediately before uppercase)
-    # e.g. "Poweris" -> "Power is", "timeMea" -> "time Mea"
-    new_segments2 = []
-    for seg in tag_re.split(result):
-        seg = re.sub(r'([a-z])([A-Z])', r'\1 \2', seg)
-        # Fix comma without space after (but not in numbers like 1,000)
-        seg = re.sub(r',([a-zA-Z])', r', \1', seg)
-        new_segments2.append(seg)
-    tags2 = tag_re.findall(result)
-    result = ''
-    for i, seg in enumerate(new_segments2):
-        result += seg
-        if i < len(tags2):
-            result += tags2[i]
-
-    result = re.sub(r'  +', ' ', result)
+    result = _DOUBLE_SPACE_RE.sub(' ', result)
     if result != trans:
         entry.translation = result
         return True
@@ -847,7 +844,7 @@ def _fix_emb_spacing(entry) -> bool:
     new = re.sub(rf'({emb_pat})(\[emb\s)', r'\1 \2', new)
 
     # 6. Collapse double spaces from above fixes
-    new = re.sub(r'  +', ' ', new)
+    new = _DOUBLE_SPACE_RE.sub(' ', new)
 
     if new != trans:
         entry.translation = new
@@ -866,7 +863,9 @@ def _try_merge_fragments(groups: list[str]) -> str | None:
     if len(combined) < 4:
         return None
     # If all fragments are common standalone words, it's likely a real phrase
-    if all(g.lower() in _COMMON_WORDS for g in groups):
+    # ("Pen is mightier", "Run away", "Man age" stay as written)
+    if all(g.lower() in _COMMON_WORDS or _is_common_word(g, 5000)
+           for g in groups):
         return None
     # Ask wordninja: is this one word?
     parts = wordninja.split(combined.lower())
@@ -923,7 +922,6 @@ _COMPOUND_FIXES = {
     "how ever": "however",
     "al though": "although",
     "break fast": "breakfast",
-    "some times": "sometimes",
     "every where": "everywhere",
     "any where": "anywhere",
     "no where": "nowhere",
@@ -942,9 +940,8 @@ _FRAGMENT_FIXES = [
     (re.compile(r'\bDes\s+per\s+at\s+ely\b', re.IGNORECASE), "desperately"),
     (re.compile(r'\bFor\s+tun\s+at\s+ely\b', re.IGNORECASE), "fortunately"),
     (re.compile(r'\bUn\s*for\s+tun\s+at\s+ely\b', re.IGNORECASE), "unfortunately"),
-    (re.compile(r'\bRes\s+is\s+t(?:ing|ance|ed|s)?\b', re.IGNORECASE), lambda m: "resist" + m.group(0).split()[-1][len("t"):] if len(m.group(0).split()) > 1 else m.group(0)),
-    (re.compile(r'\bRes\s+is\s+ting\b', re.IGNORECASE), "resisting"),
-    (re.compile(r'\bRes\s+is\s+tance\b', re.IGNORECASE), "resistance"),
+    (re.compile(r'\b([Rr])es\s+is\s+t(ing|ance|ed|s)?\b'),
+     lambda m: m.group(1) + "esist" + (m.group(2) or "")),
     (re.compile(r'\bAb\s+sol\s+ut\s+ely\b', re.IGNORECASE), "absolutely"),
     (re.compile(r'\bDef\s+in\s+it\s+ely\b', re.IGNORECASE), "definitely"),
     (re.compile(r'\bSep\s+ar\s+at\s+ely\b', re.IGNORECASE), "separately"),
@@ -955,11 +952,20 @@ _FRAGMENT_FIXES = [
     (re.compile(r'\bIn\s+cred\s+ib\s+ly\b', re.IGNORECASE), "incredibly"),
 ]
 
+_SPLIT_BEFORE_OF = {"every one", "any one"}
+_OF_FOLLOWS_RE = re.compile(r'\s+of\b', re.IGNORECASE)
+
 # Build regex: match each key as a whole word (case-insensitive)
 _COMPOUND_RE = re.compile(
     r'\b(' + '|'.join(re.escape(k) for k in _COMPOUND_FIXES) + r')\b',
     re.IGNORECASE,
 )
+
+
+# Context-aware: "satin the/a/my/his/her/an" = "sat in the/a/..."
+_SATIN_RE = re.compile(
+    r'\bsatin\b(?=\s+(?:the|a|an|my|his|her|our|their|this|that|one|it))\b',
+    re.IGNORECASE)
 
 
 def _fix_compound_words(entry) -> bool:
@@ -971,6 +977,9 @@ def _fix_compound_words(entry) -> bool:
     def _replace(m):
         word = m.group(0)
         key = word.lower()
+        # "every one of you" / "any one of these" are correct as written
+        if key in _SPLIT_BEFORE_OF and _OF_FOLLOWS_RE.match(m.string, m.end()):
+            return word
         fix = _COMPOUND_FIXES.get(key, word)
         # Preserve original capitalization
         if word[0].isupper() and fix[0].islower():
@@ -986,10 +995,7 @@ def _fix_compound_words(entry) -> bool:
         else:
             new = pattern.sub(replacement, new)
 
-    # Context-aware: "satin the/a/my/his/her/an" = "sat in the/a/..."
-    new = re.sub(
-        r'\bsatin\b(?=\s+(?:the|a|an|my|his|her|our|their|this|that|one|it))\b',
-        'sat in', new, flags=re.IGNORECASE)
+    new = _SATIN_RE.sub('sat in', new)
 
     if new != trans:
         entry.translation = new
@@ -1032,6 +1038,10 @@ def _fix_split_words(entry) -> bool:
     return False
 
 
+# lowercase letter + space + Capitalized word + space + lowercase
+_MID_CAPS_RE = re.compile(r'([a-z] )([A-Z][a-z]{2,})( [a-z])')
+
+
 def _fix_mid_sentence_caps(entry, known_names: set | None = None) -> bool:
     """Lowercase words that are incorrectly capitalized mid-sentence.
 
@@ -1060,9 +1070,7 @@ def _fix_mid_sentence_caps(entry, known_names: set | None = None) -> bool:
             return m.group(0)
         return m.group(1) + word.lower() + m.group(3)
 
-    new = re.sub(
-        r'([a-z] )([A-Z][a-z]{2,})( [a-z])',
-        _fix, trans)
+    new = _MID_CAPS_RE.sub(_fix, trans)
 
     if new != trans:
         entry.translation = new
@@ -1089,11 +1097,13 @@ def run_post_processing(entries: list, verbose: bool = False,
 
     # Build known names from glossary (should stay capitalized)
     _known_names = set()
+    _glossary_words = set()  # lowercased EN glossary words — never split
     if glossary:
         for en_term in glossary.values():
             for word in en_term.split():
                 if word and word[0].isupper() and len(word) > 1:
                     _known_names.add(word)
+                _glossary_words.add(word.lower())
 
     for entry in entries:
         if entry.status not in ("translated", "reviewed"):
@@ -1181,7 +1191,10 @@ def run_post_processing(entries: list, verbose: bool = False,
             result.word_per_line += 1
             entry_fixed = True
 
-        if _fix_missing_spaces(entry):
+        # TyranoScript only: RPG Maker entries include plugin commands,
+        # note tags and script strings where splitting a token breaks the game.
+        if (project_type == "tyranoscript"
+                and _fix_missing_spaces(entry, _glossary_words)):
             result.missing_spaces += 1
             entry_fixed = True
 

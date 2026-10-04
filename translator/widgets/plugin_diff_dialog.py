@@ -2,7 +2,6 @@
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QCheckBox,
     QDialog,
     QHBoxLayout,
     QHeaderView,
@@ -27,7 +26,6 @@ class PluginDiffDialog(QDialog):
         self.setWindowTitle("Scan Plugin Edits")
         self.resize(900, 500)
         self._diffs = diffs
-        self._checks: list[QCheckBox] = []
         self._build_ui()
 
     def _build_ui(self):

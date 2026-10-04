@@ -6,9 +6,8 @@ Scripts.rvdata2. All are optional and independent of each other.
 Plugins:
   1. Mouse Support — left click=confirm, right click=cancel, cursor visible
   2. Enhanced Messages — word wrap for English, name box, instant text toggle
-  3. Autosave — auto-saves on map transfer, dedicated slot 0
-  4. Save Thumbnails — screenshot preview on save files
-  5. Modern UI — dark flat theme with cleaner colors
+  3. Autosave — auto-saves on map transfer to an extra last save slot
+  4. Modern UI — dark flat theme with cleaner colors
 """
 
 import logging
@@ -44,7 +43,7 @@ module MouseInput
   GetCursorPos    = Win32API.new('user32', 'GetCursorPos', 'p', 'i')
   ScreenToClient  = Win32API.new('user32', 'ScreenToClient', 'lp', 'i')
   GetClientRect   = Win32API.new('user32', 'GetClientRect', 'lp', 'i')
-  GetActiveWindow = Win32API.new('user32', 'GetActiveWindow', '', 'l')
+  FindWindow      = Win32API.new('user32', 'FindWindowA', 'pp', 'l')
   GetAsyncKeyState = Win32API.new('user32', 'GetAsyncKeyState', 'i', 'i')
   ShowCursor      = Win32API.new('user32', 'ShowCursor', 'i', 'i')
   GetForegroundWindow = Win32API.new('user32', 'GetForegroundWindow', '', 'l')
@@ -63,8 +62,10 @@ module MouseInput
   @cursor_shown = false
   @hwnd = nil
 
+  # Find the game window by class (GetActiveWindow returns 0 while the
+  # window is unfocused, and ||= would cache that 0 forever)
   def self.hwnd
-    @hwnd ||= GetActiveWindow.call
+    @hwnd ||= FindWindow.call('RGSS Player', 0)
   end
 
   def self.update
@@ -407,8 +408,9 @@ class Window_Message < Window_Base
 
   def new_page(text, pos)
     new_page_enhanced(text, pos)
-    # Check for name tag: \nm[Name] at start of text
-    if text.sub!(/\A\\nm\[(.+?)\]/i, '')
+    # Check for name tag: \nm[Name] at start of text. new_page receives
+    # text AFTER convert_escape_characters, which turns "\" into "\e".
+    if text.sub!(/\A\enm\[(.+?)\]/i, '')
       show_name_box($1)
     else
       close_name_box
@@ -493,17 +495,33 @@ AUTOSAVE_CODE = r"""
 #--------------------------------------------------------------------------
 # Autosave (Auto-Injected by RPG Translator)
 #--------------------------------------------------------------------------
-#   Auto-saves to slot 20 on every map transfer.
-#   Shows "Autosaved" briefly in the corner.
+#   Auto-saves to one extra slot after the game's last manual slot on
+#   every map transfer.  The slot is shown (and loadable) in the file list.
 #--------------------------------------------------------------------------
 
+module DataManager
+  class << self
+    unless method_defined?(:savefile_max_autosave)
+      alias savefile_max_autosave savefile_max
+    end
+
+    # One extra slot at the end of the list for the autosave
+    def savefile_max
+      savefile_max_autosave + 1
+    end
+  end
+end
+
 module Autosave
-  SLOT = 20  # Save file index (won't conflict with manual saves 1-16)
+  # 0-based file index of the autosave slot (the extra last slot)
+  def self.index
+    DataManager.savefile_max_autosave
+  end
 
   def self.run
     return if $game_map.nil? || $game_party.nil?
     begin
-      DataManager.save_game(SLOT - 1)
+      DataManager.save_game(index)
     rescue
       return  # Silently fail — don't interrupt gameplay
     end
@@ -529,7 +547,7 @@ class Window_SaveFile < Window_Base
 
   def refresh
     draw_savefile_info_autosave
-    if @file_index == Autosave::SLOT - 1
+    if @file_index == Autosave.index
       change_color(system_color)
       draw_text(4, 0, contents_width, line_height, "[Autosave]")
       change_color(normal_color)
@@ -538,67 +556,10 @@ class Window_SaveFile < Window_Base
 end
 """.strip()
 
-# ── Plugin 4: Save Thumbnails ────────────────────────────────
+# (Save Thumbnails plugin removed: RGSS3 has no Bitmap#to_file, so it
+#  could never write a thumbnail.)
 
-THUMBNAIL_NAME = f"Save Thumbnails {_TAG}"
-THUMBNAIL_CODE = r"""
-#--------------------------------------------------------------------------
-# Save Thumbnails (Auto-Injected by RPG Translator)
-#--------------------------------------------------------------------------
-#   Captures a screenshot on save and displays it in the save/load screen.
-#--------------------------------------------------------------------------
-
-module DataManager
-  class << self
-    unless method_defined?(:save_game_thumb_alias)
-      alias save_game_thumb_alias save_game
-    end
-
-    def save_game(index)
-      # Capture screenshot before saving
-      begin
-        thumb = Graphics.snap_to_bitmap
-        thumb_dir = "Save"
-        Dir.mkdir(thumb_dir) unless File.directory?(thumb_dir)
-        thumb.to_file("#{thumb_dir}/thumb_#{index}.png") if thumb.respond_to?(:to_file)
-      rescue
-        # Bitmap#to_file might not exist in all RGSS3 builds
-      end
-      save_game_thumb_alias(index)
-    end
-  end
-end
-
-class Window_SaveFile < Window_Base
-  unless method_defined?(:refresh_thumb_alias)
-    alias refresh_thumb_alias refresh
-  end
-
-  THUMB_W = 174
-  THUMB_H = 104
-
-  def refresh
-    refresh_thumb_alias
-    draw_save_thumbnail
-  end
-
-  def draw_save_thumbnail
-    path = "Save/thumb_#{@file_index}.png"
-    return unless File.exist?(path)
-    begin
-      bmp = Bitmap.new(path)
-      rect = Rect.new(0, 0, bmp.width, bmp.height)
-      dest = Rect.new(0, 0, THUMB_W, THUMB_H)
-      contents.stretch_blt(dest, bmp, rect)
-      bmp.dispose
-    rescue
-      # Missing or corrupt thumbnail — skip
-    end
-  end
-end
-""".strip()
-
-# ── Plugin 5: Modern UI Theme ────────────────────────────────
+# ── Plugin 4: Modern UI Theme ────────────────────────────────
 
 MODERN_UI_NAME = f"Modern UI Theme {_TAG}"
 MODERN_UI_CODE = r"""
@@ -672,7 +633,6 @@ ALL_PLUGINS = [
     (MOUSE_NAME, MOUSE_CODE),
     (MESSAGE_NAME, MESSAGE_CODE),
     (AUTOSAVE_NAME, AUTOSAVE_CODE),
-    (THUMBNAIL_NAME, THUMBNAIL_CODE),
     (MODERN_UI_NAME, MODERN_UI_CODE),
 ]
 
@@ -685,7 +645,7 @@ def inject_plugins(scripts_path: str,
         scripts_path: Path to Scripts.rvdata2
         plugins: List of plugin names to inject, or None for all.
                  Valid names: "mouse", "messages", "autosave",
-                              "thumbnails", "modern_ui"
+                              "modern_ui"
 
     Returns list of successfully injected plugin names.
     """
@@ -697,7 +657,6 @@ def inject_plugins(scripts_path: str,
         "mouse": (MOUSE_NAME, MOUSE_CODE),
         "messages": (MESSAGE_NAME, MESSAGE_CODE),
         "autosave": (AUTOSAVE_NAME, AUTOSAVE_CODE),
-        "thumbnails": (THUMBNAIL_NAME, THUMBNAIL_CODE),
         "modern_ui": (MODERN_UI_NAME, MODERN_UI_CODE),
     }
 
@@ -711,7 +670,8 @@ def inject_plugins(scripts_path: str,
 
     try:
         with open(scripts_path, "rb") as f:
-            scripts = rubymarshal.reader.load(f)
+            original_bytes = f.read()
+        scripts = rubymarshal.reader.loads(original_bytes)
     except Exception as e:
         log.error("Failed to read Scripts.rvdata2: %s", e)
         return []
@@ -751,19 +711,34 @@ def inject_plugins(scripts_path: str,
         return injected
     except Exception as e:
         log.error("Failed to write Scripts.rvdata2: %s", e)
-        if os.path.exists(backup):
-            shutil.copy2(backup, scripts_path)
+        # Put back exactly what was there (the first-time backup may predate
+        # the window scaler or other changes)
+        with open(scripts_path, "wb") as f:
+            f.write(original_bytes)
         return []
 
 
 def remove_plugins(scripts_path: str) -> bool:
-    """Remove all injected plugins."""
-    backup = scripts_path.replace("Scripts.rvdata2", "Scripts_preplugins.rvdata2")
-    if os.path.exists(backup):
-        shutil.copy2(backup, scripts_path)
-        log.info("Restored Scripts.rvdata2 from pre-plugins backup")
+    """Remove all injected plugins (matched by tag).
+
+    Doesn't restore Scripts_preplugins.rvdata2 — that would also wipe the
+    window scaler or anything else changed after the plugins were added.
+    """
+    if not HAS_RUBYMARSHAL:
+        return False
+    try:
+        with open(scripts_path, "rb") as f:
+            scripts = rubymarshal.reader.load(f)
+        kept = [s for s in scripts if _TAG not in str(s[1])]
+        if len(kept) == len(scripts):
+            return False
+        with open(scripts_path, "wb") as f:
+            rubymarshal.writer.write(f, kept)
+        log.info("Removed %d injected plugins", len(scripts) - len(kept))
         return True
-    return False
+    except Exception as e:
+        log.error("Failed to remove plugins: %s", e)
+        return False
 
 
 def list_injected(scripts_path: str) -> list[str]:

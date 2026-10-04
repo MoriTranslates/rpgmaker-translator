@@ -6,8 +6,11 @@ import re
 # Order matters — longer patterns first to avoid partial matches.
 CONTROL_CODE_RE = re.compile(
     r'\\[A-Za-z]+\d*\[[^\]]*\]' # \V[1], \N[2], \FS[24], \F1[k_normal], \FH[ON], etc.
+    r'|\\[A-Za-z]+<[^>\n]*>'    # \N<Bob>, \n<\N[1]> — namebox codes
     r'|\\[{}$.|!><^]'           # \{, \}, \$, \., \|, \!, \>, \<, \^
-    r'|<[^>]+>'                 # HTML-like tags: <br>, <WordWrap>, <B>, etc.
+    r'|\\[Gg](?![A-Za-z\[])'    # \G — currency unit
+    r'|\\\\'                    # \\ — literal backslash
+    r'|<[A-Za-z/][^<>\n]*>'     # HTML-like tags: <br>, <WordWrap>, </B>, etc.
     r'|%\d+'                    # %1, %2, etc. — RPG Maker format specifiers
 )
 
@@ -26,8 +29,11 @@ TYRANO_CODE_RE = re.compile(
 
 # Japanese characters — hiragana, katakana, CJK kanji.
 JAPANESE_RE = re.compile(
-    r'[\u3040-\u309F'   # Hiragana
+    r'[\u3005\u3006'    # \u3005 \u3006 (iteration mark, shime)
+    r'\u300C-\u300F'    # \u300C\u300D\u300E\u300F quote brackets
+    r'\u3040-\u309F'    # Hiragana
     r'\u30A0-\u30FF'    # Katakana
+    r'\u31F0-\u31FF'    # Katakana phonetic extensions (\u31F0)
     r'\u4E00-\u9FFF'    # CJK Unified Ideographs (kanji)
     r'\u3400-\u4DBF'    # CJK Extension A
     r'\uFF65-\uFF9F]'   # Halfwidth Katakana

@@ -1,10 +1,9 @@
 """GPU monitor panel — polls nvidia-smi for VRAM, utilization, temp, power."""
 
-import subprocess
 import logging
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QProcess, QTimer
 
 log = logging.getLogger(__name__)
 
@@ -23,11 +22,13 @@ class GPUMonitorPanel(QWidget):
         super().__init__(parent)
         self._available = False
         self._build_ui()
+        self._proc = QProcess(self)
+        self._proc.finished.connect(self._on_proc_finished)
+        self._proc.errorOccurred.connect(self._on_proc_error)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll)
         self._timer.start(poll_ms)
-        # Initial poll
-        self._poll()
+        # First poll happens in showEvent once the panel is visible
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -82,19 +83,34 @@ class GPUMonitorPanel(QWidget):
         layout.addLayout(stats_row)
 
     def _poll(self):
-        """Query nvidia-smi and update display."""
-        try:
-            result = subprocess.run(
-                _CMD,
-                capture_output=True, text=True, timeout=5,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            if result.returncode != 0:
-                if self._available:
-                    self._set_unavailable()
-                return
+        """Start an async nvidia-smi query (never blocks the GUI thread)."""
+        if not self.isVisible():
+            return  # Nothing to show — skip the subprocess entirely
+        if self._proc.state() != QProcess.ProcessState.NotRunning:
+            return  # Previous query still running
+        self._proc.start(_CMD[0], _CMD[1:])
 
-            line = result.stdout.strip().split("\n")[0]
+    def _on_proc_error(self, error):
+        """nvidia-smi missing or crashed."""
+        if error == QProcess.ProcessError.FailedToStart:
+            # No nvidia-smi on this machine — stop polling for good
+            self._timer.stop()
+            self._set_unavailable()
+        elif error == QProcess.ProcessError.Crashed and self._available:
+            self._set_unavailable()
+
+    def _on_proc_finished(self, exit_code, exit_status):
+        """Parse nvidia-smi output and update display."""
+        if exit_status != QProcess.ExitStatus.NormalExit:
+            return  # errorOccurred handles crashes
+        output = bytes(self._proc.readAllStandardOutput()).decode(
+            "utf-8", errors="replace")
+        if exit_code != 0:
+            if self._available:
+                self._set_unavailable()
+            return
+        try:
+            line = output.strip().split("\n")[0]
             parts = [p.strip() for p in line.split(",")]
             if len(parts) < 6:
                 return
@@ -105,38 +121,41 @@ class GPUMonitorPanel(QWidget):
             gpu_util = int(float(parts[3]))
             temp = int(float(parts[4]))
             power = float(parts[5])
+        except ValueError:
+            return
 
-            self._available = True
-            self._name_label.setText(f"GPU: {name}")
+        self._available = True
+        self._name_label.setText(f"GPU: {name}")
 
-            # VRAM
-            mem_pct = int(mem_used / mem_total * 100) if mem_total > 0 else 0
-            self._vram_bar.setValue(mem_pct)
-            self._vram_bar.setFormat(
-                f"{mem_used:.0f} / {mem_total:.0f} MB ({mem_pct}%)"
-            )
-            self._color_bar(self._vram_bar, mem_pct)
+        # VRAM
+        mem_pct = int(mem_used / mem_total * 100) if mem_total > 0 else 0
+        self._vram_bar.setValue(mem_pct)
+        self._vram_bar.setFormat(
+            f"{mem_used:.0f} / {mem_total:.0f} MB ({mem_pct}%)"
+        )
+        self._color_bar(self._vram_bar, mem_pct)
 
-            # Utilization
-            self._util_bar.setValue(gpu_util)
-            self._util_bar.setFormat(f"{gpu_util}%")
-            self._color_bar(self._util_bar, gpu_util)
+        # Utilization
+        self._util_bar.setValue(gpu_util)
+        self._util_bar.setFormat(f"{gpu_util}%")
+        self._color_bar(self._util_bar, gpu_util)
 
-            # Temp + Power
-            self._temp_label.setText(f"Temp: {temp}\u00b0C")
-            if temp >= 80:
-                self._temp_label.setStyleSheet("font-size: 11px; color: #f38ba8;")
-            elif temp >= 65:
-                self._temp_label.setStyleSheet("font-size: 11px; color: #fab387;")
-            else:
-                self._temp_label.setStyleSheet("font-size: 11px; color: #a6e3a1;")
+        # Temp + Power
+        self._temp_label.setText(f"Temp: {temp}\u00b0C")
+        if temp >= 80:
+            self._temp_label.setStyleSheet("font-size: 11px; color: #f38ba8;")
+        elif temp >= 65:
+            self._temp_label.setStyleSheet("font-size: 11px; color: #fab387;")
+        else:
+            self._temp_label.setStyleSheet("font-size: 11px; color: #a6e3a1;")
 
-            self._power_label.setText(f"Power: {power:.0f}W")
+        self._power_label.setText(f"Power: {power:.0f}W")
 
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
-            if self._available or not hasattr(self, '_init_done'):
-                self._set_unavailable()
-            self._init_done = True
+    def showEvent(self, event):
+        """Poll immediately when the panel becomes visible."""
+        super().showEvent(event)
+        if self._timer.isActive():
+            self._poll()
 
     def _set_unavailable(self):
         """Mark GPU as unavailable."""

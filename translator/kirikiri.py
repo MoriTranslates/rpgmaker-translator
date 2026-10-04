@@ -76,6 +76,31 @@ def _is_inline_tag(line: str) -> bool:
     """Check if a [tag] line is an inline formatting tag (part of text)."""
     return bool(_INLINE_TAGS.match(line))
 
+# Characters LLMs emit that cp932 can't encode (from CrowdParser table)
+_CP932_REPLACEMENTS = {
+    "\u2014": "--",   # em dash
+    "\u2013": "-",    # en dash
+    "\u00b7": ".",    # middle dot
+    "\u2026": "...",  # horizontal ellipsis
+    "\u2018": "'", "\u2019": "'",   # curly single quotes
+    "\u201c": '"', "\u201d": '"',   # curly double quotes
+    "\u00a0": " ",    # no-break space
+}
+
+
+def _cp932_safe(text: str) -> str:
+    """Map common non-cp932 characters to ASCII; '?' for anything left."""
+    for src, dst in _CP932_REPLACEMENTS.items():
+        text = text.replace(src, dst)
+    try:
+        text.encode("cp932")
+    except UnicodeEncodeError:
+        log.warning("Translation has characters cp932 can't encode; "
+                    "replacing with '?': %r", text[:60])
+        text = text.encode("cp932", errors="replace").decode("cp932")
+    return text
+
+
 # ── XP3 archive constants ─────────────────────────────────────
 _XP3_MAGIC = b'XP3\x0D\x0A\x20\x0A\x1A\x8B\x67\x01'
 _XP3_INDEX_CONTINUE = 0x80
@@ -92,6 +117,115 @@ def is_xp3_file(path: str) -> bool:
         return False
 
 
+def _read_xp3_index(f) -> bytes:
+    """Read and return the (decompressed) XP3 file index from an open file.
+
+    Seeks straight to the index instead of loading the whole archive.
+    """
+    f.seek(0, os.SEEK_END)
+    file_size = f.tell()
+    f.seek(0)
+    if f.read(11) != _XP3_MAGIC:
+        raise ValueError("Not an XP3 archive")
+
+    index_offset = struct.unpack('<Q', f.read(8))[0]
+    if not index_offset or index_offset >= file_size:
+        raise ValueError(f"Invalid index offset: {index_offset}")
+
+    f.seek(index_offset)
+    flag = f.read(1)[0]
+
+    if flag == _XP3_INDEX_CONTINUE:
+        # Index is elsewhere: skip 8 bytes, read real offset
+        f.seek(index_offset + 1 + 8)
+        real_offset = struct.unpack('<Q', f.read(8))[0]
+        if real_offset >= file_size:
+            raise ValueError(f"Invalid redirected index offset: {real_offset}")
+        index_offset = real_offset
+        f.seek(index_offset)
+        flag = f.read(1)[0]
+
+    if flag == _XP3_INDEX_COMPRESSED:
+        comp_size, uncomp_size = struct.unpack('<QQ', f.read(16))
+        index_data = zlib.decompress(f.read(comp_size))
+        if len(index_data) != uncomp_size:
+            log.warning("XP3 index size mismatch: got %d, expected %d",
+                        len(index_data), uncomp_size)
+    elif flag == _XP3_INDEX_UNCOMPRESSED:
+        uncomp_size = struct.unpack('<Q', f.read(8))[0]
+        index_data = f.read(uncomp_size)
+    else:
+        raise ValueError(f"Unexpected XP3 index flag: 0x{flag:02x}")
+    return index_data
+
+
+def _iter_xp3_files(index_data: bytes):
+    """Yield (path, segments) for each 'File' chunk of an XP3 index.
+
+    segments = [(is_compressed, offset, uncomp_size, comp_size), ...].
+    Unknown top-level chunks (hnfn, eliF, ...) are skipped by size.
+    """
+    pos = 0
+    while pos + 12 <= len(index_data):
+        chunk_name = index_data[pos:pos + 4]
+        chunk_size = struct.unpack_from('<Q', index_data, pos + 4)[0]
+        pos += 12
+        chunk_end = pos + chunk_size
+        if chunk_name != b'File':
+            pos = chunk_end
+            continue
+
+        # Parse sub-chunks within this File entry
+        file_path = None
+        segments = []
+        while pos + 12 <= chunk_end:
+            sub_name = index_data[pos:pos + 4]
+            sub_size = struct.unpack_from('<Q', index_data, pos + 4)[0]
+            sub_start = pos + 12
+
+            if sub_name == b'info':
+                # flags(4) + uncomp_size(8) + comp_size(8) + path_len(2) + path(UTF-16LE)
+                path_len = struct.unpack_from('<H', index_data, sub_start + 20)[0]
+                path_bytes = index_data[sub_start + 22: sub_start + 22 + path_len * 2]
+                file_path = path_bytes.decode('utf-16le', errors='replace')
+            elif sub_name == b'segm':
+                for s in range(sub_size // 28):
+                    seg_off = sub_start + s * 28
+                    is_comp = struct.unpack_from('<?', index_data, seg_off)[0]
+                    seg_data_off, seg_uncomp, seg_comp = struct.unpack_from(
+                        '<QQQ', index_data, seg_off + 4)
+                    segments.append((is_comp, seg_data_off, seg_uncomp, seg_comp))
+            # skip adlr, time, etc.
+
+            pos = sub_start + sub_size
+
+        pos = chunk_end
+        if file_path and segments:
+            yield file_path, segments
+
+
+def _safe_xp3_target(output_dir: str, file_path: str) -> str | None:
+    """Map an archive path to a location inside output_dir.
+
+    Returns None for paths that would escape output_dir (absolute paths,
+    drive letters, '..' traversal).
+    """
+    rel = file_path.replace("\\", "/").lstrip("/")
+    if not rel or ":" in rel:
+        return None
+    rel = os.path.normpath(rel.replace("/", os.sep))
+    if os.path.isabs(rel) or rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        return None
+    base = os.path.abspath(output_dir)
+    target = os.path.abspath(os.path.join(base, rel))
+    try:
+        if os.path.commonpath([base, target]) != base:
+            return None
+    except ValueError:  # different drives on Windows
+        return None
+    return target
+
+
 def extract_xp3(xp3_path: str, output_dir: str, filter_ext: str | None = None) -> list[str]:
     """Extract files from an XP3 archive.
 
@@ -103,101 +237,35 @@ def extract_xp3(xp3_path: str, output_dir: str, filter_ext: str | None = None) -
     Returns:
         List of extracted file paths (relative to output_dir)
     """
-    with open(xp3_path, "rb") as f:
-        data = f.read()
-
-    if data[:11] != _XP3_MAGIC:
-        raise ValueError(f"Not an XP3 archive: {xp3_path}")
-
-    # Read index offset
-    index_offset = struct.unpack_from('<Q', data, 11)[0]
-    if not index_offset or index_offset >= len(data):
-        raise ValueError(f"Invalid index offset: {index_offset}")
-
-    # Read index flag
-    flag = data[index_offset]
-
-    if flag == _XP3_INDEX_CONTINUE:
-        # Index is elsewhere: skip 8 bytes, read real offset
-        real_offset = struct.unpack_from('<8xQ', data, index_offset + 1)[0]
-        if real_offset >= len(data):
-            raise ValueError(f"Invalid redirected index offset: {real_offset}")
-        flag = data[real_offset]
-        index_offset = real_offset
-
-    if flag == _XP3_INDEX_COMPRESSED:
-        comp_size, uncomp_size = struct.unpack_from('<QQ', data, index_offset + 1)
-        comp_data = data[index_offset + 17 : index_offset + 17 + comp_size]
-        index_data = zlib.decompress(comp_data)
-        if len(index_data) != uncomp_size:
-            log.warning("XP3 index size mismatch: got %d, expected %d",
-                        len(index_data), uncomp_size)
-    elif flag == _XP3_INDEX_UNCOMPRESSED:
-        uncomp_size = struct.unpack_from('<Q', data, index_offset + 1)[0]
-        index_data = data[index_offset + 9 : index_offset + 9 + uncomp_size]
-    else:
-        raise ValueError(f"Unexpected XP3 index flag: 0x{flag:02x}")
-
-    # Parse file entries from index
     extracted = []
-    pos = 0
-    while pos < len(index_data):
-        chunk_name = index_data[pos:pos + 4]
-        if chunk_name != b'File':
-            break  # unexpected chunk, stop
-        pos += 4
-        chunk_size = struct.unpack_from('<Q', index_data, pos)[0]
-        pos += 8
-        chunk_end = pos + chunk_size
+    with open(xp3_path, "rb") as f:
+        try:
+            index_data = _read_xp3_index(f)
+        except ValueError as e:
+            raise ValueError(f"{e}: {xp3_path}") from None
 
-        # Parse sub-chunks within this File entry
-        file_path = None
-        segments = []
-        while pos < chunk_end:
-            sub_name = index_data[pos:pos + 4]
-            pos += 4
-            sub_size = struct.unpack_from('<Q', index_data, pos)[0]
-            pos += 8
-            sub_start = pos
-
-            if sub_name == b'info':
-                # flags(4) + uncomp_size(8) + comp_size(8) + path_len(2) + path(UTF-16LE) + null(2)
-                _flags = struct.unpack_from('<I', index_data, pos)[0]
-                path_len = struct.unpack_from('<H', index_data, pos + 20)[0]
-                path_bytes = index_data[pos + 22 : pos + 22 + path_len * 2]
-                file_path = path_bytes.decode('utf-16le')
-            elif sub_name == b'segm':
-                num_segments = sub_size // 28
-                for s in range(num_segments):
-                    seg_off = sub_start + s * 28
-                    is_comp = struct.unpack_from('<?', index_data, seg_off)[0]
-                    seg_data_off = struct.unpack_from('<Q', index_data, seg_off + 4)[0]
-                    seg_uncomp = struct.unpack_from('<Q', index_data, seg_off + 12)[0]
-                    seg_comp = struct.unpack_from('<Q', index_data, seg_off + 20)[0]
-                    segments.append((is_comp, seg_data_off, seg_uncomp, seg_comp))
-            # skip adlr, time, etc.
-
-            pos = sub_start + sub_size
-
-        if file_path and segments:
+        for file_path, segments in _iter_xp3_files(index_data):
             # Apply extension filter
             if filter_ext and not file_path.lower().endswith(filter_ext.lower()):
                 continue
 
+            out_path = _safe_xp3_target(output_dir, file_path)
+            if out_path is None:
+                log.warning("Skipping XP3 entry with unsafe path: %r", file_path)
+                continue
+
             # Read and decompress file data from all segments
-            file_data = b''
+            parts = []
             for is_comp, seg_off, seg_uncomp, seg_comp in segments:
-                read_size = seg_comp if is_comp else seg_uncomp
-                seg_raw = data[seg_off : seg_off + read_size]
+                f.seek(seg_off)
+                seg_raw = f.read(seg_comp if is_comp else seg_uncomp)
                 if is_comp:
                     seg_raw = zlib.decompress(seg_raw)
-                file_data += seg_raw
+                parts.append(seg_raw)
 
-            # Write to output
-            out_path = os.path.join(output_dir, file_path.replace("/", os.sep))
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            with open(out_path, "wb") as f:
-                f.write(file_data)
+            with open(out_path, "wb") as out:
+                out.write(b''.join(parts))
             extracted.append(file_path)
 
     log.info("Extracted %d files from %s", len(extracted), os.path.basename(xp3_path))
@@ -226,25 +294,7 @@ def find_scenario_xp3(project_dir: str) -> str | None:
     for xp3_path in candidates:
         try:
             with open(xp3_path, "rb") as f:
-                data = f.read()
-            if data[:11] != _XP3_MAGIC:
-                continue
-            # Quick check: decompress index and look for .ks paths
-            index_offset = struct.unpack_from('<Q', data, 11)[0]
-            flag = data[index_offset]
-            if flag == _XP3_INDEX_CONTINUE:
-                real_offset = struct.unpack_from('<8xQ', data, index_offset + 1)[0]
-                flag = data[real_offset]
-                index_offset = real_offset
-            if flag == _XP3_INDEX_COMPRESSED:
-                comp_size = struct.unpack_from('<Q', data, index_offset + 1)[0]
-                comp_data = data[index_offset + 17 : index_offset + 17 + comp_size]
-                index_data = zlib.decompress(comp_data)
-            elif flag == _XP3_INDEX_UNCOMPRESSED:
-                uncomp_size = struct.unpack_from('<Q', data, index_offset + 1)[0]
-                index_data = data[index_offset + 9 : index_offset + 9 + uncomp_size]
-            else:
-                continue
+                index_data = _read_xp3_index(f)
             # Check for .ks file paths in the index (UTF-16LE encoded)
             if b'.\x00k\x00s\x00' in index_data:  # ".ks" in UTF-16LE
                 return xp3_path
@@ -300,6 +350,15 @@ class KirikiriParser:
             if entry.translation and entry.status in ("translated", "reviewed"):
                 by_file.setdefault(entry.file, []).append(entry)
 
+        # Files with no (remaining) translations are reset from the backup
+        # so reverted entries don't keep English from an earlier export.
+        for ks in Path(backup_dir).rglob("*.ks"):
+            rel_path = str(ks.relative_to(Path(backup_dir))).replace("\\", "/")
+            if rel_path not in by_file:
+                live_path = os.path.join(scenario_dir, rel_path)
+                os.makedirs(os.path.dirname(live_path), exist_ok=True)
+                shutil.copy2(str(ks), live_path)
+
         export_count = 0
         for rel_path, file_entries in by_file.items():
             # Always read from backup for idempotent re-export
@@ -311,31 +370,22 @@ class KirikiriParser:
                 log.warning("Source file not found: %s", source)
                 continue
 
+            encoding = self._detect_encoding(source)
             content = self._read_file(source)
             lines = content.split("\n")
 
-            # Build translation map: line_number -> entry
-            trans_map = {}
-            for entry in file_entries:
-                # ID format: "rel_path/dialogue/LINE_START"
-                parts = entry.id.rsplit("/", 2)
-                if len(parts) >= 3:
-                    try:
-                        line_num = int(parts[-1])
-                        trans_map[line_num] = entry
-                    except ValueError:
-                        continue
+            # Re-parse the source exactly like load did to recover the real
+            # line indices of each entry (blocks may contain blank lines).
+            line_map: dict[str, list[int]] = {}
+            self._parse_lines(lines, rel_path, line_map)
 
-            translated_lines = self._apply_translations(lines, trans_map)
+            translated_lines = self._apply_translations(
+                lines, file_entries, line_map,
+                cp932=(encoding == "cp932"))
             translated_content = "\n".join(translated_lines)
 
-            # Detect encoding from source; upgrade to UTF-8 if translations
-            # contain characters outside the source encoding (e.g. cp932)
-            encoding = self._detect_encoding(source)
-            try:
-                translated_content.encode(encoding)
-            except (UnicodeEncodeError, LookupError):
-                encoding = "utf-8"
+            # Keep the source encoding — the engine decides how to read the
+            # file from its bytes (BOM / none), so never switch it silently.
             os.makedirs(os.path.dirname(live_path), exist_ok=True)
             with open(live_path, "w", encoding=encoding, errors="replace") as f:
                 f.write(translated_content)
@@ -347,12 +397,11 @@ class KirikiriParser:
     def restore_originals(self, project_dir: str):
         """Restore original scenario files from backup."""
         scenario_dir = self._find_scenario_dir(project_dir)
-        if not scenario_dir:
-            return
-        backup_dir = os.path.join(os.path.dirname(scenario_dir), "scenario_original")
-        if not os.path.isdir(backup_dir):
-            log.warning("No scenario_original/ backup found")
-            return
+        backup_dir = (os.path.join(os.path.dirname(scenario_dir), "scenario_original")
+                      if scenario_dir else None)
+        if not backup_dir or not os.path.isdir(backup_dir):
+            raise FileNotFoundError(
+                "No scenario_original/ backup exists. Export to game first to create one.")
         shutil.rmtree(scenario_dir)
         shutil.copytree(backup_dir, scenario_dir)
         log.info("Restored scenario/ from backup")
@@ -419,6 +468,11 @@ class KirikiriParser:
         if not os.path.isdir(path):
             return False
 
+        # TyranoScript also uses .ks + 【】 — its tyrano/ runtime folder wins
+        if (os.path.isdir(os.path.join(path, "tyrano")) or
+                os.path.isdir(os.path.join(path, "extracted", "tyrano"))):
+            return False
+
         # Check for startup.tjs (definitive Kirikiri marker)
         if os.path.exists(os.path.join(path, "data", "startup.tjs")):
             return True
@@ -474,10 +528,12 @@ class KirikiriParser:
         return None
 
     def _detect_encoding(self, path: str) -> str:
-        """Detect if a file is UTF-8 or cp932."""
+        """Detect if a file is UTF-16 (BOM), UTF-8 or cp932."""
         with open(path, "rb") as f:
             raw = f.read()
-        # BOM check
+        # BOM check — Kirikiri commonly ships UTF-16LE scripts with a BOM
+        if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+            return "utf-16"
         if raw[:3] == b"\xef\xbb\xbf":
             return "utf-8-sig"
         try:
@@ -495,7 +551,16 @@ class KirikiriParser:
     def _parse_ks_file(self, ks_path: Path, rel_path: str) -> list[TranslationEntry]:
         """Parse a single .ks file into TranslationEntry list."""
         content = self._read_file(str(ks_path))
-        lines = content.split("\n")
+        return self._parse_lines(content.split("\n"), rel_path)
+
+    def _parse_lines(self, lines: list[str], rel_path: str,
+                     line_map: dict[str, list[int]] | None = None
+                     ) -> list[TranslationEntry]:
+        """Parse .ks lines into entries.
+
+        If line_map is given, it receives entry_id -> the exact source line
+        indices that make up the entry's text (used by export).
+        """
         entries = []
         recent_context: list[str] = []
         current_label = ""
@@ -525,6 +590,7 @@ class KirikiriParser:
                 speaker = speaker.replace("\u3000", "")
                 first_text_line = -1
                 text_lines = []
+                text_idx = []
                 is_cn_format = cn_m is not None
 
                 # Collect text lines until end marker or next command
@@ -559,6 +625,7 @@ class KirikiriParser:
                     if first_text_line < 0:
                         first_text_line = j
                     text_lines.append(tline)
+                    text_idx.append(j)
                     j += 1
 
                 if text_lines:
@@ -577,6 +644,8 @@ class KirikiriParser:
                     # Only include entries with translatable text
                     if JAPANESE_RE.search(full_text) or self._has_translatable_text(full_text):
                         entry_id = f"{rel_path}/{field}/{first_text_line}"
+                        if line_map is not None:
+                            line_map[entry_id] = text_idx
 
                         # Build context
                         ctx_parts = []
@@ -609,6 +678,7 @@ class KirikiriParser:
             if bracket_m:
                 speaker = bracket_m.group(1).replace("\u3000", "")
                 text_lines = []
+                text_idx = []
                 first_text_line = -1
                 j = i + 1
                 while j < len(lines):
@@ -628,6 +698,7 @@ class KirikiriParser:
                     if first_text_line < 0:
                         first_text_line = j
                     text_lines.append(tline)
+                    text_idx.append(j)
                     j += 1
 
                 if text_lines:
@@ -640,6 +711,8 @@ class KirikiriParser:
                         if current_label:
                             ctx_parts.append(f"[Label: {current_label}]")
                         ctx_parts.extend(recent_context[-self.context_size:])
+                        if line_map is not None:
+                            line_map[f"{rel_path}/{field}/{first_text_line}"] = text_idx
                         entries.append(TranslationEntry(
                             id=f"{rel_path}/{field}/{first_text_line}",
                             file=rel_path,
@@ -664,6 +737,7 @@ class KirikiriParser:
                     stripped and JAPANESE_RE.search(stripped)):
                 # Collect consecutive plain text lines
                 text_lines = [line]
+                text_idx = [i]
                 first_text_line = i
                 j = i + 1
                 while j < len(lines):
@@ -680,6 +754,7 @@ class KirikiriParser:
                     if _NAME_TAG.match(tstripped) or _CN_TAG.match(tstripped):
                         break
                     text_lines.append(tline)
+                    text_idx.append(j)
                     j += 1
 
                 full_text = "\n".join(text_lines)
@@ -688,6 +763,8 @@ class KirikiriParser:
                     if current_label:
                         ctx_parts.append(f"[Label: {current_label}]")
                     ctx_parts.extend(recent_context[-self.context_size:])
+                    if line_map is not None:
+                        line_map[f"{rel_path}/narration/{first_text_line}"] = text_idx
                     entries.append(TranslationEntry(
                         id=f"{rel_path}/narration/{first_text_line}",
                         file=rel_path,
@@ -717,29 +794,38 @@ class KirikiriParser:
             return False
         return True
 
-    def _apply_translations(self, lines: list[str], trans_map: dict[int, TranslationEntry]) -> list[str]:
-        """Apply translations to a list of source lines."""
+    def _apply_translations(self, lines: list[str],
+                            entries: list[TranslationEntry],
+                            line_map: dict[str, list[int]],
+                            cp932: bool = False) -> list[str]:
+        """Apply translations to a list of source lines.
+
+        Each entry replaces exactly the source lines it was parsed from
+        (line_map, from re-parsing the source); the line count never changes.
+        """
         result = list(lines)
-        # Process in reverse order so line number shifts don't affect earlier entries
-        for line_num in sorted(trans_map.keys(), reverse=True):
-            entry = trans_map[line_num]
+        for entry in entries:
             if not entry.translation:
                 continue
-
-            # Bounds check
-            if line_num >= len(result):
-                log.warning("Line %d out of range for %s", line_num, entry.file)
+            indices = line_map.get(entry.id)
+            if indices is None:
+                # Entry not found by re-parse — fall back to the ID's start
+                # line + the original's line count (contiguous block)
+                try:
+                    start = int(entry.id.rsplit("/", 1)[-1])
+                except ValueError:
+                    continue
+                indices = list(range(start, start + len(entry.original.split("\n"))))
+            indices = [k for k in indices if k < len(result)]
+            if not indices:
+                log.warning("Entry %s out of range", entry.id)
                 continue
 
-            # Find the extent of the original text block
-            original_lines = entry.original.split("\n")
-            num_original = len(original_lines)
-            translation_lines = entry.translation.split("\n")
-
-            # Replace the original text lines with translation
-            # line_num is 0-indexed (the first text line after @name)
-            start = line_num
-            end = start + num_original
+            num_original = len(indices)
+            translation = entry.translation
+            if cp932:
+                translation = _cp932_safe(translation)
+            translation_lines = translation.split("\n")
 
             # Pad or trim translation to match original line count
             # (preserves @e/@ve alignment)
@@ -752,6 +838,7 @@ class KirikiriParser:
                 last = " ".join(translation_lines[num_original - 1:])
                 translation_lines = translation_lines[:num_original - 1] + [last]
 
-            result[start:end] = translation_lines
+            for k, text in zip(indices, translation_lines):
+                result[k] = text
 
         return result

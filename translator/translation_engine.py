@@ -7,31 +7,57 @@ import requests
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
-from .ai_client import AIClient
+from .ai_client import AIClient, RateLimited, ServerUnreachable
 from .project_model import TranslationEntry
 
 log = logging.getLogger(__name__)
 
 
 def _is_server_down_error(exc: Exception) -> bool:
-    """Heuristic — does this exception indicate Ollama/the server is down?"""
-    if isinstance(exc, ConnectionError):
+    """Does this exception mean the LLM server is unreachable?
+
+    Only genuine transport failures count. Plain ConnectionError from the
+    client (bad model name, auth, HTTP 5xx, rate limit) and ValueError
+    (empty/garbage output) are per-request failures, not server-down.
+    """
+    if isinstance(exc, ServerUnreachable):
         return True
-    if isinstance(exc, requests.exceptions.ConnectionError):
+    if isinstance(exc, (requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout)):
         return True
-    if isinstance(exc, requests.exceptions.ReadTimeout):
-        return True
-    if isinstance(exc, OSError):
-        # WinError 10054 (connection forcibly closed by remote host) etc.
-        msg = str(exc).lower()
-        if "10054" in msg or "forcibly closed" in msg or "connection reset" in msg:
-            return True
-        if "connection aborted" in msg or "connection refused" in msg:
-            return True
-    msg = str(exc).lower()
-    if "read timeout" in msg or "connection refused" in msg:
+    # Raw socket-level failures (not wrapped by the client)
+    if isinstance(exc, (ConnectionRefusedError, ConnectionResetError,
+                        ConnectionAbortedError, TimeoutError)):
         return True
     return False
+
+
+RATE_LIMIT_MAX_WAITS = 5
+RATE_LIMIT_BASE_DELAY_S = 5.0
+
+
+def _call_with_backoff(client, fn):
+    """Call fn(); on RateLimited, wait with exponential backoff and retry.
+
+    Rate limits are not server-down signals — back off instead of counting
+    them. Waits are interruptible via client.cancel_event. Re-raises the
+    RateLimited error after RATE_LIMIT_MAX_WAITS attempts or on cancel.
+    """
+    cancel_event = getattr(client, "cancel_event", None)
+    for attempt in range(RATE_LIMIT_MAX_WAITS + 1):
+        try:
+            return fn()
+        except RateLimited:
+            if attempt >= RATE_LIMIT_MAX_WAITS:
+                raise
+            delay = min(60.0, RATE_LIMIT_BASE_DELAY_S * (2 ** attempt))
+            log.warning("Rate limited — backing off %.0fs (attempt %d/%d)",
+                        delay, attempt + 1, RATE_LIMIT_MAX_WAITS)
+            if cancel_event is not None:
+                if cancel_event.wait(delay):
+                    raise
+            else:
+                time.sleep(delay)
 
 
 # Fields that benefit from event-grouped translation (conversational flow).
@@ -132,16 +158,21 @@ class TranslationWorker(QObject):
 
     def run(self):
         """Process events in order; reset history between events."""
-        for event_entries in self.events:
-            if self._cancelled:
-                break
-            # Reset history at event boundary
-            self._history = []
-            for entry in event_entries:
+        try:
+            for event_entries in self.events:
                 if self._cancelled:
                     break
-                self._process_entry(entry)
-        self.finished.emit()
+                # Reset history at event boundary
+                self._history = []
+                for entry in event_entries:
+                    if self._cancelled:
+                        break
+                    self._process_entry(entry)
+        except Exception:
+            log.exception("Translation worker crashed")
+        finally:
+            # Always signal completion so the UI never gets stuck "running"
+            self.finished.emit()
 
     def _process_entry(self, entry):
         """Translate or polish a single entry, updating history."""
@@ -161,14 +192,16 @@ class TranslationWorker(QObject):
 
         try:
             if self.mode == "polish":
-                result = self.client.polish(text=entry.translation)
+                result = _call_with_backoff(
+                    self.client, lambda: self.client.polish(text=entry.translation))
             else:
-                result = self.client.translate(
+                history = self._history if self.max_history > 0 else None
+                result = _call_with_backoff(self.client, lambda: self.client.translate(
                     text=entry.original,
                     context=entry.context,
                     field=entry.field,
-                    history=self._history if self.max_history > 0 else None,
-                )
+                    history=history,
+                ))
             self.entry_done.emit(entry.id, result)
             if self.mode == "translate" and self.max_history > 0:
                 self._history.append((entry.original, result))
@@ -178,6 +211,9 @@ class TranslationWorker(QObject):
             if _is_server_down_error(e):
                 self.connection_error.emit(str(e))
             self.error.emit(entry.id, str(e))
+        except Exception as e:
+            log.exception("Unexpected error on %s", entry.id)
+            self.error.emit(entry.id, repr(e))
 
 
 class BatchTranslationWorker(QObject):
@@ -223,14 +259,18 @@ class BatchTranslationWorker(QObject):
 
     def run(self):
         """Process events in order; within each event, batch and reset history."""
-        for event_entries in self.events:
-            if self._cancelled:
-                break
-            # Reset history at event boundary so prior scenes don't leak in
-            self._history = []
-            self._run_event(event_entries)
-
-        self.finished.emit()
+        try:
+            for event_entries in self.events:
+                if self._cancelled:
+                    break
+                # Reset history at event boundary so prior scenes don't leak in
+                self._history = []
+                self._run_event(event_entries)
+        except Exception:
+            log.exception("Batch translation worker crashed")
+        finally:
+            # Always signal completion so the UI never gets stuck "running"
+            self.finished.emit()
 
     def _run_event(self, event_entries: list):
         """Process a single event's entries in batches without crossing into others."""
@@ -281,12 +321,13 @@ class BatchTranslationWorker(QObject):
                 return
             try:
                 if self.mode == "translate":
-                    results = self.client.translate_batch(
-                        payload,
-                        history=self._history if self.max_history > 0 else None,
-                    )
+                    history = self._history if self.max_history > 0 else None
+                    results = _call_with_backoff(
+                        self.client,
+                        lambda: self.client.translate_batch(payload, history=history))
                 else:
-                    results = self.client.polish_batch(payload)
+                    results = _call_with_backoff(
+                        self.client, lambda: self.client.polish_batch(payload))
 
                 # Emit results for entries we got back
                 got_keys = set()
@@ -324,7 +365,12 @@ class BatchTranslationWorker(QObject):
                 log.warning("Batch attempt %d failed: %s", attempt + 1, e)
                 if _is_server_down_error(e):
                     self.connection_error.emit(str(e))
-                if attempt < self.MAX_RETRIES - 1:
+                # Parse/validation failures (ValueError) are deterministic —
+                # the same request (temp 0, seed 42) would fail the same way,
+                # so skip the retry and go straight to halving + fallback.
+                if (attempt < self.MAX_RETRIES - 1
+                        and not isinstance(e, ValueError)
+                        and not self._cancelled):
                     continue  # Retry
                 # All retries exhausted — halve batch size and fall back for this batch
                 old_size = self.batch_size
@@ -334,6 +380,14 @@ class BatchTranslationWorker(QObject):
                             "halving to %d. Falling back for this batch.",
                             old_size, self.MAX_RETRIES, self.batch_size)
                 self._fallback_single(batch)
+                return
+            except Exception as e:
+                # Unexpected bug — report this batch's entries and move on
+                # instead of killing the whole worker.
+                log.exception("Unexpected batch error")
+                for entry in batch:
+                    self.error.emit(entry.id, repr(e))
+                return
 
     def _fallback_single(self, entries: list):
         """Translate entries one at a time (fallback when batch fails)."""
@@ -345,14 +399,16 @@ class BatchTranslationWorker(QObject):
             self.item_processed.emit(preview)
             try:
                 if self.mode == "polish":
-                    result = self.client.polish(text=entry.translation)
+                    result = _call_with_backoff(
+                        self.client, lambda: self.client.polish(text=entry.translation))
                 else:
-                    result = self.client.translate(
+                    history = self._history if self.max_history > 0 else None
+                    result = _call_with_backoff(self.client, lambda: self.client.translate(
                         text=entry.original,
                         context=entry.context,
                         field=entry.field,
-                        history=self._history if self.max_history > 0 else None,
-                    )
+                        history=history,
+                    ))
                 self.entry_done.emit(entry.id, result)
                 # Update history after successful single-entry translation
                 if self.mode == "translate" and self.max_history > 0:
@@ -363,6 +419,9 @@ class BatchTranslationWorker(QObject):
                 if _is_server_down_error(e):
                     self.connection_error.emit(str(e))
                 self.error.emit(entry.id, str(e))
+            except Exception as e:
+                log.exception("Unexpected error on %s", entry.id)
+                self.error.emit(entry.id, repr(e))
 
 
 class TranslationEngine(QObject):
@@ -394,20 +453,40 @@ class TranslationEngine(QObject):
         self._cancelled = False
         self._connection_failures: list[float] = []  # timestamps for window
         self._server_down_emitted = False
+        # Last started job — (mode, entries, memory_source) — so the UI can
+        # replay it after a server-down pause via resume_last_job().
+        self.last_job: tuple | None = None
+        self._done_ids: set[str] = set()   # entries completed in the current job
+        self._resume_pending = False
 
     @property
     def is_running(self) -> bool:
         return any(t.isRunning() for t in self._threads)
 
-    def translate_batch(self, entries: list):
+    def translate_batch(self, entries: list, memory_source: list | None = None):
         """Start batch translation with parallel workers.
 
         Pre-fills untranslated entries whose original text was already
         translated elsewhere in the project (cross-project translation
         memory), saving the LLM trips for repeated lines.
+
+        Args:
+            entries: Entries to translate (untranslated ones are picked).
+            memory_source: Entries to build the translation memory from —
+                pass the full project entry list when ``entries`` is a
+                subset (one file, one speaker group). Defaults to ``entries``.
         """
         if self.is_running:
             return
+
+        self.last_job = ("translate", entries, memory_source)
+        self._done_ids = set()
+
+        # Empty originals: mark skipped here (not in the worker) so they
+        # don't count toward _total and progress can reach 100%.
+        for e in entries:
+            if e.status == "untranslated" and not (e.original or "").strip():
+                e.status = "skipped"
 
         # Filter to only untranslated entries
         to_translate = [e for e in entries if e.status == "untranslated"]
@@ -417,7 +496,8 @@ class TranslationEngine(QObject):
 
         # Cross-project translation memory: pre-fill duplicates from
         # entries that are already translated elsewhere in the project.
-        memory = self._build_translation_memory(entries)
+        memory = self._build_translation_memory(
+            memory_source if memory_source is not None else entries)
         prefilled = 0
         if memory:
             for e in to_translate:
@@ -431,10 +511,10 @@ class TranslationEngine(QObject):
             if prefilled:
                 log.info("Translation memory: pre-filled %d/%d entries from "
                          "already-translated duplicates", prefilled, len(to_translate))
+                self.checkpoint.emit()  # save the prefilled work
             # Re-filter — the freshly translated ones drop out
             to_translate = [e for e in to_translate if e.status == "untranslated"]
             if not to_translate:
-                self.checkpoint.emit()  # save the prefilled work
                 self.finished.emit()
                 return
 
@@ -444,6 +524,7 @@ class TranslationEngine(QObject):
         self._cancelled = False
         self._connection_failures = []
         self._server_down_emitted = False
+        self.client.cancel_event.clear()
 
         self._start_workers(to_translate)
 
@@ -498,6 +579,9 @@ class TranslationEngine(QObject):
         if self.is_running:
             return
 
+        self.last_job = ("polish", entries, None)
+        self._done_ids = set()
+
         # Filter to entries that have translations
         to_polish = [e for e in entries
                      if e.status in ("translated", "reviewed")
@@ -515,10 +599,11 @@ class TranslationEngine(QObject):
         self._cancelled = False
         self._connection_failures = []
         self._server_down_emitted = False
+        self.client.cancel_event.clear()
 
-        # Polish event-grouped, with history enabled so the polisher sees prior
-        # polished lines from the same scene — keeps tone/voice consistent
-        # across a polish pass on long events.
+        # Polish event-grouped so each scene's lines are polished in order by
+        # one worker. (Polish requests carry no history — each batch/line is
+        # polished on its own.)
         event_buckets, flat = _group_by_event(to_polish)
         n = min(self.num_workers, max(1, len(event_buckets) + (1 if flat else 0)))
         worker_assignments = _distribute_events(event_buckets, flat, n)
@@ -559,10 +644,38 @@ class TranslationEngine(QObject):
         )
 
     def cancel(self):
-        """Cancel all running workers."""
+        """Cancel all running workers.
+
+        Also sets client.cancel_event so multi-request client calls (Japanese
+        retry, batch per-entry fallback, rate-limit waits) stop early.
+        """
         self._cancelled = True
+        self._resume_pending = False
+        self.client.cancel_event.set()
         for worker in self._workers:
             worker.cancel()
+
+    def resume_last_job(self):
+        """Re-run the last translate/polish job (e.g. after a server-down pause).
+
+        Translate: already-translated entries are skipped by status.
+        Polish: entries already polished in the interrupted run are excluded.
+        If workers are still winding down, the restart is deferred until
+        they have all finished.
+        """
+        if not self.last_job:
+            return
+        if self.is_running or self._workers:
+            self._resume_pending = True
+            return
+        mode, entries, memory_source = self.last_job
+        if mode == "polish":
+            done = self._done_ids
+            remaining = [e for e in entries if e.id not in done]
+            self.polish_batch(remaining)
+            self._done_ids = done  # keep accumulating across resumes
+        else:
+            self.translate_batch(entries, memory_source=memory_source)
 
     def _on_item_processed(self, text: str):
         """Track global progress across all workers."""
@@ -571,6 +684,7 @@ class TranslationEngine(QObject):
 
     def _on_entry_done(self, entry_id: str, translation: str):
         """Relay entry completion and trigger checkpoints."""
+        self._done_ids.add(entry_id)
         self.entry_done.emit(entry_id, translation)
         self._translate_count += 1
         if self._translate_count % self.CHECKPOINT_INTERVAL == 0:
@@ -596,6 +710,7 @@ class TranslationEngine(QObject):
                       len(self._connection_failures), self.SERVER_DOWN_WINDOW_S, msg)
             # Cancel all running workers — checkpoint already saved completed work
             self._cancelled = True
+            self.client.cancel_event.set()
             for w in self._workers:
                 if hasattr(w, "cancel"):
                     w.cancel()
@@ -611,6 +726,15 @@ class TranslationEngine(QObject):
                 thread.wait()
             self._threads = []
             self._workers = []
+            # Re-arm the client so later single-entry calls (right-click
+            # retranslate, variants) aren't short-circuited by a stale cancel
+            self.client.cancel_event.clear()
+            if self._resume_pending:
+                # Resume was requested while workers were winding down —
+                # restart instead of reporting the batch as finished.
+                self._resume_pending = False
+                self.resume_last_job()
+                return
             self.finished.emit()
 
     @staticmethod

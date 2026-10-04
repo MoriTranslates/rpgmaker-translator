@@ -1,0 +1,72 @@
+[
+  null,
+  {
+    "id": 1,
+    "battlerName": "Actor1_1",
+    "characterIndex": 0,
+    "characterName": "Actor1",
+    "classId": 1,
+    "equips": [
+      1,
+      1,
+      0,
+      0,
+      0
+    ],
+    "faceIndex": 0,
+    "faceName": "Actor1",
+    "traits": [],
+    "initialLevel": 1,
+    "maxLevel": 99,
+    "name": "アリス",
+    "nickname": "見習い魔法使い",
+    "note": "",
+    "profile": "明るい少女。\n魔法の勉強中。"
+  },
+  {
+    "id": 2,
+    "battlerName": "Actor1_2",
+    "characterIndex": 1,
+    "characterName": "Actor1",
+    "classId": 1,
+    "equips": [
+      1,
+      1,
+      0,
+      0,
+      0
+    ],
+    "faceIndex": 0,
+    "faceName": "Actor2",
+    "traits": [],
+    "initialLevel": 1,
+    "maxLevel": 99,
+    "name": "ボブ",
+    "nickname": "騎士",
+    "note": "<title:剣士>",
+    "profile": "勇敢な男の騎士。"
+  },
+  {
+    "id": 3,
+    "battlerName": "",
+    "characterIndex": 0,
+    "characterName": "",
+    "classId": 1,
+    "equips": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "faceIndex": 0,
+    "faceName": "",
+    "traits": [],
+    "initialLevel": 1,
+    "maxLevel": 99,
+    "name": "謎の人物",
+    "nickname": "",
+    "note": "",
+    "profile": ""
+  }
+]

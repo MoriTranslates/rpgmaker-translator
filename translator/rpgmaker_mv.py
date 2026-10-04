@@ -7,6 +7,7 @@ and writing translations back into the original JSON structure.
 import json
 import logging
 import os
+import posixpath
 import re
 import shutil
 import zipfile
@@ -30,8 +31,8 @@ CODE_CHANGE_PROFILE = 325     # Change Actor Profile — params[0]=actorId, para
 CODE_PLUGIN_COMMAND_MV = 356  # Plugin Command (MV) — params[0]=command string
 CODE_PLUGIN_COMMAND_MZ = 357  # Plugin Command (MZ) — params vary by plugin
 CODE_CONTROL_VARIABLES = 122  # Control Variables — params[3]=operand type, params[4]=expression
-CODE_COMMENT = 408             # Comment — params[0]=text (sometimes displayed by plugins)
-CODE_COMMENT_CONT = 108        # Comment continuation — params[0]=text
+CODE_COMMENT = 108             # Comment (first line) — params[0]=text (sometimes displayed by plugins)
+CODE_COMMENT_CONT = 408        # Comment continuation — params[0]=text
 CODE_SCRIPT = 355             # Script (first line) — params[0]=JS code
 CODE_SCRIPT_CONT = 655        # Script (continuation) — params[0]=JS code
 
@@ -61,6 +62,32 @@ _ACTOR_CODE_RE = re.compile(r'\\[Nn]\[(\d+)\]')
 def _has_japanese(text: str) -> bool:
     """Check if text contains any Japanese characters."""
     return bool(JP_REGEX.search(text))
+
+
+def _cmd_escape(text: str) -> str:
+    """Escape text for use in a cmd.exe ``echo`` / ``title`` line.
+
+    Carets escape cmd metacharacters (``& | < > ( )``) — parens matter
+    inside ``if (...)`` blocks, where an unescaped ``)`` closes the block.
+    ``%`` is doubled so it isn't treated as a variable reference.
+    Double quotes are swapped for single quotes (an unbalanced quote
+    would disable the caret escaping for the rest of the line).
+    """
+    text = str(text).replace("\r", " ").replace("\n", " ").replace('"', "'")
+    text = text.replace("^", "^^")
+    for ch in "&|<>()":
+        text = text.replace(ch, "^" + ch)
+    return text.replace("%", "%%")
+
+
+# Data files the parser extracts entries from (and export therefore rewrites)
+_PARSED_FIXED_FILES = {"System.json", "CommonEvents.json", "Troops.json"}
+_MAP_FILE_RE = re.compile(r'^Map\d+\.json$', re.IGNORECASE)
+
+
+def _is_parsed_data_file(filename: str) -> bool:
+    return (filename in DATABASE_FILES or filename in _PARSED_FIXED_FILES
+            or bool(_MAP_FILE_RE.match(filename)))
 
 
 # ── Plugin command whitelists (based on DazedMTL's proven approach) ──
@@ -231,6 +258,7 @@ class RPGMakerMVParser:
         self.single_401_mode = False  # Merge all dialogue lines into one 401 command
         self.game_font = "Consolas"   # Font for gamefont.css swap (None = keep original)
         self.speaker_processing = True  # Strip nameboxes, resolve faces, update speaker names
+        self.load_warnings = []  # Files skipped by the last load_project() (unreadable/corrupt)
 
     def _should_extract(self, text: str) -> bool:
         """Check if text should be extracted as a translatable entry."""
@@ -256,6 +284,8 @@ class RPGMakerMVParser:
                 "Please select an RPG Maker MV/MZ project folder."
             )
 
+        self.load_warnings = []
+
         # Build actor name lookup for \n[N] resolution in namebox
         self._actor_names = self._load_actor_names(data_dir)
         # Build face graphic → actor lookup for MV speaker resolution
@@ -263,9 +293,14 @@ class RPGMakerMVParser:
 
         entries = []
         entries.extend(self._parse_database_files(data_dir))
-        entries.extend(self._parse_system(data_dir))
-        entries.extend(self._parse_common_events(data_dir))
-        entries.extend(self._parse_troops(data_dir))
+        # One corrupt file must not abort the whole load — log and skip it
+        for parse_fn, fname in ((self._parse_system, "System.json"),
+                                (self._parse_common_events, "CommonEvents.json"),
+                                (self._parse_troops, "Troops.json")):
+            try:
+                entries.extend(parse_fn(data_dir))
+            except Exception as exc:
+                self._note_load_failure(fname, exc)
         entries.extend(self._parse_maps(data_dir))
         entries.extend(self._parse_plugins(project_dir))
 
@@ -281,6 +316,11 @@ class RPGMakerMVParser:
                 seen_speaker_originals.add(e.original)
             deduped.append(e)
         return deduped
+
+    def _note_load_failure(self, filename: str, exc: Exception):
+        """Record a file that could not be parsed (logged + kept for the UI)."""
+        log.warning("Skipping unreadable file %s: %s", filename, exc)
+        self.load_warnings.append(f"{filename}: {exc}")
 
     def load_project_raw(self, project_dir: str) -> list:
         """Load ALL text entries regardless of language.
@@ -303,7 +343,7 @@ class RPGMakerMVParser:
         if not os.path.exists(filepath):
             return ""
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
             return data.get("gameTitle", "")
         except (json.JSONDecodeError, OSError):
@@ -324,7 +364,7 @@ class RPGMakerMVParser:
             return []
 
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
         except (json.JSONDecodeError, UnicodeDecodeError):
             return []
@@ -362,7 +402,7 @@ class RPGMakerMVParser:
         if not os.path.exists(filepath):
             return {}
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
         except (json.JSONDecodeError, OSError):
             return {}
@@ -387,7 +427,7 @@ class RPGMakerMVParser:
         if not os.path.exists(filepath):
             return {}
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
         except (json.JSONDecodeError, OSError):
             return {}
@@ -478,33 +518,91 @@ class RPGMakerMVParser:
             else:
                 by_file.setdefault(e.file, []).append(e)
 
-        for filename, file_entries in by_file.items():
+        # Rewrite every file the parser reads — not only files that have
+        # translated entries — so a file whose translations were all
+        # reverted goes back to the original text instead of keeping
+        # stale English from a previous export.
+        candidates = {fn for fn in by_file if fn.lower().endswith(".json")}
+        for d in {source_dir, data_dir}:
+            for fn in os.listdir(d):
+                if _is_parsed_data_file(fn):
+                    candidates.add(fn)
+
+        errors = []
+        for filename in sorted(candidates):
             source_path = os.path.join(source_dir, filename)
-            if not os.path.exists(source_path):
-                continue
+            if not os.path.isfile(source_path):
+                live_path = os.path.join(data_dir, filename)
+                if not os.path.isfile(live_path):
+                    continue
+                # Backup predates this file (e.g. game updated after first
+                # export) — fall back to the live copy rather than skip it.
+                log.warning("Export: %s missing from %s, using live %s",
+                            filename, source_dir, live_path)
+                source_path = live_path
 
-            with open(source_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            try:
+                with open(source_path, "r", encoding="utf-8-sig") as f:
+                    data = json.load(f)
 
-            self._apply_translations_fast(
-                data, file_entries, global_speakers=global_speakers)
+                self._apply_translations_fast(
+                    data, by_file.get(filename, []),
+                    global_speakers=global_speakers)
 
-            # Switch locale so name input shows Latin alphabet instead of kana
-            if filename == "System.json" and isinstance(data, dict):
-                loc = data.get("locale", "")
-                if isinstance(loc, str) and loc.startswith("ja"):
-                    data["locale"] = ""
+                # Switch locale so name input shows Latin alphabet instead of kana
+                if filename == "System.json" and isinstance(data, dict):
+                    loc = data.get("locale", "")
+                    if isinstance(loc, str) and loc.startswith("ja"):
+                        data["locale"] = ""
 
-            # Always write to the live data/ directory
-            out_path = os.path.join(data_dir, filename)
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                # Always write to the live data/ directory
+                out_path = os.path.join(data_dir, filename)
+                self._atomic_write_text(
+                    out_path, json.dumps(data, ensure_ascii=False, indent=2))
+            except (OSError, ValueError) as exc:
+                log.warning("Export failed for %s: %s", filename, exc)
+                errors.append(f"{filename}: {exc}")
 
         # Export plugin translations (plugins.js is outside data/)
-        self._save_plugins(project_dir, entries)
+        try:
+            self._save_plugins(project_dir, entries)
+        except (OSError, ValueError) as exc:
+            log.warning("Export failed for plugins.js: %s", exc)
+            errors.append(f"plugins.js: {exc}")
 
         # Swap game font for English readability
-        self._swap_gamefont(project_dir, self.game_font)
+        try:
+            self._swap_gamefont(project_dir, self.game_font)
+        except OSError as exc:
+            log.warning("Export failed for gamefont.css: %s", exc)
+            errors.append(f"gamefont.css: {exc}")
+
+        if errors:
+            shown = "\n".join(errors[:20])
+            more = f"\n... and {len(errors) - 20} more" if len(errors) > 20 else ""
+            raise OSError(
+                f"Export finished with errors — {len(errors)} file(s) "
+                f"could not be written (is the game running?):\n"
+                f"{shown}{more}")
+
+    @staticmethod
+    def _atomic_write_text(path: str, text: str):
+        """Write *text* to *path* via a temp file + os.replace.
+
+        A crash or full disk mid-write leaves the previous file intact
+        instead of a truncated game file.
+        """
+        tmp_path = path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def export_patch_zip(self, project_dir: str, entries: list,
                          zip_path: str, game_title: str = "",
@@ -571,7 +669,7 @@ class RPGMakerMVParser:
                 if not filename.lower().endswith(".json"):
                     continue
 
-                with open(source_path, "r", encoding="utf-8") as f:
+                with open(source_path, "r", encoding="utf-8-sig") as f:
                     data = json.load(f)
 
                 file_entries = by_file.get(filename, [])
@@ -609,41 +707,7 @@ class RPGMakerMVParser:
                 ps = plugins_backup if os.path.exists(plugins_backup) else plugins_path
                 try:
                     plugins = self._load_plugins_js(ps)
-                    plugin_by_name = {}
-                    for p in plugins:
-                        if isinstance(p, dict) and p.get("name"):
-                            plugin_by_name[p["name"]] = p
-                    for entry in plugin_entries:
-                        parts = entry.id.split("/")
-                        if len(parts) < 3:
-                            continue
-                        plugin = plugin_by_name.get(parts[1])
-                        if not plugin:
-                            continue
-                        params = plugin.get("parameters", {})
-                        if parts[2] not in params:
-                            continue
-                        if len(parts) <= 3:
-                            # Check if value was JSON-encoded string scalar
-                            raw_val = params[parts[2]]
-                            try:
-                                decoded = json.loads(raw_val)
-                                if isinstance(decoded, str):
-                                    params[parts[2]] = json.dumps(entry.translation, ensure_ascii=False)
-                                    continue
-                            except (json.JSONDecodeError, ValueError):
-                                pass
-                            params[parts[2]] = entry.translation
-                        else:
-                            try:
-                                parsed = json.loads(params[parts[2]])
-                                self._set_nested_value(
-                                    parsed, parts[3:],
-                                    entry.original, entry.translation)
-                                params[parts[2]] = json.dumps(
-                                    parsed, ensure_ascii=False)
-                            except (json.JSONDecodeError, ValueError):
-                                continue
+                    self._apply_plugin_translations(plugins, plugin_entries)
 
                     if inject_wordwrap:
                         if not any(p.get("name") == self.INJECTED_PLUGIN_NAME
@@ -670,7 +734,9 @@ class RPGMakerMVParser:
 
             # Include gamefont.css for English readability
             if js_rel and self.game_font:
-                fonts_rel = js_rel.rsplit("/", 1)[0] + "/fonts"
+                # Sibling of js/: "www/js" -> "www/fonts", "js" -> "fonts"
+                fonts_rel = posixpath.join(
+                    posixpath.dirname(js_rel), "fonts").lstrip("/")
                 fallback = "Courier New" if self.game_font != "Courier New" else "Consolas"
                 zf.writestr(f"_translation/{fonts_rel}/gamefont.css",
                     '@font-face {\n'
@@ -684,7 +750,8 @@ class RPGMakerMVParser:
             # install.bat
             zf.writestr("install.bat", self._build_install_bat(
                 data_rel, js_rel, data_file_count, has_plugins, game_title,
-                inject_wordwrap=inject_wordwrap))
+                inject_wordwrap=inject_wordwrap,
+                font_name=self.game_font))
 
             # uninstall.bat
             zf.writestr("uninstall.bat", self._build_uninstall_bat(
@@ -746,7 +813,7 @@ class RPGMakerMVParser:
                     continue
                 if not filename.lower().endswith(".json"):
                     continue
-                with open(src, "r", encoding="utf-8") as f:
+                with open(src, "r", encoding="utf-8-sig") as f:
                     content = f.read()
                 zf.writestr(f"_translation/{data_rel}/{filename}", content)
                 data_file_count += 1
@@ -754,7 +821,7 @@ class RPGMakerMVParser:
             # Copy plugins.js if present
             has_plugins = False
             if plugins_path and os.path.isfile(plugins_path):
-                with open(plugins_path, "r", encoding="utf-8") as f:
+                with open(plugins_path, "r", encoding="utf-8-sig") as f:
                     plugins_content = f.read()
                 zf.writestr(f"_translation/{js_rel}/plugins.js", plugins_content)
                 has_plugins = True
@@ -762,7 +829,7 @@ class RPGMakerMVParser:
             # Install / uninstall scripts (reuse existing builders)
             zf.writestr("install.bat", self._build_install_bat(
                 data_rel, js_rel, data_file_count, has_plugins, game_title,
-                inject_wordwrap=False))
+                inject_wordwrap=False, font_name=None))
             zf.writestr("uninstall.bat", self._build_uninstall_bat(
                 data_rel, js_rel, has_plugins, game_title,
                 inject_wordwrap=False))
@@ -792,20 +859,22 @@ class RPGMakerMVParser:
     def _build_install_bat(data_rel: str, js_rel: str,
                            n_files: int, has_plugins: bool,
                            game_title: str,
-                           inject_wordwrap: bool = False) -> str:
+                           inject_wordwrap: bool = False,
+                           font_name: Optional[str] = "Consolas") -> str:
         """Generate install.bat: rename originals aside, move translations in."""
         dr = data_rel.replace("/", "\\")
         dr_base = os.path.basename(data_rel)     # e.g. "data"
         tr = f"_translation\\{dr}"                # e.g. "_translation\\data"
+        title = _cmd_escape(game_title or 'RPG Maker Game')
         lines = [
             "@echo off",
             "chcp 65001 >nul 2>&1",
             'pushd "%~dp0"',
             f"title Install English Translation",
             "echo.",
-            f"echo  {game_title or 'RPG Maker Game'} — English Translation",
+            f"echo  {title} — English Translation",
             "echo.",
-            f"echo  This will install the English translation ({n_files} files).",
+            f"echo  This will install the English translation ^({n_files} files^).",
             "echo  Original files will be backed up automatically.",
             "echo.",
             "pause",
@@ -840,7 +909,7 @@ class RPGMakerMVParser:
             "    )",
             f'    echo   Renamed {dr}\\ to {dr}_original\\',
             ") else (",
-            f'    echo   Backup already exists ({dr}_original\\)',
+            f'    echo   Backup already exists ^({dr}_original\\^)',
             f'    echo   Removing current {dr}\\ to replace with translation...',
             f'    rmdir /S /Q "{dr}"',
             ")",
@@ -865,7 +934,7 @@ class RPGMakerMVParser:
             f'    echo   ERROR: Failed to move translated {dr}\\ into place',
             "    set FAIL=1",
             ") else (",
-            f"    echo   Installed translated {dr}\\ ({n_files} files)",
+            f"    echo   Installed translated {dr}\\ ^({n_files} files^)",
             ")",
         ]
 
@@ -890,10 +959,10 @@ class RPGMakerMVParser:
                 ")",
             ]
 
-        # Always swap font to Consolas for English readability
+        # Swap font for English readability (gamefont.css shipped in zip)
         if js_rel:
-            jr = js_rel.replace("/", "\\")
-            fr = jr.rsplit("\\", 1)[0] + "\\fonts"
+            fr = posixpath.join(posixpath.dirname(js_rel),
+                                "fonts").lstrip("/").replace("/", "\\")
             tfr = f"_translation\\{fr}"
             lines += [
                 f'if exist "{tfr}\\gamefont.css" (',
@@ -901,7 +970,7 @@ class RPGMakerMVParser:
                 f'        copy /Y "{fr}\\gamefont.css" "{fr}\\gamefont_original.css" >nul',
                 f"    )",
                 f'    copy /Y "{tfr}\\gamefont.css" "{fr}\\gamefont.css" >nul',
-                f"    echo   Swapped font to Consolas",
+                f"    echo   Swapped font to {_cmd_escape(font_name or 'English font')}",
                 ")",
             ]
 
@@ -935,16 +1004,16 @@ class RPGMakerMVParser:
             "@echo off",
             "chcp 65001 >nul 2>&1",
             'pushd "%~dp0"',
-            f"title Restore Japanese — {game_title or 'RPG Maker Game'}",
+            f"title Restore Japanese — {_cmd_escape(game_title or 'RPG Maker Game')}",
             "echo.",
-            f"echo  {game_title or 'RPG Maker Game'} — Restore Japanese",
+            f"echo  {_cmd_escape(game_title or 'RPG Maker Game')} — Restore Japanese",
             "echo.",
             "echo  This will restore the original Japanese files.",
             "echo.",
             "pause",
             "",
             f'if not exist "{dr}_original\\" (',
-            f"    echo ERROR: No backup found ({dr}_original\\).",
+            f"    echo ERROR: No backup found ^({dr}_original\\^).",
             "    echo Cannot restore — the backup was never created.",
             "    pause",
             "    popd",
@@ -995,8 +1064,8 @@ class RPGMakerMVParser:
 
         # Always restore original font if backed up
         if js_rel:
-            jr = js_rel.replace("/", "\\")
-            fr = jr.rsplit("\\", 1)[0] + "\\fonts"
+            fr = posixpath.join(posixpath.dirname(js_rel),
+                                "fonts").lstrip("/").replace("/", "\\")
             lines += [
                 "",
                 f'if exist "{fr}\\gamefont_original.css" (',
@@ -1026,9 +1095,16 @@ class RPGMakerMVParser:
         backup_dir = data_dir + "_original"
         if os.path.isdir(backup_dir):
             return  # Already backed up
+        # Copy to a temp dir and rename when complete, so an interrupted
+        # copy is never mistaken for a full backup on the next export.
+        tmp_dir = backup_dir + ".tmp"
         try:
-            shutil.copytree(data_dir, backup_dir)
+            if os.path.isdir(tmp_dir):
+                shutil.rmtree(tmp_dir)
+            shutil.copytree(data_dir, tmp_dir)
+            os.rename(tmp_dir, backup_dir)
         except OSError as exc:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
             raise OSError(
                 f"Could not back up {data_dir} — is the game running?\n\n"
                 f"Close the game and try again.\n({exc})"
@@ -1064,8 +1140,7 @@ class RPGMakerMVParser:
             f'    src: local("{font_name}"), local("{fallback}");\n'
             '}\n'
         )
-        with open(target, "w", encoding="utf-8") as f:
-            f.write(css)
+        RPGMakerMVParser._atomic_write_text(target, css)
         log.info("Swapped gamefont.css to %s", font_name)
 
     # ── Static helpers ────────────────────────────────────────────────
@@ -1124,34 +1199,44 @@ class RPGMakerMVParser:
             filepath = os.path.join(data_dir, filename)
             if not os.path.exists(filepath):
                 continue
+            try:
+                entries.extend(self._parse_database_file(
+                    filepath, filename, fields))
+            except Exception as exc:
+                self._note_load_failure(filename, exc)
+        return entries
 
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
+    def _parse_database_file(self, filepath: str, filename: str,
+                             fields: list) -> list:
+        """Parse one database JSON file (Actors.json, Items.json, ...)."""
+        entries = []
+        with open(filepath, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
 
-            if not isinstance(data, list):
+        if not isinstance(data, list):
+            return entries
+
+        for item in data:
+            if not item or not isinstance(item, dict):
                 continue
-
-            for item in data:
-                if not item or not isinstance(item, dict):
-                    continue
-                item_id = item.get("id", 0)
-                for fld in fields:
-                    text = item.get(fld, "")
-                    if isinstance(text, str) and self._should_extract(text):
-                        entry_id = f"{filename}/{item_id}/{fld}"
-                        entries.append(TranslationEntry(
-                            id=entry_id,
-                            file=filename,
-                            field=fld,
-                            original=text,
-                        ))
-                # Extract translatable Japanese text from note tags.
-                # Plugin tags like <custom_mp_text:精力,精力> contain
-                # display text that shows in-game.
-                note = item.get("note", "")
-                if note:
-                    entries.extend(self._extract_note_tags(
-                        filename, item_id, note))
+            item_id = item.get("id", 0)
+            for fld in fields:
+                text = item.get(fld, "")
+                if isinstance(text, str) and self._should_extract(text):
+                    entry_id = f"{filename}/{item_id}/{fld}"
+                    entries.append(TranslationEntry(
+                        id=entry_id,
+                        file=filename,
+                        field=fld,
+                        original=text,
+                    ))
+            # Extract translatable Japanese text from note tags.
+            # Plugin tags like <custom_mp_text:精力,精力> contain
+            # display text that shows in-game.
+            note = item.get("note", "")
+            if note:
+                entries.extend(self._extract_note_tags(
+                    filename, item_id, note))
         return entries
 
     @staticmethod
@@ -1192,7 +1277,7 @@ class RPGMakerMVParser:
         if not os.path.exists(filepath):
             return entries
 
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
 
         def _ok(text):
@@ -1293,7 +1378,7 @@ class RPGMakerMVParser:
         if not os.path.exists(filepath):
             return entries
 
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
 
         if not isinstance(data, list):
@@ -1322,7 +1407,7 @@ class RPGMakerMVParser:
         if not os.path.exists(filepath):
             return entries
 
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
 
         if not isinstance(data, list):
@@ -1361,41 +1446,51 @@ class RPGMakerMVParser:
                 continue
 
             filepath = os.path.join(data_dir, filename)
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            try:
+                entries.extend(self._parse_map_file(filepath, filename))
+            except Exception as exc:
+                self._note_load_failure(filename, exc)
 
-            # Map display name
-            display_name = data.get("displayName", "")
-            if self._should_extract(display_name):
-                entries.append(TranslationEntry(
-                    id=f"{filename}/displayName",
-                    file=filename,
-                    field="displayName",
-                    original=display_name,
-                ))
+        return entries
 
-            # Events
-            events = data.get("events", [])
-            if not isinstance(events, list):
+    def _parse_map_file(self, filepath: str, filename: str) -> list:
+        """Parse one Map###.json file for displayName + event dialogue."""
+        entries = []
+        with open(filepath, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+
+        # Map display name
+        display_name = data.get("displayName", "")
+        if self._should_extract(display_name):
+            entries.append(TranslationEntry(
+                id=f"{filename}/displayName",
+                file=filename,
+                field="displayName",
+                original=display_name,
+            ))
+
+        # Events
+        events = data.get("events", [])
+        if not isinstance(events, list):
+            return entries
+
+        seen_speakers = set()
+        for event in events:
+            if not event or not isinstance(event, dict):
                 continue
+            event_id = event.get("id", 0)
+            event_name = event.get("name", "")
+            pages = event.get("pages", [])
 
-            seen_speakers = set()
-            for event in events:
-                if not event or not isinstance(event, dict):
+            for page_idx, page in enumerate(pages):
+                if not page or not isinstance(page, dict):
                     continue
-                event_id = event.get("id", 0)
-                event_name = event.get("name", "")
-                pages = event.get("pages", [])
-
-                for page_idx, page in enumerate(pages):
-                    if not page or not isinstance(page, dict):
-                        continue
-                    cmd_list = page.get("list", [])
-                    prefix = f"Ev{event_id}({event_name})/p{page_idx}"
-                    entries.extend(self._extract_event_commands(
-                        cmd_list, filename, prefix,
-                        seen_speakers=seen_speakers,
-                    ))
+                cmd_list = page.get("list", [])
+                prefix = f"Ev{event_id}({event_name})/p{page_idx}"
+                entries.extend(self._extract_event_commands(
+                    cmd_list, filename, prefix,
+                    seen_speakers=seen_speakers,
+                ))
 
         return entries
 
@@ -1585,14 +1680,14 @@ class RPGMakerMVParser:
                     recent_ctx.append(full_text)
                 continue
 
-            # Comment (408/108) — opt-in, some games display these via plugins
+            # Comment (108/408) — opt-in, some games display these via plugins
             if code == CODE_COMMENT and self.extract_comments:
                 lines = []
                 # First comment line
                 text = params[0] if params else ""
                 lines.append(str(text))
                 i += 1
-                # Gather continuation lines (108)
+                # Gather continuation lines (408)
                 while i < len(cmd_list):
                     c = cmd_list[i]
                     if isinstance(c, dict) and c.get("code") == CODE_COMMENT_CONT:
@@ -1908,9 +2003,9 @@ class RPGMakerMVParser:
             if not os.path.exists(d_path) or not os.path.exists(p_path):
                 continue
 
-            with open(d_path, "r", encoding="utf-8") as f:
+            with open(d_path, "r", encoding="utf-8-sig") as f:
                 d_data = json.load(f)
-            with open(p_path, "r", encoding="utf-8") as f:
+            with open(p_path, "r", encoding="utf-8-sig") as f:
                 p_data = json.load(f)
 
             if not isinstance(d_data, list) or not isinstance(p_data, list):
@@ -1943,9 +2038,9 @@ class RPGMakerMVParser:
         if not os.path.exists(donor_path) or not os.path.exists(proj_path):
             return
 
-        with open(donor_path, "r", encoding="utf-8") as f:
+        with open(donor_path, "r", encoding="utf-8-sig") as f:
             donor_events = json.load(f)
-        with open(proj_path, "r", encoding="utf-8") as f:
+        with open(proj_path, "r", encoding="utf-8-sig") as f:
             proj_events = json.load(f)
 
         if not isinstance(donor_events, list) or not isinstance(proj_events, list):
@@ -1976,10 +2071,10 @@ class RPGMakerMVParser:
 
         for mapfile in sorted(proj_maps & donor_maps):
             with open(os.path.join(donor_data, mapfile), "r",
-                      encoding="utf-8") as f:
+                      encoding="utf-8-sig") as f:
                 d_map = json.load(f)
             with open(os.path.join(proj_data, mapfile), "r",
-                      encoding="utf-8") as f:
+                      encoding="utf-8-sig") as f:
                 p_map = json.load(f)
 
             if not isinstance(d_map, dict) or not isinstance(p_map, dict):
@@ -2026,9 +2121,9 @@ class RPGMakerMVParser:
         if not os.path.exists(donor_path) or not os.path.exists(proj_path):
             return
 
-        with open(donor_path, "r", encoding="utf-8") as f:
+        with open(donor_path, "r", encoding="utf-8-sig") as f:
             donor_troops = json.load(f)
-        with open(proj_path, "r", encoding="utf-8") as f:
+        with open(proj_path, "r", encoding="utf-8-sig") as f:
             proj_troops = json.load(f)
 
         if not isinstance(donor_troops, list) or not isinstance(proj_troops, list):
@@ -2236,6 +2331,23 @@ class RPGMakerMVParser:
 
         code_header = CODE_SHOW_TEXT_HEADER
 
+        # The parser groups *maximal* runs of consecutive 401 (or 405)
+        # commands into one entry, so a match is only valid when it spans
+        # a whole run: the command before it and the command after it must
+        # not have the same code.  Otherwise a short entry whose lines
+        # equal the first lines of a longer block would half-translate it.
+        def is_block_start(cmd_list, i, code):
+            if i == 0:
+                return True
+            prev = cmd_list[i - 1]
+            return not (isinstance(prev, dict) and prev.get("code") == code)
+
+        def is_block_end(cmd_list, end, code):
+            if end >= len(cmd_list):
+                return True
+            nxt = cmd_list[end]
+            return not (isinstance(nxt, dict) and nxt.get("code") == code)
+
         def process_commands(cmd_list):
             i = 0
             while i < len(cmd_list):
@@ -2258,11 +2370,15 @@ class RPGMakerMVParser:
                     first_text = str(
                         (cmd.get("parameters") or [""])[0])
                     candidates = dialog_lookup.get(first_text)
+                    if candidates and not is_block_start(cmd_list, i, code_dialog):
+                        candidates = None  # mid-block — never a parsed block start
                     if candidates:
                         applied = False
                         for idx, (ol, tl) in enumerate(candidates):
                             if i + len(ol) > len(cmd_list):
                                 continue
+                            if not is_block_end(cmd_list, i + len(ol), code_dialog):
+                                continue  # would leave trailing JP lines
                             match = True
                             for j, orig_line in enumerate(ol):
                                 c = cmd_list[i + j]
@@ -2313,11 +2429,15 @@ class RPGMakerMVParser:
                     first_text = str(
                         (cmd.get("parameters") or [""])[0])
                     candidates = scroll_lookup.get(first_text)
+                    if candidates and not is_block_start(cmd_list, i, code_scroll):
+                        candidates = None  # mid-block — never a parsed block start
                     if candidates:
                         applied = False
                         for idx, (ol, tl) in enumerate(candidates):
                             if i + len(ol) > len(cmd_list):
                                 continue
+                            if not is_block_end(cmd_list, i + len(ol), code_scroll):
+                                continue  # would leave trailing JP lines
                             match = True
                             for j, orig_line in enumerate(ol):
                                 c = cmd_list[i + j]
@@ -2359,7 +2479,7 @@ class RPGMakerMVParser:
                     else:
                         i += 1
 
-                # Comment block (408/108)
+                # Comment block (108 + 408 continuations)
                 elif code == code_comment and comment_lookup:
                     first_text = str(
                         (cmd.get("parameters") or [""])[0])
@@ -2451,7 +2571,10 @@ class RPGMakerMVParser:
                 return m.group(0)
             vals = m.group(2).split(',')
             if value_idx < len(vals) and vals[value_idx].strip() == original:
-                vals[value_idx] = translation
+                # ',' would split the value and '<' '>' would end the tag
+                safe = (translation.replace(',', '、')
+                        .replace('<', '').replace('>', ''))
+                vals[value_idx] = safe
             return f"<{tag_name}:{','.join(vals)}>"
 
         item["note"] = re.sub(
@@ -2531,10 +2654,6 @@ class RPGMakerMVParser:
         elif "displayName" in entry.id and entry.field == "displayName":
             data["displayName"] = entry.translation
 
-        # Event dialogue — need to find and replace in command lists
-        elif entry.field in ("dialog", "scroll_text", "choice"):
-            self._apply_event_translation(data, entry)
-
         # Change Name/Nickname/Profile (320/324/325) — single parameter replacement
         elif entry.field in ("name", "nickname", "profile") and "/change_" in entry.id:
             code_map = {"name": CODE_CHANGE_NAME, "nickname": CODE_CHANGE_NICKNAME, "profile": CODE_CHANGE_PROFILE}
@@ -2542,9 +2661,11 @@ class RPGMakerMVParser:
 
         # Plugin Command MV (356) — whitelist regex-based substitution
         elif entry.field == "plugin_command" and "/plugin_mv_" in entry.id:
-            if entry.context and entry.context.startswith("[PLUGIN_CMD:"):
+            # Search (not startswith): Set Speaker etc. may prefix the context
+            m_cmd = re.search(r'\[PLUGIN_CMD:(.*)\]$', entry.context or "", re.S)
+            if m_cmd:
                 # New whitelist format: context has full command, original is extracted text
-                full_cmd = entry.context[len("[PLUGIN_CMD:"):-1]
+                full_cmd = m_cmd.group(1)
                 new_cmd = _substitute_mv_plugin_command(full_cmd, entry.original, entry.translation)
                 if new_cmd:
                     self._replace_single_param(data, CODE_PLUGIN_COMMAND_MV, 0, full_cmd, new_cmd)
@@ -2565,37 +2686,22 @@ class RPGMakerMVParser:
                                            entry.original, entry.translation)
             elif len(parts_id) >= 2:
                 # New whitelist format: .../plugin_mz_N/PluginName/paramKey
-                param_key = parts_id[-1]
-                plugin_name = parts_id[-2]
+                # PluginName may itself contain "/" (e.g. "build/ARPG_Core"),
+                # so take every segment between plugin_mz_N and the key.
+                tail = entry.id[entry.id.rfind("/plugin_mz_") + 1:].split("/")
+                param_key = tail[-1]
+                plugin_name = "/".join(tail[1:-1]) or parts_id[-2]
                 self._replace_mz_plugin_param(data, plugin_name, param_key,
                                               entry.original, entry.translation)
 
         # Script variable — Control Variables (122) or Script (355/655)
         elif entry.field == "script_variable" and "/script_var_" in entry.id:
-            if entry.context and entry.context.startswith("[CONTROL_VAR:"):
+            if re.search(r'\[CONTROL_VAR:', entry.context or ""):
                 # Code 122: params[4] = '"original"' → replace with '"translation"'
                 self._replace_control_var_string(data, entry.original, entry.translation)
-            elif entry.context and entry.context.startswith("[SCRIPT_VAR:"):
+            elif re.search(r'\[SCRIPT_VAR:', entry.context or ""):
                 # Code 355/655: inline string replacement
                 self._replace_script_string(data, entry.original, entry.translation)
-
-    def _apply_event_translation(self, data, entry: TranslationEntry):
-        """Apply event dialogue/choice translation back into map or common event data."""
-        original_lines = entry.original.split("\n")
-        translation_lines = entry.translation.split("\n")
-
-        # Pad translation if shorter; allow longer for extra 401/405 insertion
-        if entry.field in ("dialog", "scroll_text"):
-            while len(translation_lines) < len(original_lines):
-                translation_lines.append("")
-
-        if entry.field == "choice":
-            # Choices: find in event commands with code 102
-            self._replace_in_commands(data, CODE_SHOW_CHOICES, entry.original, entry.translation, is_choice=True)
-        elif entry.field == "dialog":
-            self._replace_dialog_block(data, original_lines, translation_lines)
-        elif entry.field == "scroll_text":
-            self._replace_dialog_block(data, original_lines, translation_lines, code=CODE_SCROLL_TEXT)
 
     @staticmethod
     def _walk_event_commands(data, callback) -> bool:
@@ -2626,76 +2732,6 @@ class RPGMakerMVParser:
                         if callback(page.get("list", [])):
                             return True
         return False
-
-    def _replace_dialog_block(self, data, original_lines: list, translation_lines: list, code: int = CODE_SHOW_TEXT):
-        """Find and replace a consecutive block of 401/405 commands."""
-        def process_commands(cmd_list):
-            i = 0
-            while i < len(cmd_list):
-                cmd = cmd_list[i]
-                if not isinstance(cmd, dict) or cmd.get("code") != code:
-                    i += 1
-                    continue
-
-                # Check if this block matches
-                match = True
-                for j, orig_line in enumerate(original_lines):
-                    idx = i + j
-                    if idx >= len(cmd_list):
-                        match = False
-                        break
-                    c = cmd_list[idx]
-                    if not isinstance(c, dict) or c.get("code") != code:
-                        match = False
-                        break
-                    c_text = c.get("parameters", [""])[0] if c.get("parameters") else ""
-                    if str(c_text) != orig_line:
-                        match = False
-                        break
-
-                if match and len(original_lines) > 0:
-                    # Replace text in existing commands
-                    for j in range(len(original_lines)):
-                        cmd_list[i + j]["parameters"][0] = translation_lines[j]
-                    # Insert extra commands for overflow lines
-                    extra = translation_lines[len(original_lines):]
-                    if extra:
-                        indent = cmd_list[i].get("indent", 0)
-                        ins = i + len(original_lines)
-                        for k, et in enumerate(extra):
-                            cmd_list.insert(ins + k, {
-                                "code": code, "indent": indent,
-                                "parameters": [et],
-                            })
-                    return True
-                i += 1
-            return False
-
-        if self._walk_event_commands(data, process_commands):
-            return
-        log.warning("Export: dialog block not found — original starts with %r",
-                    original_lines[0][:60] if original_lines else "?")
-
-    def _replace_in_commands(self, data, code: int, original: str, translation: str, is_choice: bool = False):
-        """Replace a specific command parameter in event command lists."""
-        def process_commands(cmd_list):
-            for cmd in cmd_list:
-                if not isinstance(cmd, dict) or cmd.get("code") != code:
-                    continue
-                params = cmd.get("parameters", [])
-                if is_choice and params and isinstance(params[0], list):
-                    try:
-                        idx = params[0].index(original)
-                        params[0][idx] = translation
-                        return True
-                    except ValueError:
-                        pass
-            return False
-
-        if self._walk_event_commands(data, process_commands):
-            return
-        log.warning("Export: command code %d not matched — original %r",
-                    code, original[:60])
 
     def _replace_single_param(self, data, code: int, param_idx: int,
                               original: str, translation: str):
@@ -2830,7 +2866,7 @@ class RPGMakerMVParser:
     @staticmethod
     def _load_plugins_js(path: str) -> list:
         """Parse plugins.js into a Python list of plugin dicts."""
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             content = f.read()
         # Match the array assigned to $plugins — greedy so nested ] in
         # JSON strings don't cause premature truncation
@@ -2846,8 +2882,8 @@ class RPGMakerMVParser:
     def _write_plugins_js(path: str, plugins: list):
         """Write plugin list back to plugins.js format."""
         json_str = json.dumps(plugins, ensure_ascii=False, indent=2)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(f"var $plugins =\n{json_str};\n")
+        RPGMakerMVParser._atomic_write_text(
+            path, f"var $plugins =\n{json_str};\n")
 
     @staticmethod
     def _backup_plugins_file(path: str):
@@ -3165,7 +3201,12 @@ class RPGMakerMVParser:
         return True
 
     def _save_plugins(self, project_dir: str, entries: list):
-        """Write translated plugin parameter values back into plugins.js."""
+        """Write translated plugin parameter values back into plugins.js.
+
+        Once a plugins_original.js backup exists, plugins.js is always
+        regenerated from it — so translations that were reverted (or
+        plugins injected by a previous export) don't linger.
+        """
         # Filter to only plugin entries with translations
         plugin_entries = [
             e for e in entries
@@ -3173,29 +3214,40 @@ class RPGMakerMVParser:
             and e.translation
             and e.status in ("translated", "reviewed")
         ]
-        if not plugin_entries:
-            return
 
         plugins_path = self._find_plugins_file(project_dir)
         if not plugins_path:
             return
 
-        # Backup before first modification
-        self._backup_plugins_file(plugins_path)
-
-        # Always read from backup (original Japanese) so re-exports work
         backup_path = os.path.join(
             os.path.dirname(plugins_path),
             os.path.basename(plugins_path).replace("plugins.", "plugins_original."),
         )
+        if not plugin_entries and not os.path.exists(backup_path):
+            return  # Nothing to translate, nothing exported before
+
+        # Backup before first modification
+        self._backup_plugins_file(plugins_path)
+
+        # Always read from backup (original Japanese) so re-exports work
         source_path = backup_path if os.path.exists(backup_path) else plugins_path
         try:
             plugins = self._load_plugins_js(source_path)
         except (json.JSONDecodeError, OSError) as exc:
             log.warning("Export: failed to load plugins.js from %s: %s", source_path, exc)
             return
+        if not plugins:
+            # Unparseable layout — never overwrite the game's plugin list
+            # with an empty array.
+            log.warning("Export: no plugin list found in %s, skipping", source_path)
+            return
 
-        # Build lookup: plugin_name → {param_key → plugin_dict}
+        self._apply_plugin_translations(plugins, plugin_entries)
+        self._write_plugins_js(plugins_path, plugins)
+
+    def _apply_plugin_translations(self, plugins: list, plugin_entries: list):
+        """Apply plugins.js entry translations to a parsed plugin list in place."""
+        # Build lookup: plugin_name → plugin_dict
         plugin_by_name = {}
         for p in plugins:
             if isinstance(p, dict) and p.get("name"):
@@ -3226,7 +3278,7 @@ class RPGMakerMVParser:
                         # Re-encode to preserve JSON string wrapping
                         params[param_key] = json.dumps(entry.translation, ensure_ascii=False)
                         continue
-                except (json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, ValueError, TypeError):
                     pass
                 # Plain string replacement
                 params[param_key] = entry.translation
@@ -3237,10 +3289,27 @@ class RPGMakerMVParser:
                     self._set_nested_value(parsed, nested_path, entry.original,
                                            entry.translation)
                     params[param_key] = json.dumps(parsed, ensure_ascii=False)
-                except (json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, ValueError, TypeError):
                     continue
 
-        self._write_plugins_js(plugins_path, plugins)
+    @staticmethod
+    def _replace_leaf(value, original: str, translation: str):
+        """Return the translated leaf, keeping JSON string-literal wrapping.
+
+        Extraction decodes leaves like ``"\\"テキスト\\""`` (a JSON string
+        literal inside a JSON string), so they must be re-encoded on write.
+        """
+        if not isinstance(value, str):
+            return value
+        if value == original:
+            return translation
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return value
+        if isinstance(decoded, str) and decoded == original:
+            return json.dumps(translation, ensure_ascii=False)
+        return value
 
     def _set_nested_value(self, obj, path: list, original: str, translation: str):
         """Navigate a parsed JSON structure by path segments and replace a value.
@@ -3259,8 +3328,7 @@ class RPGMakerMVParser:
             if not isinstance(obj, list) or idx >= len(obj):
                 return
             if is_last:
-                if isinstance(obj[idx], str) and obj[idx] == original:
-                    obj[idx] = translation
+                obj[idx] = self._replace_leaf(obj[idx], original, translation)
             else:
                 val = obj[idx]
                 was_string = isinstance(val, str)
@@ -3276,8 +3344,8 @@ class RPGMakerMVParser:
             if not isinstance(obj, dict) or segment not in obj:
                 return
             if is_last:
-                if isinstance(obj[segment], str) and obj[segment] == original:
-                    obj[segment] = translation
+                obj[segment] = self._replace_leaf(obj[segment], original,
+                                                  translation)
             else:
                 val = obj[segment]
                 was_string = isinstance(val, str)
@@ -3319,6 +3387,7 @@ class RPGMakerMVParser:
                 disabled = True
 
         if disabled:
+            self._backup_plugins_file(plugins_path)
             self._write_plugins_js(plugins_path, plugins)
             log.info("disable_splash_plugin: disabled splash in %s", plugins_path)
         return disabled
@@ -3387,6 +3456,13 @@ class RPGMakerMVParser:
         except (json.JSONDecodeError, OSError) as e:
             log.warning("inject_wordwrap_plugin: failed to parse %s: %s", plugins_path, e)
             return False
+        if not plugins:
+            log.warning("inject_wordwrap_plugin: no plugin list in %s", plugins_path)
+            return False
+
+        # Back up the untouched plugins.js before registering our plugin,
+        # so Restore Originals doesn't leave it registered without its .js
+        self._backup_plugins_file(plugins_path)
 
         # Update or add plugin entry
         plugin_params = {"MaxChars": str(max_chars)} if max_chars > 0 else {}
@@ -3419,6 +3495,22 @@ class RPGMakerMVParser:
         # Remove JS file
         js_dir = os.path.dirname(plugins_path)
         js_path = os.path.join(js_dir, "plugins", f"{self.INJECTED_PLUGIN_NAME}.js")
+
+        # Unregister from plugins.js first — a registered plugin whose .js
+        # is missing stops the game from booting.
+        try:
+            plugins = self._load_plugins_js(plugins_path)
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("remove_wordwrap_plugin: failed to parse %s: %s", plugins_path, e)
+            plugins = None
+        if plugins:
+            kept = [p for p in plugins
+                    if not (isinstance(p, dict)
+                            and p.get("name") == self.INJECTED_PLUGIN_NAME)]
+            if len(kept) != len(plugins):
+                self._write_plugins_js(plugins_path, kept)
+                log.info("remove_wordwrap_plugin: unregistered from plugins.js")
+
         if os.path.isfile(js_path):
             os.remove(js_path)
 

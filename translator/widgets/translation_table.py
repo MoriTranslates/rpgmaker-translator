@@ -206,6 +206,11 @@ class TranslationTable(QWidget):
         self._filter_timer.setSingleShot(True)
         self._filter_timer.setInterval(250)  # 250ms debounce
         self._filter_timer.timeout.connect(self._apply_filter)
+        # Coalesce status_changed bursts (typing, batch updates) into one emit
+        self._status_timer = QTimer(self)
+        self._status_timer.setSingleShot(True)
+        self._status_timer.setInterval(150)
+        self._status_timer.timeout.connect(self.status_changed.emit)
         self._build_ui()
 
     def _build_ui(self):
@@ -258,13 +263,13 @@ class TranslationTable(QWidget):
 
         self.jp_check = QCheckBox("JP in translation")
         self.jp_check.setToolTip("Show only entries where the translation still contains Japanese characters")
-        self.jp_check.stateChanged.connect(self._apply_filter)
+        self.jp_check.stateChanged.connect(self._on_filter_changed)
         filter_row.addWidget(self.jp_check)
 
         self.master_check = QCheckBox("Master View")
         self.master_check.setToolTip(
             "Show each unique text once. Edits propagate to all duplicates.")
-        self.master_check.stateChanged.connect(self._apply_filter)
+        self.master_check.stateChanged.connect(self._on_filter_changed)
         filter_row.addWidget(self.master_check)
 
         layout.addLayout(filter_row)
@@ -443,6 +448,10 @@ class TranslationTable(QWidget):
         """Feed glossary terms into spell checker as known words."""
         self._spell.load_glossary(glossary)
 
+    def refresh_speaker_filter(self):
+        """Rebuild the speaker dropdown from current entry contexts."""
+        self._populate_speaker_filter(self._all_entries)
+
     def _populate_speaker_filter(self, entries: list):
         """Extract unique speaker names from entry contexts and populate dropdown."""
         speakers = set()
@@ -526,11 +535,18 @@ class TranslationTable(QWidget):
         entries (ignoring file tree filter) so you can find text across the
         entire game.  Control codes are stripped before matching.
         """
+        # Remember the selected entry so the model reset can't leave
+        # _selected_row pointing at a different entry.
+        prev_entry = None
+        if 0 <= self._selected_row < len(self._visible_entries):
+            prev_entry = self._visible_entries[self._selected_row]
+
         # ID filter takes precedence — show only those entries, ignore others
-        if self._id_filter:
+        if self._id_filter is not None:
             self._visible_entries = [e for e in self._all_entries if e.id in self._id_filter]
             self._dupe_counts = {}
             self._model.set_entries(self._visible_entries, self._dupe_counts)
+            self._restore_selection(prev_entry)
             self._update_stats()
             return
 
@@ -584,21 +600,46 @@ class TranslationTable(QWidget):
                     continue
             self._visible_entries.append(e)
 
-        # Master View: show one entry per unique original text
+        # Master View: show one entry per unique original text.
+        # Counts span the whole project because propagation does too.
         self._dupe_counts = {}  # original_text -> count
         if self.master_check.isChecked():
+            for e in self._all_entries:
+                self._dupe_counts[e.original] = \
+                    self._dupe_counts.get(e.original, 0) + 1
             seen = {}  # original_text -> first entry
             for e in self._visible_entries:
-                if e.original in seen:
-                    self._dupe_counts[e.original] = \
-                        self._dupe_counts.get(e.original, 1) + 1
-                else:
+                if e.original not in seen:
                     seen[e.original] = e
-                    self._dupe_counts[e.original] = 1
             self._visible_entries = list(seen.values())
 
         self._model.set_entries(self._visible_entries, self._dupe_counts)
+        self._restore_selection(prev_entry)
         self._update_stats()
+
+    def _restore_selection(self, prev_entry):
+        """Re-select *prev_entry* after a model reset, or clear the editor."""
+        row = -1
+        if prev_entry is not None:
+            for i, e in enumerate(self._visible_entries):
+                if e is prev_entry:
+                    row = i
+                    break
+            if row < 0 and self.master_check.isChecked():
+                # Master view shows one representative per original text
+                for i, e in enumerate(self._visible_entries):
+                    if e.original == prev_entry.original:
+                        row = i
+                        break
+        if row >= 0:
+            self._selected_row = row
+            self.table.setCurrentIndex(self._model.index(row, 0))
+        else:
+            self._selected_row = -1
+            self.trans_editor.blockSignals(True)
+            self.orig_editor.clear()
+            self.trans_editor.clear()
+            self.trans_editor.blockSignals(False)
 
     def _on_model_data_changed(self, top_left, bottom_right, roles=None):
         """Handle edits made via the table's inline editor or refresh."""
@@ -609,7 +650,14 @@ class TranslationTable(QWidget):
             if 0 <= row < len(self._visible_entries):
                 self._propagate_to_duplicates(self._visible_entries[row])
         self._update_stats()
-        self.status_changed.emit()
+        # Only user inline edits notify listeners — programmatic
+        # refresh_row/refresh_all must not echo back (signal cascade).
+        if row >= 0:
+            self._notify_status_changed()
+
+    def _notify_status_changed(self):
+        """Schedule a (debounced) status_changed emit."""
+        self._status_timer.start()
 
     def _propagate_to_duplicates(self, source: TranslationEntry):
         """Copy translation + status from source to all entries with same original."""
@@ -620,8 +668,17 @@ class TranslationTable(QWidget):
                 e.translation = source.translation
                 e.status = source.status
 
-    def update_entry(self, entry_id: str, translation: str):
-        """Update a specific entry's translation (called after LLM translates)."""
+    def _propagate_status(self, source: TranslationEntry):
+        """Copy only status from source to all entries with same original."""
+        for e in self._all_entries:
+            if e is not source and e.original == source.original:
+                e.status = source.status
+
+    def update_entry(self, entry_id: str, translation: str, emit: bool = True):
+        """Update a specific entry's translation (called after LLM translates).
+
+        Pass ``emit=False`` from bulk loops and notify once at the end.
+        """
         for row, entry in enumerate(self._visible_entries):
             if entry.id == entry_id:
                 entry.translation = translation
@@ -634,7 +691,8 @@ class TranslationTable(QWidget):
                     self.trans_editor.blockSignals(False)
                 break
         self._update_stats()
-        self.status_changed.emit()
+        if emit:
+            self._notify_status_changed()
 
     def get_selected_entry_ids(self) -> list:
         """Return IDs of currently selected entries."""
@@ -760,10 +818,10 @@ class TranslationTable(QWidget):
                 entry = self._visible_entries[row]
                 entry.status = status
                 if self.master_check.isChecked():
-                    self._propagate_to_duplicates(entry)
+                    self._propagate_status(entry)
                 self._model.refresh_row(row)
         self._update_stats()
-        self.status_changed.emit()
+        self._notify_status_changed()
 
     def _copy_original(self):
         """Copy original text to translation column for selected rows."""
@@ -773,9 +831,11 @@ class TranslationTable(QWidget):
                 entry = self._visible_entries[row]
                 entry.translation = entry.original
                 entry.status = "translated"
+                if self.master_check.isChecked():
+                    self._propagate_to_duplicates(entry)
                 self._model.refresh_row(row)
         self._update_stats()
-        self.status_changed.emit()
+        self._notify_status_changed()
 
     # ── Pronoun swap ───────────────────────────────────────────────
 
@@ -879,11 +939,13 @@ class TranslationTable(QWidget):
             new_text = self._apply_pronoun_swap(entry.translation, direction)
             if new_text != entry.translation:
                 entry.translation = new_text
+                if self.master_check.isChecked():
+                    self._propagate_to_duplicates(entry)
                 self._model.refresh_row(row)
                 changed += 1
         if changed:
             self._update_stats()
-            self.status_changed.emit()
+            self._notify_status_changed()
         label = "she/her \u2192 he/him" if direction == "f2m" else "he/him \u2192 she/her"
         QMessageBox.information(
             self, "Pronoun Swap",
@@ -938,7 +1000,7 @@ class TranslationTable(QWidget):
 
         if changed:
             self._populate_speaker_filter(self._all_entries)
-            self.status_changed.emit()
+            self._notify_status_changed()
         QMessageBox.information(
             self, "Set Speaker",
             f'Set speaker to "{name}" for {changed} entries.'
@@ -961,7 +1023,7 @@ class TranslationTable(QWidget):
 
         if changed:
             self._populate_speaker_filter(self._all_entries)
-            self.status_changed.emit()
+            self._notify_status_changed()
         QMessageBox.information(
             self, "Clear Speaker",
             f"Cleared speaker from {changed} of {len(rows)} selected entries."
@@ -1011,8 +1073,10 @@ class TranslationTable(QWidget):
 
         # Block signals while loading to avoid feedback loop
         self.trans_editor.blockSignals(True)
-        self.orig_editor.setPlainText(entry.original)
-        self.trans_editor.setPlainText(entry.translation)
+        if self.orig_editor.toPlainText() != entry.original:
+            self.orig_editor.setPlainText(entry.original)
+        if self.trans_editor.toPlainText() != entry.translation:
+            self.trans_editor.setPlainText(entry.translation)
         self.trans_editor.blockSignals(False)
 
         if self.bottom_tabs.currentIndex() == 1:
@@ -1204,7 +1268,12 @@ class TranslationTable(QWidget):
         for entry in self._all_entries:
             if entry.id == entry_id:
                 entry.translation = new_text
-                entry.status = "translated" if new_text.strip() else "untranslated"
+                if not new_text.strip():
+                    entry.status = "untranslated"
+                elif entry.status not in ("translated", "reviewed"):
+                    entry.status = "translated"
+                if self.master_check.isChecked():
+                    self._propagate_to_duplicates(entry)
                 if (self._selected_row >= 0
                         and self._selected_row < len(self._visible_entries)
                         and self._visible_entries[self._selected_row].id == entry_id):
@@ -1215,6 +1284,8 @@ class TranslationTable(QWidget):
                     if ve.id == entry_id:
                         self._model.refresh_row(vrow)
                         break
+                self._update_stats()
+                self._notify_status_changed()
                 break
 
     def _on_editor_changed(self):
@@ -1237,9 +1308,8 @@ class TranslationTable(QWidget):
             self._propagate_to_duplicates(entry)
 
         # Sync back to the model (refreshes colors + status icon)
-        # Note: refresh_row triggers dataChanged → _on_model_data_changed → status_changed
-        # so we don't need a separate emit here
         self._model.refresh_row(row)
+        self._notify_status_changed()
 
     def _show_editor_context_menu(self, pos):
         """Right-click menu on translation editor — spell check + glossary + insert codes."""
@@ -1372,12 +1442,14 @@ class TranslationTable(QWidget):
                 continue
             count = entry.translation.count(find)
             entry.translation = entry.translation.replace(find, replace)
+            if not entry.translation.strip():
+                entry.status = "untranslated"
             total_occurrences += count
             entries_changed += 1
 
         if entries_changed:
             self._apply_filter()
-            self.status_changed.emit()
+            self._notify_status_changed()
             # Update editor panel if currently selected row was affected
             if 0 <= self._selected_row < len(self._visible_entries):
                 entry = self._visible_entries[self._selected_row]
@@ -1423,6 +1495,10 @@ class TranslationTable(QWidget):
             entry = self._all_entries[self._replace_index]
             if entry.translation and find in entry.translation:
                 entry.translation = entry.translation.replace(find, replace, 1)
+                if not entry.translation.strip():
+                    entry.status = "untranslated"
+                if self.master_check.isChecked():
+                    self._propagate_to_duplicates(entry)
                 # Update table display
                 for row, ve in enumerate(self._visible_entries):
                     if ve.id == entry.id:
@@ -1432,7 +1508,7 @@ class TranslationTable(QWidget):
                             self.trans_editor.setPlainText(entry.translation)
                             self.trans_editor.blockSignals(False)
                         break
-                self.status_changed.emit()
+                self._notify_status_changed()
 
         # Advance to next match (_replace_next starts at offset=1 from current)
         self._replace_next()

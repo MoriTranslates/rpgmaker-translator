@@ -70,6 +70,15 @@ def _detect_gpu() -> tuple:
     return None, 0
 
 
+def normalize_model_tag(tag: str) -> str:
+    """Normalize an Ollama tag for exact comparison (missing tag = :latest)."""
+    t = (tag or "").strip().lower()
+    # Only the last path segment can carry a :tag (hf.co/org/repo:Q4_K_M)
+    if t and ":" not in t.rsplit("/", 1)[-1]:
+        t += ":latest"
+    return t
+
+
 def _recommend_model(vram_mb: float) -> str:
     """Return the ollama tag of the best Sugoi model that fits in VRAM."""
     vram_gb = vram_mb / 1024
@@ -89,9 +98,19 @@ class _PullWorker(QThread):
     finished_ok = pyqtSignal()
     error = pyqtSignal(str)
 
-    def __init__(self, tag: str):
-        super().__init__()
+    def __init__(self, tag: str, parent=None):
+        super().__init__(parent)
         self.tag = tag
+        self._proc = None
+
+    def cancel(self):
+        """Terminate the running ollama pull (if any)."""
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
 
     def run(self):
         try:
@@ -101,6 +120,7 @@ class _PullWorker(QThread):
                 text=True,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            self._proc = proc
             for line in proc.stdout:
                 self.progress.emit(line.strip())
             proc.wait()
@@ -319,12 +339,9 @@ class ModelSuggestionDialog(QDialog):
         return vram_needed_gb <= (self._vram_mb / 1024)
 
     def _is_installed(self, tag: str) -> bool:
-        """Check if a model tag matches any installed model."""
-        tag_lower = tag.lower()
-        for m in self._installed:
-            if tag_lower in m.lower() or m.lower() in tag_lower:
-                return True
-        return False
+        """Check if a model tag exactly matches an installed model."""
+        norm = normalize_model_tag(tag)
+        return any(normalize_model_tag(m) == norm for m in self._installed)
 
     def _get_selected_tag(self) -> str:
         """Get the ollama tag of the currently selected row."""
@@ -362,7 +379,8 @@ class ModelSuggestionDialog(QDialog):
         if tag:
             self._cmd_edit.setText(f"ollama pull {tag}")
             self._copy_btn.setEnabled(True)
-            self._pull_btn.setEnabled(True)
+            # Never re-enable Pull while a pull is running
+            self._pull_btn.setEnabled(self._pull_worker is None)
             self._use_btn.setEnabled(self._is_installed(tag))
         else:
             self._cmd_edit.clear()
@@ -380,14 +398,14 @@ class ModelSuggestionDialog(QDialog):
     def _pull_model(self):
         """Run ollama pull in background."""
         tag = self._get_selected_tag()
-        if not tag:
+        if not tag or self._pull_worker is not None:
             return
 
         self._pull_btn.setEnabled(False)
         self._pull_btn.setText("Pulling...")
         self._pull_status.setText(f"Downloading {tag}...")
 
-        self._pull_worker = _PullWorker(tag)
+        self._pull_worker = _PullWorker(tag, self)
         self._pull_worker.progress.connect(self._on_pull_progress)
         self._pull_worker.finished_ok.connect(
             lambda: self._on_pull_done(tag, True))
@@ -429,6 +447,22 @@ class ModelSuggestionDialog(QDialog):
             if self._is_installed(tag):
                 status_item.setText("Installed")
                 status_item.setForeground(QColor("#a6e3a1"))
+
+    def done(self, result):
+        """Stop any running pull before the dialog closes (Close/Esc/X)."""
+        worker = self._pull_worker
+        if worker is not None and worker.isRunning():
+            for sig in (worker.progress, worker.finished_ok, worker.error):
+                try:
+                    sig.disconnect()
+                except TypeError:
+                    pass
+            worker.cancel()
+            if not worker.wait(3000):
+                worker.cancel()  # proc may have started after first cancel
+                worker.wait(10000)
+            self._pull_worker = None
+        super().done(result)
 
     def _use_model(self):
         """Emit the selected model tag and close."""

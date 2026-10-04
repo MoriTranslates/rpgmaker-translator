@@ -32,6 +32,21 @@ def _png_output_name(filename: str) -> str:
     return filename
 
 
+def _backup_dir(img_dir: str) -> str:
+    """img_original/ next to the game's img/ folder (created on export)."""
+    return os.path.join(os.path.dirname(img_dir), "img_original")
+
+
+def _source_path(img_dir: str, entry: "ImageEntry") -> str:
+    """Untranslated source image — the img_original/ backup once exported.
+
+    After export, entry.path holds the translated image, so OCR/render
+    must read from the backup instead.
+    """
+    bak = os.path.join(_backup_dir(img_dir), entry.subdir, entry.filename)
+    return bak if os.path.isfile(bak) else entry.path
+
+
 # ── Data ─────────────────────────────────────────────────────────
 
 @dataclass
@@ -44,6 +59,7 @@ class ImageEntry:
     status: str = "pending"   # pending | translated | skipped | no_text | error
     output_path: str = ""
     error: str = ""
+    verify_ok: bool | None = None   # None = not verified / unparseable
 
 
 # Status display
@@ -73,12 +89,14 @@ class _ImageWorker(QObject):
     all_done = pyqtSignal()
 
     def __init__(self, translator: ImageTranslator, entries: list[ImageEntry],
-                 indices: list[int], out_base: str, render_mode: str = "preserve"):
+                 indices: list[int], out_base: str, img_dir: str,
+                 render_mode: str = "preserve"):
         super().__init__()
         self.translator = translator
         self.entries = entries
         self.indices = indices
         self.out_base = out_base
+        self.img_dir = img_dir
         self.render_mode = render_mode
         self._cancelled = False
 
@@ -90,8 +108,9 @@ class _ImageWorker(QObject):
             if self._cancelled:
                 break
             entry = self.entries[idx]
+            src = _source_path(self.img_dir, entry)
             try:
-                regions = self.translator.ocr_image(entry.path)
+                regions = self.translator.ocr_image(src)
                 if not regions:
                     entry.status = "no_text"
                     entry.regions = []
@@ -100,22 +119,31 @@ class _ImageWorker(QObject):
 
                 regions = self.translator.translate_regions(regions)
                 entry.regions = regions
+                if not any(r.translation for r in regions):
+                    # Don't render Japanese/tofu and call it translated
+                    entry.status = "error"
+                    entry.error = "Translation failed for all regions"
+                    self.image_error.emit(idx, entry.error)
+                    continue
 
                 # Render to output (always .png)
                 rel = os.path.join(entry.subdir, _png_output_name(entry.filename))
                 out_path = os.path.join(self.out_base, rel)
                 self.translator.render_translated(
-                    entry.path, regions, out_path, mode=self.render_mode)
+                    src, regions, out_path, mode=self.render_mode)
 
                 entry.output_path = out_path
                 entry.status = "translated"
 
-                # Verify rendered image
+                # Verify rendered image (ok=None means unparseable/unknown)
+                entry.error = ""
+                entry.verify_ok = None
                 try:
                     result = self.translator.verify_render(out_path)
-                    entry.error = ""
-                    if not result.get("ok", True):
-                        entry.error = "; ".join(result.get("issues", []))
+                    entry.verify_ok = result.get("ok")
+                    if entry.verify_ok is False:
+                        entry.error = "; ".join(
+                            result.get("issues") or ["verify failed"])
                 except Exception:
                     pass  # verify failure is non-fatal
 
@@ -146,6 +174,8 @@ class ImagePanel(QWidget):
         self._out_base = ""
         self._worker = None
         self._thread = None
+        # (thread, worker) pairs kept alive until each thread's finished fires
+        self._live_threads: list[tuple[QThread, _ImageWorker]] = []
         # Store full-size pixmaps for rescaling on resize
         self._orig_pixmap = None
         self._trans_pixmap = None
@@ -321,6 +351,7 @@ class ImagePanel(QWidget):
 
     def set_project(self, project_path: str, client):
         """Initialize with a project — discover img/ folders."""
+        self._cancel_worker()
         self._project_path = project_path
         self._client = client
         self._img_dir = ImageTranslator.find_img_dir(project_path) or ""
@@ -367,13 +398,7 @@ class ImagePanel(QWidget):
             return
 
         # Cancel any running worker before switching folders
-        if self._thread is not None:
-            if self._worker:
-                self._worker.cancel()
-            self._thread.quit()
-            self._thread.wait(3000)
-            self._thread = None
-            self._worker = None
+        self._cancel_worker()
 
         self._entries = []
         for fname in sorted(os.listdir(folder)):
@@ -444,6 +469,9 @@ class ImagePanel(QWidget):
                     verify_text = "\u26a0 " + entry.error[:40]  # warning + truncated issues
                     verify_item = QTableWidgetItem(verify_text)
                     verify_item.setForeground(QColor(255, 180, 60))
+                elif entry.verify_ok is None:
+                    verify_item = QTableWidgetItem("?")  # not verified / unparseable
+                    verify_item.setForeground(QColor(150, 150, 150))
                 else:
                     verify_item = QTableWidgetItem("\u2713")  # checkmark
                     verify_item.setForeground(QColor(80, 200, 80))
@@ -496,7 +524,7 @@ class ImagePanel(QWidget):
         entry = self._entries[idx]
 
         # Load original preview (handles encrypted files)
-        self._orig_pixmap = self._load_pixmap(entry.path)
+        self._orig_pixmap = self._load_pixmap(_source_path(self._img_dir, entry))
         self._scale_preview(self.orig_label, self._orig_pixmap)
 
         # Load translated preview if available
@@ -598,9 +626,12 @@ class ImagePanel(QWidget):
         out_path = os.path.join(self._out_base, rel)
         try:
             mode = self.render_mode.currentData() or ImageTranslator.RENDER_PRESERVE
-            self._translator.render_translated(entry.path, regions, out_path, mode=mode)
+            self._translator.render_translated(
+                _source_path(self._img_dir, entry), regions, out_path, mode=mode)
             entry.output_path = out_path
             entry.status = "translated"
+            entry.error = ""
+            entry.verify_ok = None  # re-rendered — previous verify is stale
 
             # Update preview
             self._trans_pixmap = QPixmap(out_path)
@@ -647,6 +678,9 @@ class ImagePanel(QWidget):
                 indices = [self._selected_idx]
         if not indices or not self._translator:
             return
+        if self._thread is not None:
+            QMessageBox.warning(self, "Busy", "Translation is already running.")
+            return
         # Reset status so the worker processes them
         for i in indices:
             self._entries[i].status = "pending"
@@ -676,25 +710,57 @@ class ImagePanel(QWidget):
         self.translate_all_btn.setEnabled(False)
         self.translate_btn.setEnabled(False)
 
-        self._thread = QThread(self)
+        thread = QThread(self)
         mode = self.render_mode.currentData() or ImageTranslator.RENDER_PRESERVE
-        self._worker = _ImageWorker(
+        worker = _ImageWorker(
             self._translator, self._entries, indices, self._out_base,
-            render_mode=mode,
+            self._img_dir, render_mode=mode,
         )
-        self._worker.moveToThread(self._thread)
+        worker.moveToThread(thread)
 
-        self._worker.image_done.connect(self._on_image_done)
-        self._worker.image_error.connect(self._on_image_error)
-        self._worker.all_done.connect(self._on_all_done)
-        self._thread.started.connect(self._worker.run)
-        self._thread.finished.connect(self._on_thread_finished)
-        self._thread.start()
+        worker.image_done.connect(self._on_image_done)
+        worker.image_error.connect(self._on_image_error)
+        worker.all_done.connect(self._on_all_done)
+        # Direct: quit from the worker thread so the thread can finish even
+        # while the GUI thread is blocked (e.g. waiting in stop_worker)
+        worker.all_done.connect(
+            thread.quit, type=Qt.ConnectionType.DirectConnection)
+        thread.started.connect(worker.run)
+        thread.finished.connect(self._on_thread_finished)
+        self._thread = thread
+        self._worker = worker
+        self._live_threads.append((thread, worker))
+        thread.start()
+
+    def _cancel_worker(self):
+        """Detach and cancel the current worker without blocking the GUI.
+
+        Its UI signals are disconnected so a still-running image can't update
+        the new folder/run; the thread exits after its current image and is
+        cleaned up in _on_thread_finished.
+        """
+        worker = self._worker
+        if worker is None:
+            return
+        for sig, slot in ((worker.image_done, self._on_image_done),
+                          (worker.image_error, self._on_image_error),
+                          (worker.all_done, self._on_all_done)):
+            try:
+                sig.disconnect(slot)
+            except TypeError:
+                pass
+        worker.cancel()
+        self._thread = None
+        self._worker = None
+        self.translate_all_btn.setEnabled(True)
+        self.translate_btn.setEnabled(True)
 
     def _on_image_done(self, idx: int):
         """Update UI after one image is processed."""
+        if self.sender() is not self._worker:
+            return  # Stale signal from a cancelled run
         if idx < 0 or idx >= len(self._entries):
-            return  # Stale signal from previous folder
+            return
         self._refresh_table()
         # If this is the currently selected image, update preview + regions
         if idx == self._selected_idx:
@@ -708,21 +774,28 @@ class ImagePanel(QWidget):
     def _on_image_error(self, idx: int, msg: str):
         """Update UI after an image error."""
         log.warning("Image %d error: %s", idx, msg)
+        if self.sender() is not self._worker:
+            return
         self._refresh_table()
 
     def _on_all_done(self):
         """Re-enable buttons after batch completes."""
+        if self.sender() is not self._worker:
+            return
         self.translate_all_btn.setEnabled(True)
         self.translate_btn.setEnabled(True)
-        if self._thread:
-            self._thread.quit()
-            self._thread.wait(5000)
         self._refresh_table()
 
     def _on_thread_finished(self):
-        """Clean up thread/worker references after thread exits."""
-        self._thread = None
-        self._worker = None
+        """Release the finished thread's refs (may be a cancelled, older run)."""
+        thread = self.sender()
+        self._live_threads = [
+            (t, w) for t, w in self._live_threads if t is not thread]
+        if thread is self._thread:
+            self._thread = None
+            self._worker = None
+        if thread is not None:
+            thread.deleteLater()
 
     def _skip_selected(self):
         """Mark selected images as skipped."""
@@ -750,29 +823,33 @@ class ImagePanel(QWidget):
             QMessageBox.information(self, "Nothing to export", "No translated images to export.")
             return
 
-        # Create backup directory on first export
-        img_parent = os.path.dirname(self._img_dir)
-        backup_dir = os.path.join(img_parent, "img_original")
-        first_export = not os.path.isdir(backup_dir)
+        backup_dir = _backup_dir(self._img_dir)
 
         exported = 0
+        backed_up = 0
         errors = []
         for entry in translated:
             try:
                 # Original file in game's img/ folder
                 orig_file = entry.path  # e.g. .../img/system/Command_0.rpgmvp
                 subdir_path = os.path.join(self._img_dir, entry.subdir)
+                is_encrypted = entry.filename.lower().endswith(ENCRYPTED_EXTS)
+                if is_encrypted and not self._encryption_key:
+                    errors.append(
+                        f"{entry.filename}: encrypted image but no encryption "
+                        "key in System.json — not exported")
+                    continue
 
-                # Backup original on first export
-                if first_export:
-                    bak_subdir = os.path.join(backup_dir, entry.subdir)
+                # Back up the original the first time this file is exported
+                bak_subdir = os.path.join(backup_dir, entry.subdir)
+                bak_file = os.path.join(bak_subdir, entry.filename)
+                if not os.path.isfile(bak_file):
                     os.makedirs(bak_subdir, exist_ok=True)
-                    bak_file = os.path.join(bak_subdir, entry.filename)
-                    if not os.path.isfile(bak_file):
-                        shutil.copy2(orig_file, bak_file)
+                    shutil.copy2(orig_file, bak_file)
+                    backed_up += 1
 
                 # Export: re-encrypt if original was .rpgmvp, else copy PNG
-                if entry.filename.lower().endswith(ENCRYPTED_EXTS) and self._encryption_key:
+                if is_encrypted:
                     # Re-encrypt translated PNG → .rpgmvp in game folder
                     dest = os.path.join(subdir_path, entry.filename)
                     encrypt_to_rpgmvp(entry.output_path, dest, self._encryption_key)
@@ -786,8 +863,8 @@ class ImagePanel(QWidget):
                 errors.append(f"{entry.filename}: {e}")
 
         msg = f"Exported {exported} images to game folder."
-        if first_export:
-            msg += f"\nOriginals backed up to: img_original/"
+        if backed_up:
+            msg += f"\n{backed_up} originals backed up to: img_original/"
         if errors:
             msg += f"\n\n{len(errors)} errors:\n" + "\n".join(errors[:5])
         QMessageBox.information(self, "Export Complete", msg)
@@ -843,9 +920,12 @@ class ImagePanel(QWidget):
     # ── Cleanup ───────────────────────────────────────────────────
 
     def stop_worker(self):
-        """Cancel running worker. Call on app close."""
-        if self._worker:
-            self._worker.cancel()
-        if self._thread and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(3000)
+        """Cancel all workers and wait for their threads. Call on app close."""
+        self._cancel_worker()
+        for thread, worker in self._live_threads:
+            worker.cancel()
+            if thread.isRunning():
+                # Worker finishes its current image (an LLM call) before exiting
+                thread.quit()
+                if not thread.wait(30000):
+                    log.warning("Image worker thread did not stop within 30s")

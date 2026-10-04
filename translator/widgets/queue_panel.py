@@ -265,7 +265,8 @@ class QueuePanel(QWidget):
             return
 
         # Guard against double-counting
-        if item.data(0, Qt.ItemDataRole.UserRole) == "done":
+        old_status = item.data(0, Qt.ItemDataRole.UserRole)
+        if old_status == "done":
             return
 
         self._done_count += 1
@@ -288,19 +289,21 @@ class QueuePanel(QWidget):
         else:
             item.setForeground(4, color)
 
-        self._update_parent(item)
+        self._update_parent(item, old_status, "done")
         self._update_summary()
-        self._apply_filter(self._filter_combo.currentText())
+        self._refilter_item(item)
 
-        # Auto-scroll only if the user isn't actively browsing — keep the
-        # active item in view but don't yank focus around if they expanded
-        # something specific.
-        self._tree.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
+        # Auto-scroll only when the item is already on screen-able: never
+        # expand collapsed parents or reveal hidden rows behind the user.
+        if not item.isHidden() and self._ancestors_expanded(item):
+            self._tree.scrollToItem(
+                item, QAbstractItemView.ScrollHint.EnsureVisible)
 
     def mark_entry_error(self, entry_id: str, error_msg: str):
         item = self._entry_items.get(entry_id)
         if item is None:
             return
+        old_status = item.data(0, Qt.ItemDataRole.UserRole)
         icon, color = _STATUS["error"]
         preview = item.text(0).split(" ", 1)[-1] if " " in item.text(0) else ""
         item.setText(0, f"{icon} {preview}")
@@ -310,7 +313,10 @@ class QueuePanel(QWidget):
         item.setForeground(3, color)
         item.setText(4, "Error")
         item.setForeground(4, color)
-        self._update_parent(item)
+        if old_status == "done":
+            self._done_count -= 1
+        self._update_parent(item, old_status, "error")
+        self._refilter_item(item)
 
     def mark_prefill(self, entry_id: str, translation: str,
                      source: str = "TM"):
@@ -343,41 +349,28 @@ class QueuePanel(QWidget):
 
     # ── Internal ────────────────────────────────────────────────────
 
-    def _update_parent(self, child_item: QTreeWidgetItem):
-        """Roll up child status into all ancestor event/DB nodes."""
+    def _update_parent(self, child_item: QTreeWidgetItem,
+                       old_status: str, new_status: str):
+        """Roll a leaf status change up into all ancestor event/DB nodes.
+
+        Counters are adjusted incrementally — no child recount per update.
+        """
+        d_done = (new_status == "done") - (old_status == "done")
+        d_error = (new_status == "error") - (old_status == "error")
         parent = child_item.parent()
         while parent is not None:
             key = parent.data(0, Qt.ItemDataRole.UserRole)
-            if key in self._event_counts:
+            cnt = self._event_counts.get(key)
+            if cnt is not None:
+                cnt["done"] += d_done
+                cnt["error"] += d_error
                 self._refresh_node(parent, key)
             parent = parent.parent()
 
     def _refresh_node(self, node: QTreeWidgetItem, key: str):
-        """Recount children of *node* and update its label/color/progress.
-
-        Children may be leaf entries (with status in UserRole) or sub-nodes
-        (Database root case, where children are DB-file nodes).
-        """
-        done = error = total = 0
-        for i in range(node.childCount()):
-            ch = node.child(i)
-            ch_key = ch.data(0, Qt.ItemDataRole.UserRole)
-            if ch_key in self._event_counts:
-                sub = self._event_counts[ch_key]
-                done += sub["done"]
-                error += sub["error"]
-                total += sub["total"]
-            else:
-                status = ch_key  # entry status stored in UserRole on col 0
-                if status == "done":
-                    done += 1
-                elif status == "error":
-                    error += 1
-                total += 1
+        """Update *node*'s label/color/progress from its stored counters."""
         cnt = self._event_counts[key]
-        cnt["done"] = done
-        cnt["error"] = error
-        cnt["total"] = total
+        done, error, total = cnt["done"], cnt["error"], cnt["total"]
         node.setText(1, f"{done}/{total}" + (f" · {error} err" if error else ""))
 
         label = _friendly_event_name(key)
@@ -412,6 +405,40 @@ class QueuePanel(QWidget):
             )
             self._speed_label.setText(f"{rate:.1f}s/entry")
 
+    @staticmethod
+    def _entry_matches(ch: QTreeWidgetItem, filter_text: str) -> bool:
+        status = ch.data(0, Qt.ItemDataRole.UserRole)
+        if filter_text == "Queued":
+            return status == "queued"
+        if filter_text == "Done":
+            return status == "done"
+        if filter_text == "Error":
+            return status == "error"
+        if filter_text == "TM/Glossary":
+            return ch.text(4) in ("TM", "Glossary")
+        return True
+
+    def _refilter_item(self, item: QTreeWidgetItem):
+        """Re-apply the current filter to one leaf and its ancestors only."""
+        filter_text = self._filter_combo.currentText()
+        if filter_text == "All":
+            return
+        item.setHidden(not self._entry_matches(item, filter_text))
+        parent = item.parent()
+        while parent is not None:
+            parent.setHidden(not any(
+                not parent.child(i).isHidden()
+                for i in range(parent.childCount())))
+            parent = parent.parent()
+
+    def _ancestors_expanded(self, item: QTreeWidgetItem) -> bool:
+        parent = item.parent()
+        while parent is not None:
+            if not parent.isExpanded() or parent.isHidden():
+                return False
+            parent = parent.parent()
+        return True
+
     def _apply_filter(self, filter_text: str):
         """Hide entries that don't match; hide parents with no visible children.
 
@@ -436,17 +463,7 @@ class QueuePanel(QWidget):
             any_visible = False
             for i in range(node.childCount()):
                 ch = node.child(i)
-                status = ch.data(0, Qt.ItemDataRole.UserRole)
-                source = ch.text(4)
-                show = True
-                if filter_text == "Queued":
-                    show = status == "queued"
-                elif filter_text == "Done":
-                    show = status == "done"
-                elif filter_text == "Error":
-                    show = status == "error"
-                elif filter_text == "TM/Glossary":
-                    show = source in ("TM", "Glossary")
+                show = self._entry_matches(ch, filter_text)
                 ch.setHidden(not show)
                 if show:
                     any_visible = True

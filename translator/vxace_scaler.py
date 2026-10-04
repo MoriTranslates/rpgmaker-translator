@@ -34,7 +34,7 @@ _SCRIPT_CODE = r"""
 #--------------------------------------------------------------------------
 
 module WindowScaler
-  GetActiveWindow   = Win32API.new('user32', 'GetActiveWindow', '', 'l')
+  FindWindow        = Win32API.new('user32', 'FindWindowA', 'pp', 'l')
   MoveWindow        = Win32API.new('user32', 'MoveWindow', 'liiiil', 'l')
   GetSystemMetrics  = Win32API.new('user32', 'GetSystemMetrics', 'i', 'i')
   GetWindowLong     = Win32API.new('user32', 'GetWindowLongA', 'li', 'l')
@@ -63,8 +63,10 @@ module WindowScaler
   @fs_state = 0
   @saved_style = 0
 
+  # The game window by its class — GetActiveWindow returns 0 when the
+  # window isn't focused at startup, and ||= would cache that 0 forever.
   def self.hwnd
-    @hwnd ||= GetActiveWindow.call
+    @hwnd ||= FindWindow.call('RGSS Player', 0)
   end
 
   def self.apply_scale
@@ -260,7 +262,8 @@ def inject_scaler(scripts_path: str, default_scale: float = 2.0) -> bool:
 
     try:
         with open(scripts_path, "rb") as f:
-            scripts = rubymarshal.reader.load(f)
+            original_bytes = f.read()
+        scripts = rubymarshal.reader.loads(original_bytes)
     except Exception as e:
         log.error("Failed to read Scripts.rvdata2: %s", e)
         return False
@@ -299,26 +302,25 @@ def inject_scaler(scripts_path: str, default_scale: float = 2.0) -> bool:
         with open(scripts_path, "wb") as f:
             rubymarshal.writer.write(f, scripts)
         base_w, base_h = detect_resolution(scripts_path)
-        log.info("Injected window scaler: %dx%d default %sx, F5=cycle, F6=fullscreen",
+        log.info("Injected window scaler: %dx%d default %sx, "
+                 "PgUp/PgDn=scale, F3=borderless cycle",
                  base_w, base_h, default_scale)
         return True
     except Exception as e:
         log.error("Failed to write Scripts.rvdata2: %s", e)
-        # Restore backup
-        if os.path.exists(backup):
-            shutil.copy2(backup, scripts_path)
+        # Put back exactly what was there (the first-time backup may predate
+        # other injected scripts)
+        with open(scripts_path, "wb") as f:
+            f.write(original_bytes)
         return False
 
 
 def remove_scaler(scripts_path: str) -> bool:
-    """Remove the injected scaler script and restore original."""
-    backup = scripts_path.replace("Scripts.rvdata2", "Scripts_prescaler.rvdata2")
-    if os.path.exists(backup):
-        shutil.copy2(backup, scripts_path)
-        log.info("Restored Scripts.rvdata2 from pre-scaler backup")
-        return True
+    """Remove the injected scaler script entry by name.
 
-    # No backup — try to remove the script entry manually
+    Doesn't restore Scripts_prescaler.rvdata2 — that would also wipe any
+    QoL plugins (or translations) applied after the scaler.
+    """
     if not HAS_RUBYMARSHAL:
         return False
     try:

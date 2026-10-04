@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QApplication, QProgressDialog, QTabWidget, QWidget,
     QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QEventLoop, pyqtSignal
 
 from ..ai_client import (
     AIClient, SYSTEM_PROMPT, SUGOI_SYSTEM_PROMPT, TYRANO_SYSTEM_PROMPT,
@@ -16,15 +16,15 @@ from ..ai_client import (
     get_model_pricing, CLOUD_DEFAULT_WORKERS, LOCAL_DEFAULT_WORKERS,
 )
 from ..rpgmaker_mv import RPGMakerMVParser
-from .model_suggestion_dialog import ModelSuggestionDialog
+from .model_suggestion_dialog import ModelSuggestionDialog, normalize_model_tag
 
 
 class _ModelFetcher(QThread):
     """Background thread to fetch model list from Ollama without blocking UI."""
     done = pyqtSignal(list)
 
-    def __init__(self, client, url):
-        super().__init__()
+    def __init__(self, client, url, parent=None):
+        super().__init__(parent)
         self._client = client
         self._url = url
 
@@ -38,6 +38,22 @@ class _ModelFetcher(QThread):
         except Exception:
             models = []
         self.done.emit(models)
+
+
+class _CallWorker(QThread):
+    """Run a blocking callable off the GUI thread; emits its return value."""
+    done = pyqtSignal(object)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
+        try:
+            result = self._fn()
+        except Exception:
+            result = None
+        self.done.emit(result)
 
 
 class SettingsDialog(QDialog):
@@ -369,7 +385,7 @@ class SettingsDialog(QDialog):
         info.setStyleSheet("color: #a6adc8; margin-bottom: 8px;")
         vbox.addWidget(info)
 
-        # Columns: Engine | Context | Batch | Workers | Wrap | Model
+        # Columns: Engine | Context | Batch | Workers | Model
         headers = ["Engine", "Context", "Batch", "Workers", "Model"]
         engines = list(self.engine_handlers.values())
         # +1 row for the "Default" row at top
@@ -380,12 +396,12 @@ class SettingsDialog(QDialog):
         self.engine_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Interactive)
         self.engine_table.setColumnWidth(0, 150)
-        for col in range(1, 5):
+        for col in range(1, 4):
             self.engine_table.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeMode.ResizeToContents)
-        # Model column stretches to fill remaining space
+        # Model column (4) stretches to fill remaining space
         self.engine_table.horizontalHeader().setSectionResizeMode(
-            5, QHeaderView.ResizeMode.Stretch)
+            4, QHeaderView.ResizeMode.Stretch)
         self.engine_table.verticalHeader().setVisible(False)
         self.engine_table.setSelectionMode(
             QTableWidget.SelectionMode.NoSelection)
@@ -537,12 +553,8 @@ class SettingsDialog(QDialog):
 
     def _load_current(self):
         """Populate fields from current client settings."""
-        self._orig_url = self.client.base_url
-        self._orig_model = self.client.model
-        self._orig_provider = self.client.provider
         self._orig_workers = self.engine.num_workers if self.engine else 2
         self._orig_language = self.client.target_language
-        self._orig_system_prompt = self.client.system_prompt
         self._suppress_preset_change = False  # Flag to avoid feedback loops
         self._loading = True  # Suppress auto-set of batch/workers during load
 
@@ -645,14 +657,8 @@ class SettingsDialog(QDialog):
             self.status_label.setStyleSheet("color: #89b4fa;")
         elif is_ollama:
             # Fetch models from Ollama in background
-            self._model_fetcher = _ModelFetcher(
-                self.client,
-                self.url_edit.text().strip() or "http://localhost:11434",
-            )
-            self._model_fetcher.done.connect(self._on_models_fetched)
-            self.status_label.setText("Fetching models...")
             self.status_label.setStyleSheet("")
-            self._model_fetcher.start()
+            self._start_model_fetch()
 
         # Auto-set batch size and workers based on provider/model (DazedMTL defaults)
         # Skip during initial load — saved values should be preserved
@@ -760,8 +766,24 @@ class SettingsDialog(QDialog):
 
     # ── Model refresh ────────────────────────────────────────────────
 
+    def _start_model_fetch(self):
+        """Start a background model fetch unless one is already running."""
+        fetcher = getattr(self, "_model_fetcher", None)
+        if fetcher is not None and fetcher.isRunning():
+            return  # never overwrite a running QThread
+        self._model_fetcher = _ModelFetcher(
+            self.client,
+            self.url_edit.text().strip() or "http://localhost:11434",
+            parent=self,
+        )
+        self._model_fetcher.done.connect(self._on_models_fetched)
+        self.status_label.setText("Fetching models...")
+        self.refresh_btn.setEnabled(False)
+        self._model_fetcher.start()
+
     def _on_models_fetched(self, models: list):
         """Called when the background model fetch completes."""
+        self.refresh_btn.setEnabled(True)
         self._populate_model_combo(models)
         self._populate_engine_model_combos(models)
 
@@ -798,42 +820,45 @@ class SettingsDialog(QDialog):
 
     def _refresh_models(self):
         """Fetch available models from Ollama (used by Refresh button)."""
-        self._model_fetcher = _ModelFetcher(
-            self.client,
-            self.url_edit.text().strip() or "http://localhost:11434",
-        )
-        self._model_fetcher.done.connect(self._on_models_fetched)
-        self.status_label.setText("Fetching models...")
-        self._model_fetcher.start()
+        self._start_model_fetch()
 
     def _test_connection(self):
-        """Test if the translation backend is reachable without mutating shared client."""
-        import requests as _req
+        """Test if the translation backend is reachable without mutating shared client.
+
+        The network check runs on a worker thread so the dialog stays responsive.
+        """
+        worker = getattr(self, "_test_worker", None)
+        if worker is not None and worker.isRunning():
+            return
         provider = self.provider_combo.currentText()
         url = self.url_edit.text().strip() or "http://localhost:11434"
         api_key = self.api_key_edit.text().strip()
 
-        ok = False
-        if provider == "Ollama (Local)":
-            try:
+        def check() -> bool:
+            if provider == "Ollama (Local)":
+                import requests as _req
                 r = _req.get(f"{url}/api/tags", timeout=5)
-                ok = r.status_code == 200
-            except Exception:
-                ok = False
-        else:
+                return r.status_code == 200
             # Cloud provider — test with a lightweight models list call
-            try:
-                import openai
-                from ..ai_client import PROVIDER_URLS
-                base = PROVIDER_URLS.get(provider)
-                if not base and provider == "Custom":
-                    base = url
-                client = openai.OpenAI(api_key=api_key, base_url=base, timeout=10)
-                client.models.list()
-                ok = True
-            except Exception:
-                ok = False
+            import openai
+            from ..ai_client import PROVIDER_URLS
+            base = PROVIDER_URLS.get(provider)
+            if not base and provider == "Custom":
+                base = url
+            client = openai.OpenAI(api_key=api_key, base_url=base, timeout=10)
+            client.models.list()
+            return True
 
+        self.test_btn.setEnabled(False)
+        self.status_label.setText("Testing connection...")
+        self._test_worker = _CallWorker(check, parent=self)
+        self._test_worker.done.connect(
+            lambda ok: self._on_test_done(provider, bool(ok)))
+        self._test_worker.start()
+
+    def _on_test_done(self, provider: str, ok: bool):
+        self.test_btn.setEnabled(True)
+        self.status_label.setText("")
         if ok:
             QMessageBox.information(
                 self, "Connection OK",
@@ -864,8 +889,9 @@ class SettingsDialog(QDialog):
     def _on_suggested_model_selected(self, tag: str):
         """Apply the model selected from suggestion dialog."""
         # Check if model is already in combo
+        norm = normalize_model_tag(tag)
         for i in range(self.model_combo.count()):
-            if tag.lower() in self.model_combo.itemText(i).lower():
+            if normalize_model_tag(self.model_combo.itemText(i)) == norm:
                 self.model_combo.setCurrentIndex(i)
                 return
         # Not in combo — add it and select
@@ -940,14 +966,17 @@ class SettingsDialog(QDialog):
 
     # ── Save / Cancel ────────────────────────────────────────────────
 
-    def reject(self):
-        """Revert all client changes made during the dialog."""
-        self.client.base_url = self._orig_url
-        self.client.model = self._orig_model
-        self.client.provider = self._orig_provider
-        self.client.target_language = self._orig_language
-        self.client.system_prompt = self._orig_system_prompt
-        super().reject()
+    def done(self, result):
+        """Wait for background threads before the dialog goes away."""
+        for name in ("_model_fetcher", "_test_worker"):
+            worker = getattr(self, name, None)
+            if worker is not None and worker.isRunning():
+                try:
+                    worker.done.disconnect()
+                except TypeError:
+                    pass
+                worker.wait()
+        super().done(result)
 
     def _save(self):
         """Apply settings and close."""
@@ -1042,9 +1071,18 @@ class SettingsDialog(QDialog):
         progress.setMinimumDuration(0)
         progress.setCancelButton(None)
         progress.show()
-        QApplication.processEvents()
 
-        ok = self.client.restart_server(num_parallel)
+        # Restart on a worker thread; a local event loop keeps the UI painting
+        result = {}
+        loop = QEventLoop(self)
+        worker = _CallWorker(
+            lambda: self.client.restart_server(num_parallel), parent=self)
+        worker.done.connect(lambda ok: result.__setitem__("ok", ok))
+        worker.finished.connect(loop.quit)
+        worker.start()
+        loop.exec()
+        worker.wait()
+        ok = bool(result.get("ok"))
 
         progress.close()
 

@@ -56,6 +56,8 @@ class TranslationWizard(QDialog):
         self._current_step = WizardStep.IDLE
         self._entries_done = 0
         self._entries_total = 0
+        self._cancelled = False
+        self._model_worker = None
         self._build_ui()
         self._update_state()
 
@@ -101,9 +103,6 @@ class TranslationWizard(QDialog):
         self.model_status = QLabel("")
         self.model_status.setStyleSheet("font-size: 11px;")
         layout.addWidget(self.model_status)
-
-        # Populate models
-        self._populate_models()
 
         layout.addSpacing(10)
 
@@ -299,13 +298,24 @@ class TranslationWizard(QDialog):
 
         layout.addWidget(self.button_box)
 
+        # Populate models (async — needs every combo above to exist)
+        self._populate_models()
+
     def _populate_models(self):
-        """Fetch and populate the model dropdown."""
+        """Fetch the model list on a worker thread, then fill the dropdowns."""
+        if self._model_worker is not None and self._model_worker.isRunning():
+            return
+        from .settings_dialog import _CallWorker
+        self.model_status.setText("Fetching models...")
+        self.model_status.setStyleSheet("font-size: 11px;")
+        self._model_worker = _CallWorker(self.mw.client.list_models, parent=self)
+        self._model_worker.done.connect(self._apply_models)
+        self._model_worker.start()
+
+    def _apply_models(self, models):
+        """Populate the model dropdowns from a fetched model list."""
+        models = list(models or [])
         current_model = self.mw.client.model or ""
-        try:
-            models = self.mw.client.list_models()
-        except Exception:
-            models = []
 
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
@@ -361,6 +371,7 @@ class TranslationWizard(QDialog):
             self.mw.client.model = selected_model
 
         self._current_step = WizardStep.IDLE
+        self._cancelled = False
         self.progress_widget.setVisible(True)
         self._update_state()
 
@@ -458,6 +469,8 @@ class TranslationWizard(QDialog):
 
     def _run_next_step(self):
         """Execute the next step in the pipeline."""
+        if self._cancelled:
+            return
         if self._step_index >= len(self._steps):
             self._finish()
             return
@@ -567,6 +580,8 @@ class TranslationWizard(QDialog):
 
     def _start_batch_step(self, mode: str):
         """Start a batch and advance if nothing to translate."""
+        if self._cancelled:
+            return
         log.info("Wizard: starting batch step mode=%s", mode)
         started = self.mw._start_batch(mode=mode)
         log.info("Wizard: _start_batch returned %s", started)
@@ -581,6 +596,8 @@ class TranslationWizard(QDialog):
 
     def _start_polish_db(self):
         """Polish DB entries (dual-pass mode) before dialogue translate."""
+        if self._cancelled:
+            return
         handler = self.mw.handler
         if not handler.has_db_split:
             # No DB split — nothing distinct to polish here
@@ -606,6 +623,8 @@ class TranslationWizard(QDialog):
 
     def _start_polish_dialogue(self):
         """Polish dialogue (or all entries on engines without DB split)."""
+        if self._cancelled:
+            return
         handler = self.mw.handler
         entries = self.mw.project.entries
         if handler.has_db_split:
@@ -631,6 +650,8 @@ class TranslationWizard(QDialog):
 
     def _on_batch_step_finished(self):
         """Called when a batch translate step finishes."""
+        if self._cancelled:
+            return
         log.info("Wizard: _on_batch_step_finished called, _wizard_active=%s, step=%s",
                  getattr(self.mw, '_wizard_active', None), self._current_step)
         if not getattr(self.mw, '_wizard_active', False):
@@ -678,6 +699,8 @@ class TranslationWizard(QDialog):
 
     def _run_cleanup(self):
         """Run post-processing cleanup (synchronous)."""
+        if self._cancelled:
+            return
         from ..post_processor import run_post_processing
 
         codes_fixed = self.mw._restore_missing_codes()
@@ -727,6 +750,8 @@ class TranslationWizard(QDialog):
 
     def _run_wordwrap(self):
         """Apply word wrap (synchronous)."""
+        if self._cancelled:
+            return
         # Apply the wizard's chars/line setting to the plugin analyzer
         manual = self.ww_spin.value()
         analyzer = getattr(self.mw, 'plugin_analyzer', None)
@@ -777,6 +802,8 @@ class TranslationWizard(QDialog):
 
     def _run_export(self):
         """Export translations to game files."""
+        if self._cancelled:
+            return
         try:
             translated = [e for e in self.mw.project.entries
                           if e.status in ("translated", "reviewed") and e.translation]
@@ -792,19 +819,25 @@ class TranslationWizard(QDialog):
             project_path = self.mw.project.project_path
             handler = self.mw.handler
 
-            # Strip WordWrap tags for MV/MZ if no plugin and not injecting
+            # Strip WordWrap tags for MV/MZ if no plugin and not injecting.
+            # Strip on copies so the project's translations keep their tags.
+            to_export = translated
             if handler.has_plugin_system:
-                import re
+                import copy
                 inject_ww = getattr(self.mw, '_inject_wordwrap', False)
                 has_plugin = (self.mw.plugin_analyzer.has_wordwrap_plugin
                               if self.mw.plugin_analyzer else False)
                 if not has_plugin and not inject_ww:
+                    to_export = []
                     for e in translated:
-                        if e.translation and "<WordWrap>" in e.translation:
+                        if e.translation and re.search(
+                                r'<WordWrap>', e.translation, flags=re.IGNORECASE):
+                            e = copy.copy(e)
                             e.translation = re.sub(
                                 r'<WordWrap>', '', e.translation, flags=re.IGNORECASE)
+                        to_export.append(e)
 
-            handler.save_project(project_path, translated)
+            handler.save_project(project_path, to_export)
 
             # MV/MZ-specific: inject word wrap plugin + disable splash
             if handler.has_plugin_system:
@@ -841,6 +874,8 @@ class TranslationWizard(QDialog):
 
     def _run_patch_zip(self):
         """Create a translation patch zip."""
+        if self._cancelled:
+            return
         try:
             import os
 
@@ -923,6 +958,8 @@ class TranslationWizard(QDialog):
     def _on_cancel(self):
         """Cancel or close the wizard."""
         if self._current_step not in (WizardStep.IDLE, WizardStep.DONE):
+            # Pending QTimer.singleShot steps check this flag and bail out
+            self._cancelled = True
             self.mw.engine.cancel()
             self._disconnect_signals()
             self.mw._wizard_active = False
@@ -938,6 +975,24 @@ class TranslationWizard(QDialog):
             self.cancel_btn.setVisible(False)
         else:
             self.reject()
+
+    def reject(self):
+        """Esc / window close: stop a running pipeline instead of hiding it."""
+        if self._current_step not in (WizardStep.IDLE, WizardStep.DONE):
+            self._on_cancel()
+            return
+        super().reject()
+
+    def done(self, result):
+        """Wait for the model-list thread before the dialog goes away."""
+        worker = self._model_worker
+        if worker is not None and worker.isRunning():
+            try:
+                worker.done.disconnect()
+            except TypeError:
+                pass
+            worker.wait()
+        super().done(result)
 
 
 class WizardChoiceDialog(QDialog):

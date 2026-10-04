@@ -230,9 +230,41 @@ EVENT_NAME = 0x01
 EVENT_PAGES = 0x05
 PAGE_COMMANDS = 0x34
 
+PAGE_COMMANDS_SIZE = 0x33   # byte size of the 0x34 command stream
+
 # Common event fields
 CE_NAME = 0x01
+CE_COMMANDS_SIZE = 0x15     # byte size of the 0x16 command stream
 CE_COMMANDS = 0x16
+
+# Max lines in one RM2K/2K3 message box (10110 + up to three 20110)
+MESSAGE_BOX_LINES = 4
+
+BACKUP_SUFFIX = "_original"
+
+
+def _is_backup_name(fname: str) -> bool:
+    """True for our own backup files (e.g. Map0001_original.lmu)."""
+    return os.path.splitext(fname)[0].endswith(BACKUP_SUFFIX)
+
+
+def _backup_path(path: str) -> str:
+    """Backup path for an LCF file: Map0001.LMU -> Map0001_original.LMU."""
+    base, ext = os.path.splitext(path)
+    return base + BACKUP_SUFFIX + ext
+
+
+def _set_commands(fields: dict, cmd_chunk: int, size_chunk: int,
+                  commands: list) -> None:
+    """Write a command stream and keep its sibling byte-size chunk in sync.
+
+    liblcf: EventPage 0x33 / CommonEvent 0x15 hold the byte length of the
+    0x34 / 0x16 event-command payload (including the 4-byte terminator).
+    """
+    payload = _write_commands(commands)
+    fields[cmd_chunk] = payload
+    if size_chunk in fields:
+        fields[size_chunk] = _write_ber(len(payload))
 
 
 # ── Main parser class ─────────────────────────────────────────────────
@@ -286,7 +318,7 @@ class RPGMaker2KParser:
 
         # Extract map events
         for fname in sorted(os.listdir(project_dir)):
-            if not fname.lower().endswith('.lmu'):
+            if not fname.lower().endswith('.lmu') or _is_backup_name(fname):
                 continue
             fpath = os.path.join(project_dir, fname)
             try:
@@ -544,9 +576,8 @@ class RPGMaker2KParser:
                      entries: list[TranslationEntry]):
         """Write translations back into LCF binary files."""
         # Create backups
-        backup_suffix = "_original"
         ldb_path = os.path.join(project_dir, "RPG_RT.ldb")
-        ldb_backup = ldb_path.replace(".ldb", f"{backup_suffix}.ldb")
+        ldb_backup = _backup_path(ldb_path)
         if not os.path.exists(ldb_backup):
             shutil.copy2(ldb_path, ldb_backup)
 
@@ -566,10 +597,10 @@ class RPGMaker2KParser:
 
         # Export maps
         for fname in sorted(os.listdir(project_dir)):
-            if not fname.lower().endswith('.lmu'):
+            if not fname.lower().endswith('.lmu') or _is_backup_name(fname):
                 continue
             fpath = os.path.join(project_dir, fname)
-            backup = fpath.replace(".lmu", f"{backup_suffix}.lmu")
+            backup = _backup_path(fpath)
             if not os.path.exists(backup):
                 shutil.copy2(fpath, backup)
             source = backup if os.path.isfile(backup) else fpath
@@ -633,7 +664,8 @@ class RPGMaker2KParser:
                     prefix = f"RPG_RT.ldb/CE{idx}({name})"
                 commands = _parse_commands(fields[CE_COMMANDS])
                 if self._apply_command_translations(commands, prefix, trans_map):
-                    fields[CE_COMMANDS] = _write_commands(commands)
+                    _set_commands(fields, CE_COMMANDS, CE_COMMANDS_SIZE,
+                                  commands)
                     ces[ci] = (idx, fields)
                     ce_changed = True
             if ce_changed:
@@ -679,7 +711,8 @@ class RPGMaker2KParser:
                 prefix += f"/p{page_idx}"
 
                 if self._apply_command_translations(commands, prefix, trans_map):
-                    page_fields[PAGE_COMMANDS] = _write_commands(commands)
+                    _set_commands(page_fields, PAGE_COMMANDS,
+                                  PAGE_COMMANDS_SIZE, commands)
                     pages[pi] = (page_idx, page_fields)
                     pages_changed = True
 
@@ -719,6 +752,8 @@ class RPGMaker2KParser:
                 if entry_id in trans_map:
                     translation = trans_map[entry_id]
                     trans_lines = translation.split("\n")
+                    while len(trans_lines) > 1 and not trans_lines[-1].strip():
+                        trans_lines.pop()
 
                     # Distribute translation across the command slots
                     for ci, mc in enumerate(msg_cmds):
@@ -728,6 +763,26 @@ class RPGMaker2KParser:
                         else:
                             mc.string = ""
                             mc.string_raw = b''
+
+                    # Lines beyond the existing slots: add 20110 lines to the
+                    # current box (max 4 lines), then start new 10110 boxes.
+                    extra = trans_lines[len(msg_cmds):]
+                    if extra:
+                        new_cmds = []
+                        box_lines = len(msg_cmds)
+                        for line in extra:
+                            if box_lines >= MESSAGE_BOX_LINES:
+                                code = CODE_SHOW_MESSAGE
+                                box_lines = 0
+                            else:
+                                code = CODE_SHOW_MESSAGE_LINE
+                            new_cmds.append(EventCommand(
+                                code, cmd.indent, line, _encode_str(line), []))
+                            box_lines += 1
+                        commands[j:j] = new_cmds
+                        # Skip inserted commands so dialogue_index keeps the
+                        # load-time numbering of the original command list.
+                        j += len(new_cmds)
                     changed = True
 
                 dialogue_index += 1
@@ -739,12 +794,14 @@ class RPGMaker2KParser:
                 choice_ci = 0
                 while j < len(commands):
                     if commands[j].code == CODE_SHOW_CHOICE_OPT:
-                        entry_id = f"{prefix}/choice_{dialogue_index}_{choice_ci}"
-                        if entry_id in trans_map:
-                            commands[j].string = trans_map[entry_id]
-                            commands[j].string_raw = _encode_str(trans_map[entry_id])
-                            changed = True
-                        choice_ci += 1
+                        # Load only numbers options with non-blank text
+                        if commands[j].string.strip():
+                            entry_id = f"{prefix}/choice_{dialogue_index}_{choice_ci}"
+                            if entry_id in trans_map:
+                                commands[j].string = trans_map[entry_id]
+                                commands[j].string_raw = _encode_str(trans_map[entry_id])
+                                changed = True
+                            choice_ci += 1
                     elif commands[j].indent <= cmd.indent and commands[j].code not in (CODE_SHOW_CHOICE_OPT, 20141, 0):
                         break
                     j += 1
@@ -776,15 +833,14 @@ class RPGMaker2KParser:
 
     def restore_originals(self, project_dir: str):
         """Restore original LCF files from backups."""
-        suffix = "_original"
         restored = 0
         for fname in os.listdir(project_dir):
-            if suffix in fname:
+            if _is_backup_name(fname):
                 continue
-            base, ext = os.path.splitext(fname)
+            ext = os.path.splitext(fname)[1]
             if ext.lower() not in ('.ldb', '.lmu', '.lmt'):
                 continue
-            backup = os.path.join(project_dir, base + suffix + ext)
+            backup = _backup_path(os.path.join(project_dir, fname))
             if os.path.isfile(backup):
                 target = os.path.join(project_dir, fname)
                 shutil.copy2(backup, target)

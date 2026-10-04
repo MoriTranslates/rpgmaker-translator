@@ -105,9 +105,16 @@ class GlossaryScanDialog(QDialog):
 
     def _set_all(self, checked: bool):
         state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-        for row in range(self.table.rowCount()):
-            if not self.table.isRowHidden(row):
-                self.table.item(row, 0).setCheckState(state)
+        # Block itemChanged so the count isn't recomputed once per row
+        self.table.blockSignals(True)
+        try:
+            for row in range(self.table.rowCount()):
+                if not self.table.isRowHidden(row):
+                    self.table.item(row, 0).setCheckState(state)
+        finally:
+            self.table.blockSignals(False)
+        self.table.viewport().update()
+        self._update_count()
 
     def _apply_filter(self, text: str):
         text = text.strip().lower()

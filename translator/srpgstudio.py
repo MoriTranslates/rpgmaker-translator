@@ -93,6 +93,7 @@ class SRPGStudioParser:
 
     def __init__(self):
         self._require_japanese = True
+        self.context_size = 3  # set by EngineHandler.load_project
 
     def _should_extract(self, text: str) -> bool:
         """Check if a string should be extracted as translatable."""
@@ -256,7 +257,8 @@ class SRPGStudioParser:
             field, entry_id = self._classify_entry(text, idx)
 
             # Build context from recent strings
-            context = "\n".join(context_window[-3:]) if context_window else ""
+            n = self.context_size
+            context = "\n".join(context_window[-n:]) if (context_window and n > 0) else ""
 
             entry = TranslationEntry(
                 id=entry_id,

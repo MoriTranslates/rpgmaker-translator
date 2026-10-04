@@ -1,0 +1,17 @@
+[
+  null,
+  {
+    "id": 1,
+    "name": "勇者",
+    "note": "",
+    "traits": [],
+    "learnings": [],
+    "expParams": [
+      30,
+      20,
+      30,
+      30
+    ],
+    "params": []
+  }
+]

@@ -1,0 +1,9 @@
+{
+  "name": "fake-mv-game",
+  "main": "index.html",
+  "window": {
+    "title": "勇者と魔王の物語",
+    "width": 816,
+    "height": 624
+  }
+}

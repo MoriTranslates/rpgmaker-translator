@@ -6,7 +6,9 @@ columns. Auto-detects column layout by scanning headers and content.
 Known games: Reversi of Temptation (.x files in data/ folder)
 """
 
+import codecs
 import csv
+import io
 import logging
 import os
 import re
@@ -91,7 +93,8 @@ class CSVGameParser:
         if "," not in content or not JAPANESE_RE.search(content):
             return []
 
-        rows = list(csv.reader(content.splitlines()))
+        # StringIO (not splitlines) so quoted multi-line cells stay one row
+        rows = list(csv.reader(io.StringIO(content, newline="")))
         if len(rows) < 2:
             return []
 
@@ -184,16 +187,24 @@ class CSVGameParser:
 
             # Read from backup for idempotent re-export
             source = backup if os.path.isfile(backup) else fpath
-            with open(source, "r", encoding="utf-8-sig") as f:
+            with open(source, "rb") as f:
+                has_bom = f.read(3) == codecs.BOM_UTF8
+            # newline="" keeps the source's line terminators intact
+            with open(source, "r", encoding="utf-8-sig", newline="") as f:
                 content = f.read()
+            line_term = "\r\n" if "\r\n" in content else "\n"
 
-            rows = list(csv.reader(content.splitlines()))
+            rows = list(csv.reader(io.StringIO(content, newline="")))
             if len(rows) < 2:
                 continue
 
             header = rows[0]
             jp_col, en_col = self._detect_columns(header, rows[1:])
             if jp_col < 0 or en_col < 0:
+                log.warning("%s: no safe English column found — not exported "
+                            "(adjacent column holds non-English data)", filename)
+                if source != fpath:
+                    shutil.copy2(source, fpath)  # undo any older export
                 continue
 
             # Build translation lookup: row_idx -> translation
@@ -212,16 +223,18 @@ class CSVGameParser:
             # Apply translations
             applied = 0
             for row_idx, translation in trans_map.items():
-                if row_idx < len(rows):
+                # row_N is the 1-based record number (header = row_1)
+                if 2 <= row_idx <= len(rows):
                     # Ensure row has enough columns
                     while len(rows[row_idx - 1]) <= en_col:
                         rows[row_idx - 1].append("")
                     rows[row_idx - 1][en_col] = translation
                     applied += 1
 
-            # Write back
-            with open(fpath, "w", encoding="utf-8-sig", newline="") as f:
-                writer = csv.writer(f, lineterminator="\r\n")
+            # Write back, keeping the source's BOM and line terminator
+            with open(fpath, "w", encoding="utf-8-sig" if has_bom else "utf-8",
+                      newline="") as f:
+                writer = csv.writer(f, lineterminator=line_term)
                 for row in rows:
                     writer.writerow(row)
 
@@ -232,8 +245,8 @@ class CSVGameParser:
         backup_dir = os.path.join(project_dir, "data_original")
         data_dir = os.path.join(project_dir, "data")
         if not os.path.isdir(backup_dir):
-            log.warning("No data_original/ backup found")
-            return
+            raise FileNotFoundError(
+                "No data_original/ backup exists. Export to game first to create one.")
         for name in os.listdir(backup_dir):
             src = os.path.join(backup_dir, name)
             dst = os.path.join(data_dir, name)
@@ -276,9 +289,11 @@ class CSVGameParser:
             elif h in en_names:
                 en_col = i
 
+        width = max([len(header)] + [len(r) for r in data_rows])
+
         # If no header match, scan data for Japanese content
         if jp_col < 0:
-            col_jp_count = [0] * len(header)
+            col_jp_count = [0] * width
             for row in data_rows[:50]:
                 for ci, cell in enumerate(row):
                     if JAPANESE_RE.search(cell):
@@ -287,11 +302,19 @@ class CSVGameParser:
             if any(c > 0 for c in col_jp_count):
                 jp_col = col_jp_count.index(max(col_jp_count))
 
-        # EN column is typically right after JP column
+        # EN column is typically right after JP column — but only trust the
+        # guess if that column is empty/ASCII in >= 90% of the JP rows,
+        # otherwise export would overwrite real game data.
         if jp_col >= 0 and en_col < 0:
             candidate = jp_col + 1
-            if candidate < len(header):
-                en_col = candidate
+            if candidate < width:
+                jp_rows = [r for r in data_rows
+                           if jp_col < len(r) and JAPANESE_RE.search(r[jp_col])]
+                safe = sum(1 for r in jp_rows
+                           if candidate >= len(r) or not r[candidate].strip()
+                           or r[candidate].isascii())
+                if jp_rows and safe >= 0.9 * len(jp_rows):
+                    en_col = candidate
 
         return jp_col, en_col
 

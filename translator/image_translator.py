@@ -18,6 +18,7 @@ Features:
 """
 
 import base64
+import functools
 import json
 import logging
 import os
@@ -27,6 +28,8 @@ from io import BytesIO
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
+
+from . import JAPANESE_RE
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +79,10 @@ def decrypt_rpgmvp(file_path: str, encryption_key: str) -> bytes:
 
     with open(file_path, "rb") as f:
         data = f.read()
+
+    if len(data) <= _RPGMV_HEADER_LEN * 2 or not data.startswith(b"RPGMV"):
+        raise ValueError(
+            f"Not a valid RPG Maker encrypted image: {os.path.basename(file_path)}")
 
     # Skip the 16-byte RPG Maker header
     encrypted = data[_RPGMV_HEADER_LEN:]
@@ -175,8 +182,32 @@ IMPORTANT: Do NOT miss any text. Scan the ENTIRE image systematically — top to
 If no Japanese text is found, return: []
 Return ONLY the JSON array, no other text."""
 
-# Regex to extract a JSON array from LLM output (may have markdown fences)
-_JSON_RE = re.compile(r'\[.*\]', re.DOTALL)
+
+def _extract_json(raw: str, opener: str):
+    """Extract the first JSON array ('[') or object ('{') embedded in LLM output.
+
+    Strips markdown fences, then tries a JSON decode at each opener position so
+    prose before/after (or brackets inside prose) doesn't break parsing.
+    Returns None if nothing decodes to the expected type.
+    """
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        text = "\n".join(lines)
+    want = list if opener == "[" else dict
+    decoder = json.JSONDecoder()
+    pos = text.find(opener)
+    while pos != -1:
+        try:
+            data, _ = decoder.raw_decode(text, pos)
+            if isinstance(data, want):
+                return data
+        except json.JSONDecodeError:
+            pass
+        pos = text.find(opener, pos + 1)
+    return None
+
 
 # Verify prompt for rendered image QA
 _VERIFY_SYSTEM = "You are a QA checker for translated game images. Be thorough but concise."
@@ -219,6 +250,12 @@ _SYSTEM_FONT = _find_font()
 _SYSTEM_FONT_BOLD = _find_font(bold=True) or _SYSTEM_FONT
 
 
+@functools.lru_cache(maxsize=256)
+def _load_font(path: str, size: int) -> ImageFont.FreeTypeFont:
+    """Cached ImageFont.truetype — fitting loops request the same sizes repeatedly."""
+    return ImageFont.truetype(path, size)
+
+
 # ── ImageTranslator ──────────────────────────────────────────────
 
 class ImageTranslator:
@@ -253,8 +290,10 @@ class ImageTranslator:
         if (image_path.lower().endswith(ENCRYPTED_EXTS)
                 and self.encryption_key):
             raw = decrypt_rpgmvp(image_path, self.encryption_key)
-            return Image.open(BytesIO(raw))
-        return Image.open(image_path)
+            with Image.open(BytesIO(raw)) as im:
+                return im.copy()
+        with Image.open(image_path) as im:
+            return im.copy()
 
     # ── Scanning ──────────────────────────────────────────────────
 
@@ -268,21 +307,6 @@ class ImageTranslator:
             if os.path.isdir(candidate):
                 return candidate
         return None
-
-    def scan_images(self, project_dir: str, subdirs: list[str]) -> list[str]:
-        """Find all images (including encrypted .rpgmvp) in selected img/ subdirectories."""
-        img_dir = self.find_img_dir(project_dir)
-        if not img_dir:
-            return []
-        results = []
-        for subdir in subdirs:
-            folder = os.path.join(img_dir, subdir)
-            if not os.path.isdir(folder):
-                continue
-            for fname in sorted(os.listdir(folder)):
-                if fname.lower().endswith(ALL_IMAGE_EXTS):
-                    results.append(os.path.join(folder, fname))
-        return results
 
     @staticmethod
     def list_subdirs(project_dir: str) -> list[tuple[str, int]]:
@@ -320,9 +344,10 @@ class ImageTranslator:
 
         regions = self._ocr_attempt(img, orig_w, orig_h, max_dim)
 
-        # Retry at full resolution if first attempt found nothing
+        # Retry at higher resolution if first attempt found nothing
+        # (capped — unbounded sizes blow up VRAM / request size)
         if not regions and max(orig_w, orig_h) > max_dim:
-            regions = self._ocr_attempt(img, orig_w, orig_h, max_dim=None)
+            regions = self._ocr_attempt(img, orig_w, orig_h, max_dim=2048)
 
         # Retry with upscale if image is small (< 400px) and nothing found
         if not regions and max(orig_w, orig_h) < 400:
@@ -331,16 +356,25 @@ class ImageTranslator:
                 (int(orig_w * scale_up), int(orig_h * scale_up)),
                 Image.Resampling.LANCZOS,
             )
-            regions = self._ocr_attempt(upscaled, orig_w, orig_h, max_dim=None)
+            # Send the upscaled copy, but keep `img` (original size) for
+            # bbox tightening — regions are mapped back to original coords
+            regions = self._ocr_attempt(
+                img, orig_w, orig_h, max_dim=None, send_img=upscaled)
 
         return regions
 
     def _ocr_attempt(
         self, img: Image.Image, orig_w: int, orig_h: int,
-        max_dim: int | None = 1280,
+        max_dim: int | None = 1280, send_img: Image.Image | None = None,
     ) -> list[TextRegion]:
-        """Single OCR attempt — resize, send to model, parse results."""
-        send_img = img.copy()
+        """Single OCR attempt — resize, send to model, parse results.
+
+        `img` is the original-size image (used for bbox tightening);
+        `send_img` optionally overrides what is sent to the model (e.g. an
+        upscaled copy). Returned bboxes are always in original coordinates.
+        """
+        if send_img is None:
+            send_img = img.copy()
 
         # Resize for VRAM efficiency
         if max_dim is not None:
@@ -361,11 +395,11 @@ class ImageTranslator:
         # Call multimodal model
         raw = self.client.vision_chat(b64, prompt, system=_OCR_SYSTEM)
 
-        # Parse response
-        regions = self._parse_ocr_response(raw, orig_w, orig_h)
+        # Parse response — normalized coords map onto the image the model saw
+        regions = self._parse_ocr_response(raw, send_w, send_h)
 
         # Scale bounding boxes back to original image dimensions
-        img_w, img_h = send_img.size
+        img_w, img_h = send_w, send_h
         sx = orig_w / img_w if img_w > 0 else 1.0
         sy = orig_h / img_h if img_h > 0 else 1.0
         if abs(sx - 1.0) > 0.01 or abs(sy - 1.0) > 0.01:
@@ -613,171 +647,6 @@ class ImageTranslator:
         return regions
 
     @staticmethod
-    def _expand_bboxes_to_text(
-        img: Image.Image, regions: list[TextRegion],
-        img_w: int = 0, img_h: int = 0,
-    ) -> list[TextRegion]:
-        """Expand OCR bboxes to cover actual text pixels.
-
-        Vision models often give bboxes that are too small — especially the
-        horizontal extent. This scans outward from each bbox to find where
-        visible (non-background) pixels actually are, and expands the bbox
-        to cover them.
-        """
-        if not img_w:
-            img_w, img_h = img.size
-        pixels = img.load()
-
-        # First, detect global background alpha to set thresholds
-        # Sample from image corners and edges
-        corner_samples = []
-        for cx, cy in [(5, 5), (img_w-5, 5), (5, img_h-5), (img_w-5, img_h-5),
-                       (img_w//2, 5), (img_w//2, img_h-5)]:
-            cx = max(0, min(img_w-1, cx))
-            cy = max(0, min(img_h-1, cy))
-            corner_samples.append(pixels[cx, cy][3])
-        global_bg_alpha = sorted(corner_samples)[len(corner_samples)//2]
-
-        # Set visibility threshold based on background type
-        # Semi-transparent bg (alpha ~100-200): only fully opaque pixels are text
-        # Transparent bg (alpha ~0): any visible pixel is text
-        # Opaque bg (alpha ~255): use color contrast instead
-        if global_bg_alpha > 50:
-            # Semi-transparent or opaque — only high-alpha pixels are text
-            visibility_threshold = max(200, global_bg_alpha + 50)
-        else:
-            visibility_threshold = 30
-
-        for r in regions:
-            x1, y1, x2, y2 = r.bbox
-            box_h = y2 - y1
-            box_w = x2 - x1
-            if box_h < 5:
-                continue
-
-            # Moderate search margin — don't go too far
-            search_margin = max(80, box_w)  # up to 1x bbox-width
-            sx1 = max(0, x1 - search_margin)
-            sx2 = min(img_w, x2 + search_margin)
-
-            # Detect background by sampling edges of search area
-            bg_samples = []
-            for y in range(y1, y2, max(1, box_h // 4)):
-                if sx1 >= 0:
-                    bg_samples.append(pixels[sx1, y])
-                if sx2 < img_w:
-                    bg_samples.append(pixels[sx2 - 1, y])
-
-            if not bg_samples:
-                continue
-
-            # Determine background: average alpha and color
-            avg_a = sum(c[3] for c in bg_samples) // len(bg_samples)
-            is_transparent_bg = avg_a < 50  # truly transparent, not semi
-
-            # Use the global threshold for consistency
-            threshold = visibility_threshold
-
-            if not is_transparent_bg:
-                # Non-transparent images: skip expansion, 20% padding is enough
-                # Expansion on opaque/semi-transparent bgs is unreliable
-                # because bg pixels can look like "text" to the detector
-                continue
-
-            if is_transparent_bg:
-
-                # Expand left
-                new_x1 = x1
-                for x in range(x1 - 1, sx1 - 1, -1):
-                    col_visible = 0
-                    for y in range(y1, y2, max(1, box_h // 8)):
-                        if pixels[x, y][3] > threshold:
-                            col_visible += 1
-                    if col_visible > 0:
-                        new_x1 = x
-                    elif x < new_x1 - 20:
-                        break  # gap > 20px, stop expanding
-
-                # Expand right
-                new_x2 = x2
-                for x in range(x2, sx2):
-                    col_visible = 0
-                    for y in range(y1, y2, max(1, box_h // 8)):
-                        if pixels[x, y][3] > threshold:
-                            col_visible += 1
-                    if col_visible > 0:
-                        new_x2 = x + 1
-                    elif x > new_x2 + 20:
-                        break
-
-                # Expand up
-                new_y1 = y1
-                for y in range(y1 - 1, max(0, y1 - box_h) - 1, -1):
-                    row_visible = 0
-                    for x in range(new_x1, new_x2, max(1, (new_x2 - new_x1) // 8)):
-                        if pixels[x, y][3] > threshold:
-                            row_visible += 1
-                    if row_visible > 0:
-                        new_y1 = y
-                    elif y < y1 - 5:
-                        break
-
-                # Expand down
-                new_y2 = y2
-                for y in range(y2, min(img_h, y2 + box_h)):
-                    row_visible = 0
-                    for x in range(new_x1, new_x2, max(1, (new_x2 - new_x1) // 8)):
-                        if pixels[x, y][3] > threshold:
-                            row_visible += 1
-                    if row_visible > 0:
-                        new_y2 = y + 1
-                    elif y > y2 + 5:
-                        break
-
-                r.bbox = (new_x1, new_y1, new_x2, new_y2)
-            else:
-                # For opaque backgrounds: expand to pixels that differ from bg
-                avg_r = sum(c[0] for c in bg_samples) // len(bg_samples)
-                avg_g = sum(c[1] for c in bg_samples) // len(bg_samples)
-                avg_b = sum(c[2] for c in bg_samples) // len(bg_samples)
-                diff_threshold = 40
-
-                def _is_text_pixel(x, y):
-                    pr, pg, pb, pa = pixels[x, y]
-                    if pa < 100:
-                        return False
-                    diff = abs(pr - avg_r) + abs(pg - avg_g) + abs(pb - avg_b)
-                    return diff > diff_threshold
-
-                # Expand left
-                new_x1 = x1
-                for x in range(x1 - 1, sx1 - 1, -1):
-                    col_text = 0
-                    for y in range(y1, y2, max(1, box_h // 8)):
-                        if _is_text_pixel(x, y):
-                            col_text += 1
-                    if col_text > 0:
-                        new_x1 = x
-                    elif x < new_x1 - 20:
-                        break
-
-                # Expand right
-                new_x2 = x2
-                for x in range(x2, sx2):
-                    col_text = 0
-                    for y in range(y1, y2, max(1, box_h // 8)):
-                        if _is_text_pixel(x, y):
-                            col_text += 1
-                    if col_text > 0:
-                        new_x2 = x + 1
-                    elif x > new_x2 + 20:
-                        break
-
-                r.bbox = (new_x1, y1, new_x2, y2)
-
-        return regions
-
-    @staticmethod
     def _merge_nearby_regions(
         regions: list[TextRegion], img_w: int, img_h: int,
     ) -> list[TextRegion]:
@@ -848,7 +717,15 @@ class ImageTranslator:
 
     @staticmethod
     def _to_base64(img: Image.Image) -> str:
-        """Convert a PIL Image to base64 string."""
+        """Convert a PIL Image to base64 string.
+
+        Transparent images are composited onto mid-gray so both light and
+        dark text stay visible to the model (transparent px often decode as black).
+        """
+        if img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info:
+            rgba = img.convert("RGBA")
+            bg = Image.new("RGBA", rgba.size, (128, 128, 128, 255))
+            img = Image.alpha_composite(bg, rgba).convert("RGB")
         buf = BytesIO()
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode("ascii")
@@ -859,33 +736,18 @@ class ImageTranslator:
 
         Handles both standard {"bbox": [x1,y1,x2,y2]} format and
         Qwen's {"bbox_2d": [x1,y1,x2,y2]} normalized coordinate format.
-        Auto-detects if coordinates are in [0, 1000] range and scales them.
+        Coordinates within [0, 1000] are treated as normalized (the prompt asks
+        for 0-999); anything larger is taken as pixels.
         """
-        text = raw.strip()
-        # Strip markdown fences if present
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            text = "\n".join(lines)
-
-        # Extract JSON array
-        m = _JSON_RE.search(text)
-        if not m:
-            return []
-
-        try:
-            data = json.loads(m.group())
-        except json.JSONDecodeError:
-            return []
-
-        if not isinstance(data, list):
+        data = _extract_json(raw, "[")
+        if data is None:
             return []
 
         regions = []
         for item in data:
             if not isinstance(item, dict):
                 continue
-            t = item.get("text", "").strip()
+            t = str(item.get("text") or "").strip()
             # Accept both "bbox" and "bbox_2d" (Qwen format)
             bbox = item.get("bbox") or item.get("bbox_2d", [])
             if not t or not isinstance(bbox, list) or len(bbox) != 4:
@@ -902,13 +764,9 @@ class ImageTranslator:
             max_x = max(max(r.bbox[0], r.bbox[2]) for r in regions)
             max_y = max(max(r.bbox[1], r.bbox[3]) for r in regions)
 
-            # Detect normalized coords: any coord exceeds image bounds,
-            # or all coords are in 0-999 range (typical Qwen output)
-            is_normalized = (
-                max_x > img_w * 1.1 or max_y > img_h * 1.1
-                or (max_x <= 999 and max_y <= 999 and
-                    (img_w > 999 or img_h > 999))
-            )
+            # The prompt requests 0-999 normalized coords; only values
+            # above 1000 can be pixel coordinates
+            is_normalized = max_x <= 1000 and max_y <= 1000
             if is_normalized:
                 # Qwen uses [0, 999] scale (1000 divisions)
                 sx = img_w / 999.0
@@ -1066,13 +924,17 @@ class ImageTranslator:
         box_w: int, box_h: int,
     ) -> str:
         """Translate with retry loop — if too long, ask model to shorten."""
-        # First attempt
+        def _failed(text) -> bool:
+            # Empty, echoed, or still-Japanese output would render as tofu
+            return not text or text == jp_text or bool(JAPANESE_RE.search(text))
+
+        # First attempt — "" signals failure (caller must not render it)
         try:
             result = self.client.translate_name(jp_text, hint=hint)
-            if not result:
-                return jp_text
         except Exception:
-            return jp_text
+            return ""
+        if _failed(result):
+            return ""
 
         # Check if it fits using font metrics
         fits = self._check_text_fits(result, box_w, box_h)
@@ -1090,7 +952,7 @@ class ImageTranslator:
         )
         try:
             shorter = self.client.translate_name(jp_text, hint=shorten_hint)
-            if shorter and len(shorter) < len(result):
+            if not _failed(shorter) and len(shorter) < len(result):
                 return shorter
         except Exception:
             pass
@@ -1167,6 +1029,8 @@ class ImageTranslator:
 
         # Detect two-state sprite sheet
         is_two_state, merged = self._detect_two_state(regions, img_h)
+        # Regions not paired by detection still need rendering
+        leftovers = self._unmatched_regions(regions, merged) if is_two_state else []
 
         # If OCR only found one half but the image looks like a two-state
         # sprite (has visible content in both halves), mirror the regions
@@ -1202,6 +1066,10 @@ class ImageTranslator:
             # Resize back to original dimensions if we upscaled
             if scale > 1:
                 img = img.resize(orig_size, Image.Resampling.LANCZOS)
+                img_w, img_h = img.size
+
+            for region in leftovers:
+                self._preserve_region(img, region.bbox, region.translation, img_w)
         else:
             for region in regions:
                 if not region.translation:
@@ -1689,6 +1557,11 @@ class ImageTranslator:
                     draw, text, bbox_bot, img_w,
                     text_color=(200, 30, 30), border_color=(200, 30, 30),
                 )
+            for region in self._unmatched_regions(regions, merged):
+                self._draw_state_box(
+                    draw, region.translation, region.bbox, img_w,
+                    text_color=(20, 20, 20), border_color=(60, 60, 60),
+                )
         else:
             for region in regions:
                 if not region.translation:
@@ -1744,37 +1617,31 @@ class ImageTranslator:
     def verify_render(self, rendered_path: str) -> dict:
         """Send rendered image to model for quality check.
 
-        Returns: {"ok": bool, "issues": list[str]}
+        Returns: {"ok": bool | None, "issues": list[str]} — ok is None when
+        the model's reply couldn't be parsed.
         Issues might be: "Japanese remnants visible", "text cut off",
         "text overlaps icon", "text too small to read"
         """
-        img = Image.open(rendered_path)
+        with Image.open(rendered_path) as im:
+            img = im.copy()
+        img.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
         b64 = self._to_base64(img)
 
         raw = self.client.vision_chat(b64, _VERIFY_PROMPT, system=_VERIFY_SYSTEM)
 
-        # Parse JSON response
-        try:
-            # Strip markdown fences
-            text = raw.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                lines = [l for l in lines if not l.strip().startswith("```")]
-                text = "\n".join(lines)
+        result = _extract_json(raw, "{")
+        if result is None:
+            # Unknown — don't claim the render passed
+            return {"ok": None, "issues": ["verify unparseable"]}
 
-            # Extract JSON object
-            m = re.search(r'\{.*\}', text, re.DOTALL)
-            if m:
-                result = json.loads(m.group())
-                return {
-                    "ok": bool(result.get("ok", False)),
-                    "issues": list(result.get("issues", [])),
-                }
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        # If we can't parse the response, assume it's okay
-        return {"ok": True, "issues": []}
+        issues = result.get("issues") or []
+        if isinstance(issues, str):
+            issues = [issues]
+        elif not isinstance(issues, list):
+            issues = [str(issues)]
+        issues = [i if isinstance(i, str) else json.dumps(i, ensure_ascii=False)
+                  for i in issues]
+        return {"ok": bool(result.get("ok", False)), "issues": issues}
 
     # ── Two-state detection ──────────────────────────────────────
 
@@ -1828,6 +1695,14 @@ class ImageTranslator:
         return True, merged
 
     @staticmethod
+    def _unmatched_regions(
+        regions: list[TextRegion], merged: list[tuple[str, tuple, tuple]],
+    ) -> list[TextRegion]:
+        """Translated regions whose bbox isn't part of any two-state pair."""
+        used = {bbox for _, top, bot in merged for bbox in (top, bot)}
+        return [r for r in regions if r.translation and r.bbox not in used]
+
+    @staticmethod
     def _infer_two_state(
         img: Image.Image, regions: list[TextRegion],
         img_w: int, img_h: int,
@@ -1851,6 +1726,16 @@ class ImageTranslator:
         if in_top and in_bot:
             return False, []  # regions in both halves — not a missed case
 
+        # Only single-label transparent sprites (title/menu buttons) qualify —
+        # the full-half clear would wipe opaque artwork, and we never render
+        # untranslated Japanese as a fallback
+        source = in_top or in_bot
+        if len(source) != 1 or not source[0].translation:
+            return False, []
+        bg_type, _ = ImageTranslator._analyze_region_bg(img, source[0].bbox)
+        if bg_type != "transparent":
+            return False, []
+
         # Check both halves have visible pixels
         pixels = img.load()
         margin = 5
@@ -1872,17 +1757,10 @@ class ImageTranslator:
         if not (top_has and bot_has):
             return False, []  # one half is empty — not two-state
 
-        # Mirror: create full-width bboxes for each half
-        source = in_top or in_bot
-        merged = []
-        for r in source:
-            text = r.translation or r.text
-            # Use full-width bboxes with small margins for each half
-            top_bbox = (margin, margin, img_w - margin, half_y - margin)
-            bot_bbox = (margin, half_y + margin, img_w - margin, img_h - margin)
-            merged.append((text, top_bbox, bot_bbox))
-
-        return True, merged
+        # Mirror: full-width bboxes with small margins for each half
+        top_bbox = (margin, margin, img_w - margin, half_y - margin)
+        bot_bbox = (margin, half_y + margin, img_w - margin, img_h - margin)
+        return True, [(source[0].translation, top_bbox, bot_bbox)]
 
     # ── Color detection helpers ──────────────────────────────────
 
@@ -1928,12 +1806,12 @@ class ImageTranslator:
         draw = ImageDraw.Draw(dummy)
 
         for size in range(max_size, min_size - 1, -1):
-            font = ImageFont.truetype(font_path, size)
+            font = _load_font(font_path, size)
             bb = draw.textbbox((0, 0), text, font=font)
             if (bb[2] - bb[0]) <= max_w and (bb[3] - bb[1]) <= max_h:
                 return font
 
-        return ImageFont.truetype(font_path, min_size)
+        return _load_font(font_path, min_size)
 
     @staticmethod
     def _fit_text(
@@ -1957,14 +1835,14 @@ class ImageTranslator:
         draw = ImageDraw.Draw(dummy)
 
         for size in range(max_size, min_size - 1, -1):
-            font = ImageFont.truetype(font_path, size)
+            font = _load_font(font_path, size)
             lines = _wrap_text(draw, text, font, box_w - 4)
             block = "\n".join(lines)
             bb = draw.textbbox((0, 0), block, font=font)
             if (bb[2] - bb[0]) <= box_w and (bb[3] - bb[1]) <= box_h:
                 return font, lines
 
-        font = ImageFont.truetype(font_path, min_size)
+        font = _load_font(font_path, min_size)
         lines = _wrap_text(draw, text, font, box_w - 4)
         return font, lines
 

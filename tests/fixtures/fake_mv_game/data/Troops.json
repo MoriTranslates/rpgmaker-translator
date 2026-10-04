@@ -1,0 +1,51 @@
+[
+  null,
+  {
+    "id": 1,
+    "name": "スライム×2",
+    "members": [
+      {
+        "enemyId": 1,
+        "x": 300,
+        "y": 400,
+        "hidden": false
+      }
+    ],
+    "pages": [
+      {
+        "conditions": {
+          "turnEnding": false,
+          "turnValid": false,
+          "enemyValid": false,
+          "actorValid": false,
+          "switchValid": false
+        },
+        "span": 0,
+        "list": [
+          {
+            "code": 101,
+            "indent": 0,
+            "parameters": [
+              "",
+              0,
+              0,
+              2
+            ]
+          },
+          {
+            "code": 401,
+            "indent": 0,
+            "parameters": [
+              "スライムが現れた！"
+            ]
+          },
+          {
+            "code": 0,
+            "indent": 0,
+            "parameters": []
+          }
+        ]
+      }
+    ]
+  }
+]

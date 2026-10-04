@@ -1,0 +1,21 @@
+[
+  null,
+  {
+    "id": 1,
+    "name": "ポーション",
+    "description": "HPを50回復する。",
+    "note": "",
+    "iconIndex": 176,
+    "price": 50,
+    "consumable": true
+  },
+  {
+    "id": 2,
+    "name": "エーテル",
+    "description": "MPを20回復する。",
+    "note": "",
+    "iconIndex": 176,
+    "price": 100,
+    "consumable": true
+  }
+]

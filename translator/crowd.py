@@ -184,6 +184,15 @@ class CrowdParser:
         if not os.path.exists(backup_dir):
             os.makedirs(backup_dir)
 
+        # Detect the key here too: export may run after restoring a saved
+        # state without load_project. Prefer the pristine backup copy.
+        exe_path = self._find_exe(project_dir)
+        if exe_path:
+            first_backup = os.path.join(
+                backup_dir, os.path.basename(sce_files[0]))
+            key_src = first_backup if os.path.isfile(first_backup) else sce_files[0]
+            self._key, self._mod = find_key(exe_path, key_src)
+
         # Group entries by filename
         entries_by_file: dict[str, list[TranslationEntry]] = {}
         for entry in entries:
@@ -205,7 +214,9 @@ class CrowdParser:
                 enc_data = f.read()
 
             dec_data = decrypt_sce(enc_data, self._key, self._mod)
-            text = dec_data.decode("cp932", errors="replace")
+            # surrogateescape: undecodable bytes survive the round trip
+            # byte-for-byte instead of becoming '?' on re-encode.
+            text = dec_data.decode("cp932", errors="surrogateescape")
 
             # Build translation map: (field, line_number) -> entry
             trans_map = {}
@@ -225,7 +236,8 @@ class CrowdParser:
             translated_text = self._rebuild_script(text, trans_map)
 
             # Encode and encrypt
-            translated_bytes = translated_text.encode("cp932", errors="replace")
+            translated_bytes = translated_text.encode(
+                "cp932", errors="surrogateescape")
             encrypted = encrypt_sce(translated_bytes, self._key, self._mod)
 
             with open(sce_path, "wb") as f:
@@ -237,8 +249,9 @@ class CrowdParser:
         """Restore original .sce from backup."""
         backup_dir = os.path.join(project_dir, "sce_original")
         if not os.path.isdir(backup_dir):
-            log.warning("No sce_original/ backup found")
-            return
+            raise FileNotFoundError(
+                f"No backup found at {backup_dir}. Export the game at least "
+                "once before restoring.")
 
         for name in os.listdir(backup_dir):
             src = os.path.join(backup_dir, name)
@@ -606,30 +619,31 @@ class CrowdParser:
         # XC2 English localization) using @n for in-engine line breaks.
         translation = self._wordwrap(translation, 38)
 
+        # Trailing whitespace after the text (before the next "  N "
+        # delimiter) is not part of entry.original — keep it.
+        tail = content[len(content.rstrip()):]
+
         # 1. Voice + speaker: w000001a@!Speaker@n text
         voice_m = _VOICE_SPEAKER.search(content)
         if voice_m:
-            prefix = content[:voice_m.end()]
-            return prefix + translation
+            return self._keep_lead(content, voice_m.end()) + translation + tail
 
         # 2. Bare speaker (no voice): @!Speaker@n text (may appear after commands)
         bare_m = re.search(r'@!.+?@n', content)
         if bare_m:
-            prefix = content[:bare_m.end()]
-            return prefix + translation
+            return self._keep_lead(content, bare_m.end()) + translation + tail
 
         # 3. Sound effect: wse00001@? text
         se_m = _SOUND_EFFECT.search(content)
         if se_m:
-            prefix = content[:se_m.end()]
-            return prefix + translation
+            return self._keep_lead(content, se_m.end()) + translation + tail
 
         # 4. Narration — replace the Japanese text portion (after commands)
         stripped = self._strip_commands(content)
         if stripped and stripped.strip():
             idx = content.find(stripped.strip())
             if idx >= 0:
-                return content[:idx] + translation
+                return content[:idx] + translation + tail
 
         # Fallback: try to replace the original text directly
         original_with_breaks = entry.original.replace('\n', '@n')
@@ -637,6 +651,16 @@ class CrowdParser:
             return content.replace(original_with_breaks, translation, 1)
 
         return content
+
+    def _keep_lead(self, content: str, prefix_end: int) -> str:
+        """Prefix up to the speaker/SE marker plus any command tokens that
+        load stripped before the text (they are not in entry.original)."""
+        rest = content[prefix_end:]
+        core = self._strip_commands(rest).strip()
+        idx = rest.find(core) if core else -1
+        if idx > 0:
+            return content[:prefix_end + idx]
+        return content[:prefix_end]
 
     def _apply_scene_title_translation(self, content: str, entry: TranslationEntry) -> str:
         """Replace SS "original" with SS "translation" in content."""

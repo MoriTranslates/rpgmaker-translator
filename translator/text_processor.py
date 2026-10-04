@@ -10,8 +10,7 @@ import re
 
 
 # Default RPG Maker MV/MZ message window: 816px wide, 28px font
-# Roughly 4 lines of ~55 chars at default settings
-DEFAULT_CHARS_PER_LINE = 55
+# Roughly 4 lines of ~49 chars at default settings (see _recalculate)
 DEFAULT_MAX_LINES = 4
 # When a face/portrait graphic is displayed, the text area shrinks.
 # Standard RPG Maker face is 144px + 12px margin = 156px.
@@ -270,6 +269,10 @@ MESSAGE_PLUGINS = {
 from . import CONTROL_CODE_RE
 CONTROL_CODE_REGEX = CONTROL_CODE_RE  # local alias for backward compat
 
+# Control codes that render visible text/icons, with estimated char widths
+_VISIBLE_CODE_RE = re.compile(r'\\([NPVInpvi])\[\d+\]|%\d+')
+_VISIBLE_CODE_WIDTH = {"N": 8, "P": 8, "V": 4, "I": 2, "%": 6}
+
 
 class PluginAnalyzer:
     """Analyzes RPG Maker MV/MZ plugins to determine text formatting settings."""
@@ -277,14 +280,14 @@ class PluginAnalyzer:
     def __init__(self):
         self.message_width = 816
         self.font_size = 28
-        self.chars_per_line = DEFAULT_CHARS_PER_LINE
-        self.face_chars_per_line = max(15, DEFAULT_CHARS_PER_LINE - int(
-            FACE_OFFSET_PX / (self.font_size * 0.55)))
         self.max_lines = DEFAULT_MAX_LINES
         self.has_wordwrap_plugin = False
         self.wordwrap_tag = ""  # e.g. "<WordWrap>" if plugin supports it
         self.detected_plugins = []
         self.inject_wordwrap = False  # True → inject our plugin during export
+        # Same formula as after plugin detection, so a project without
+        # plugins.js wraps at the same width as one without message plugins.
+        self._recalculate()
 
     def analyze_project(self, project_dir: str):
         """Analyze a project's plugins to detect message settings."""
@@ -588,15 +591,29 @@ class TextProcessor:
         return lines if lines else [""]
 
     def _visual_length(self, text: str) -> int:
-        """Calculate the visual character count, ignoring control codes."""
-        cleaned = CONTROL_CODE_REGEX.sub("", text)
-        return len(cleaned)
+        """Calculate the visual character count of text.
+
+        Invisible codes (\\C[n], \\FS[n], <br>, ...) count as 0.  Codes that
+        render as text or icons get an estimated width: \\N[n]/\\P[n] (actor
+        / party member name) 8, \\V[n] (variable) 4, \\I[n] (icon) 2, %n
+        (name/value substitution) 6.
+        """
+        extra = 0
+        for m in _VISIBLE_CODE_RE.finditer(text):
+            extra += _VISIBLE_CODE_WIDTH[(m.group(1) or "%").upper()]
+        return len(CONTROL_CODE_REGEX.sub("", text)) + extra
 
     # Field types where the <WordWrap> tag is used for render-time wrapping.
     # dialog / scroll_text — Window_Message (dialogue boxes)
     # description — Window_Help (skill/item/weapon/armor help text)
     # Other DB fields (name, terms) use menus that don't support the tag.
     _WORDWRAP_FIELDS = {"dialog", "scroll_text", "description"}
+
+    # Fields that are wrapped at all.  Message windows (MV/MZ "dialog",
+    # VX Ace "dialogue", scroll text), help-window descriptions and actor
+    # profiles.  Names, choices, terms, battle messages etc. are single-line
+    # menu/list strings — inserting newlines there breaks the layout.
+    _WRAP_FIELDS = _WORDWRAP_FIELDS | {"dialogue", "profile", "actor_profile"}
 
     def process_all(self, entries: list) -> int:
         """Process all translated entries. Returns count of modified entries.
@@ -615,6 +632,8 @@ class TextProcessor:
             if entry.status not in ("translated", "reviewed"):
                 continue
             if not entry.translation:
+                continue
+            if entry.field not in self._WRAP_FIELDS:
                 continue
 
             use_tag = entry.field in self._WORDWRAP_FIELDS

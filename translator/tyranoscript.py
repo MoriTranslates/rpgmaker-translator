@@ -29,8 +29,8 @@ _INLINE_TAG_RE = re.compile(
 # Full-line command tags — skip these lines entirely
 _COMMAND_LINE_RE = re.compile(r'^\s*[\[@]')
 
-# Speaker tag: #name or # (clear)
-_SPEAKER_RE = re.compile(r'^#(\w*)$')
+# Speaker tag: #name, #name:face or # (clear)
+_SPEAKER_RE = re.compile(r'^#([^:\s]*)(?::\S+)?$')
 
 # jname="..." in character definition tags
 _JNAME_RE = re.compile(r'jname="([^"]+)"')
@@ -55,6 +55,27 @@ _EVAL_ASSIGN_RE = re.compile(
 
 # Config.tjs System.title line
 _CONFIG_TITLE_RE = re.compile(r'^;System\.title=(.+)$', re.MULTILINE)
+
+
+def _split_ks_lines(text: str, keepends: bool = False) -> list[str]:
+    """Split .ks text into lines — the ONE splitter used by load and export.
+
+    Entry IDs are ``line_N`` (1-based index into this list), so both sides
+    must split identically.
+    """
+    return text.splitlines(keepends)
+
+
+def _attr_safe(text: str) -> str:
+    """Make a translation safe inside a tag attribute (name="..."/text="...")."""
+    return text.replace('"', "'").replace("[", "").replace("]", "")
+
+
+def _js_single_quoted(text: str) -> str:
+    """Escape a value for a JS '...' literal inside an exp="..." attribute."""
+    return (text.replace('"', "")
+                .replace("\\", "\\\\")
+                .replace("'", "\\'"))
 
 
 class TyranoScriptParser:
@@ -168,16 +189,21 @@ class TyranoScriptParser:
 
             try:
                 with open(src, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
+                    text = f.read()
             except UnicodeDecodeError:
                 with open(src, "r", encoding="shift_jis", errors="replace") as f:
-                    lines = f.readlines()
+                    text = f.read()
+            lines = _split_ks_lines(text, keepends=True)
 
             new_lines = []
             for i, line in enumerate(lines):
                 line_num = i + 1  # 1-indexed
 
-                if line_num in translations:
+                if line.strip().startswith("*"):
+                    # *label|title lines are never translated (older saves may
+                    # still hold a translation for one — ignore it)
+                    new_lines.append(line)
+                elif line_num in translations:
                     # Dialogue line — replace text content, preserve structure
                     new_lines.append(
                         self._apply_dialogue_translation(
@@ -191,13 +217,13 @@ class TyranoScriptParser:
                                 if f'jname="{old_name}"' in line:
                                     line = line.replace(
                                         f'jname="{old_name}"',
-                                        f'jname="{trans}"')
+                                        f'jname="{_attr_safe(trans)}"')
                             elif entry_id.startswith(file_key + "/choice/"):
                                 old_text = entry_id.split("/choice/", 1)[1]
                                 if f'text="{old_text}"' in line:
                                     # Replace spaces with &nbsp; in glink/dialog text
                                     # TyranoScript parser strips spaces inside quoted attrs
-                                    nbsp_trans = trans.replace(" ", "&nbsp;")
+                                    nbsp_trans = _attr_safe(trans).replace(" ", "&nbsp;")
                                     line = line.replace(
                                         f'text="{old_text}"',
                                         f'text="{nbsp_trans}"')
@@ -206,7 +232,7 @@ class TyranoScriptParser:
                                 if f'text="{old_text}"' in line:
                                     # Replace spaces with &nbsp; in ptext
                                     # TyranoScript parser strips spaces
-                                    nbsp_trans = trans.replace(" ", "&nbsp;")
+                                    nbsp_trans = _attr_safe(trans).replace(" ", "&nbsp;")
                                     line = line.replace(
                                         f'text="{old_text}"',
                                         f'text="{nbsp_trans}"')
@@ -285,6 +311,50 @@ class TyranoScriptParser:
                 shutil.copy2(font_path, backup)
             # Replace with Arial
             shutil.copy2(arial_src, font_path)
+
+    def restore_originals(self, project_dir: str):
+        """Undo every change export made.
+
+        Restores data/scenario/ from scenario_original/, plus each .bak file
+        export created (Config.tjs, tyrano/lang.js, bundled .ttf fonts).
+        Backups are kept.
+        """
+        import shutil
+
+        scenario_dir = self._find_scenario_dir(project_dir)
+        original_dir = (os.path.join(os.path.dirname(scenario_dir),
+                                     "scenario_original")
+                        if scenario_dir else None)
+        if not original_dir or not os.path.isdir(original_dir):
+            raise FileNotFoundError(
+                "No scenario_original/ backup exists. "
+                "Export to game first to create one.")
+
+        # Swap: move current aside, copy backup in, roll back on failure
+        temp_dir = scenario_dir + "_restoring"
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        os.rename(scenario_dir, temp_dir)
+        try:
+            shutil.copytree(original_dir, scenario_dir)
+        except Exception:
+            os.rename(temp_dir, scenario_dir)
+            raise
+        shutil.rmtree(temp_dir)
+
+        bak_files = []
+        for base in (project_dir, os.path.join(project_dir, "extracted")):
+            bak_files.append(os.path.join(base, "tyrano", "lang.js.bak"))
+            bak_files.append(
+                os.path.join(base, "data", "system", "Config.tjs.bak"))
+            others = os.path.join(base, "data", "others")
+            if os.path.isdir(others):
+                bak_files.extend(os.path.join(others, f)
+                                 for f in os.listdir(others)
+                                 if f.lower().endswith(".ttf.bak"))
+        for bak in bak_files:
+            if os.path.isfile(bak):
+                shutil.copy2(bak, bak[:-len(".bak")])
 
     # ── Detection ──────────────────────────────────────────────
 
@@ -375,14 +445,14 @@ class TyranoScriptParser:
             jname_match = _JNAME_RE.search(line)
             if jname_match:
                 # Extract name= attribute
-                name_match = re.search(r'\bname=(\w+)', line)
+                name_match = re.search(r'\bname="?(\w+)', line)
                 if name_match:
                     self._char_names[name_match.group(1)] = jname_match.group(1)
 
     def _parse_ks_file(self, ks_path: Path, rel_path: str) -> list[TranslationEntry]:
         """Parse a single .ks file and extract translatable entries."""
         try:
-            lines = ks_path.read_text(encoding="utf-8").splitlines()
+            lines = _split_ks_lines(ks_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
             return []
 
@@ -413,8 +483,8 @@ class TyranoScriptParser:
             if in_script:
                 continue
 
-            # Skip comments
-            if stripped.startswith(";"):
+            # Skip comments and *label|title lines (jump targets, never shown)
+            if stripped.startswith(";") or stripped.startswith("*"):
                 continue
 
             # Speaker tag
@@ -584,7 +654,8 @@ class TyranoScriptParser:
         """
         for jp_val, en_val in var_map.items():
             if jp_val in line:
-                line = line.replace(f"'{jp_val}'", f"'{en_val}'")
+                line = line.replace(f"'{jp_val}'",
+                                    f"'{_js_single_quoted(en_val)}'")
         return line
 
     def _export_lang_js(self, project_dir: str, entries: list[TranslationEntry]):
@@ -607,12 +678,14 @@ class TyranoScriptParser:
                 import shutil
                 shutil.copy2(lang_path, backup)
 
-            text = Path(lang_path).read_text(encoding="utf-8")
+            # Read from the backup so re-export is idempotent
+            text = Path(backup).read_text(encoding="utf-8")
             for key, trans in lang_entries.items():
                 # Replace "key":"old_value" with "key":"new_value"
+                literal = json.dumps(trans, ensure_ascii=False)
                 text = re.sub(
-                    rf'("{key}"\s*:\s*)"([^"]*)"',
-                    rf'\1"{trans}"',
+                    rf'("{re.escape(key)}"\s*:\s*)"([^"]*)"',
+                    lambda m, lit=literal: m.group(1) + lit,
                     text)
             Path(lang_path).write_text(text, encoding="utf-8")
             break
@@ -643,17 +716,18 @@ class TyranoScriptParser:
             import shutil
             shutil.copy2(config_path, backup)
 
-        text = Path(config_path).read_text(encoding="utf-8")
+        text = Path(backup).read_text(encoding="utf-8")
+        title = " ".join(title_entry.translation.split())  # single line
         text = _CONFIG_TITLE_RE.sub(
-            f";System.title={title_entry.translation}", text)
+            lambda _m: f";System.title={title}", text)
         # Also update projectID if present
         old_id_re = re.compile(r'^;projectID=(.+)$', re.MULTILINE)
         m = old_id_re.search(text)
         if m and JAPANESE_RE.search(m.group(1)):
             # Strip version suffix for projectID
             proj_title = re.sub(r'\s*ver?\s*[\d.]+\s*$', '',
-                                title_entry.translation, flags=re.IGNORECASE)
-            text = old_id_re.sub(f";projectID={proj_title}", text)
+                                title, flags=re.IGNORECASE)
+            text = old_id_re.sub(lambda _m: f";projectID={proj_title}", text)
         Path(config_path).write_text(text, encoding="utf-8")
 
     def _extract_lang_js(self, game_root: str) -> list[TranslationEntry]:

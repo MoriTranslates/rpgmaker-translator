@@ -6,7 +6,6 @@ import os
 import re
 import subprocess
 import time
-from contextlib import contextmanager
 
 import requests
 
@@ -26,25 +25,71 @@ _JP_BRACKETS = {
 }
 
 
+class ServerUnreachable(ConnectionError):
+    """The LLM server could not be reached (connection refused/reset, timeout).
+
+    Only this (and raw requests ConnectionError/Timeout) counts toward the
+    engine's server-down detection — other ConnectionErrors (bad model name,
+    auth failure, HTTP 500) are per-request failures.
+    """
+
+
+class RateLimited(ConnectionError):
+    """The provider returned HTTP 429 — caller should back off and retry."""
+
+
 # Regex to strip Qwen3 thinking blocks (<think>...</think>) that waste
 # tokens and slow down inference.  These appear when the model's internal
 # chain-of-thought mode is enabled (Qwen3 default).
 _THINK_RE = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
+# Unclosed <think> (response truncated mid-reasoning) — drop everything after it
+_THINK_UNCLOSED_RE = re.compile(r'<think>.*', re.DOTALL)
 
 # Regex to strip translator notes/commentary the LLM sometimes appends.
-# Matches common patterns at the end of the output.
-_NOTE_STRIP_RE = re.compile(
-    r'(?:'
+# Matches common patterns at the end of the output.  Bare "Note:" lines are
+# NOT stripped — they can be legitimate dialogue ("Note: the door is locked").
+_NOTE_LABELS = r"(?:Translation [Nn]ote|Translator'?s? [Nn]ote|TL [Nn]ote)s?"
+_NOTE_SEPARATOR_PATTERNS = (
     r'\n\s*[-—–]{2,}\s*\n.*'                     # --- separator followed by notes
     r'|\n\s*\*{2,}\s*\n.*'                        # *** separator followed by notes
-    r'|\n\s*(?:Note|Notes|Translation [Nn]ote|Translator\'?s? [Nn]ote|TL [Nn]ote|Commentary|Explanation)s?\s*[:：].*'
-    r'|\n\s*\((?:Note|Notes|Translation [Nn]ote|Translator\'?s? [Nn]ote|TL [Nn]ote)s?\s*[:：].*?\)\s*$'
-    r'|\n\s*\[(?:Note|Notes|Translation [Nn]ote|Translator\'?s? [Nn]ote|TL [Nn]ote)s?\s*[:：].*?\]\s*$'
-    r'|\n\s*\*(?:Note|Notes|Translation [Nn]ote|Translator\'?s? [Nn]ote|TL [Nn]ote)s?\s*[:：].*?\*\s*$'
-    r')',
+)
+_NOTE_LABEL_PATTERNS = (
+    r'\n\s*(?:' + _NOTE_LABELS + r'|Commentary|Explanation)\s*[:：].*'
+    r'|\n\s*\((?:Note|Notes|' + _NOTE_LABELS + r')\s*[:：].*?\)\s*$'
+    r'|\n\s*\[(?:Note|Notes|' + _NOTE_LABELS + r')\s*[:：].*?\]\s*$'
+    r'|\n\s*\*(?:Note|Notes|' + _NOTE_LABELS + r')\s*[:：].*?\*\s*$'
+)
+_NOTE_STRIP_RE = re.compile(
+    r'(?:' + _NOTE_SEPARATOR_PATTERNS + r'|' + _NOTE_LABEL_PATTERNS + r')',
     re.DOTALL | re.IGNORECASE,
 )
+# Variant used when the source itself has a separator line (e.g. a "——"
+# dramatic-pause line) — separators are then real content, not note markers.
+_NOTE_STRIP_NO_SEP_RE = re.compile(
+    r'(?:' + _NOTE_LABEL_PATTERNS + r')',
+    re.DOTALL | re.IGNORECASE,
+)
+# A line in the source made only of dash-like / asterisk characters
+_SOURCE_SEP_LINE_RE = re.compile(r'^\s*(?:[-—–―─ー]{2,}|\*{2,})\s*$', re.MULTILINE)
 
+# LLM-mangled placeholder variants: <<CODE1>>, [CODE1], « CODE 1 », «CODE1>> ...
+_PLACEHOLDER_NORMALIZE_RE = re.compile(
+    r'(?:«|<<|\[)\s*CODE\s*(\d+)\s*(?:»|>>|\])')
+_PLACEHOLDER_RE = re.compile(r'«CODE\d+»')
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """OpenAI reasoning models (gpt-5*, o1/o3/o4...) reject temperature and
+    use max_completion_tokens instead of max_tokens."""
+    m = (model or "").lower()
+    return m.startswith("gpt-5") or bool(re.match(r'o\d', m))
+
+
+def _estimate_num_ctx(messages: list, num_predict: int, floor: int = 4096) -> int:
+    """Context window sized to the prompt: ~2 chars/token (JP-heavy), capped 16K."""
+    chars = sum(len(m.get("content", "")) for m in messages
+                if isinstance(m.get("content", ""), str))
+    return min(16384, max(floor, chars // 2 + num_predict))
 
 
 def _to_pig_latin(text: str) -> str:
@@ -585,6 +630,7 @@ class AIClient:
         self.actor_context = ""  # Character reference for pronoun inference
         self.actor_genders = {}  # {actor_id(int): "male"/"female"/"unknown"}
         self.actor_names = {}    # {actor_id(int): "name string"}
+        self.actor_names_en = {}  # {actor_id(int): "English name"} — matches translated [Speaker: X]
         self.glossary = {}       # JP term -> EN translation forced mappings
         self.dazed_mode = False  # DazedMTL mode toggle (batch 30, DazedMTL prompt)
         self.project_type = "rpgmaker_mv"  # "rpgmaker_mv" | "rpgmaker_mz" | "tyranoscript" | "srpgstudio"
@@ -594,6 +640,12 @@ class AIClient:
         self._token_lock = threading.Lock()
         self.session_input_tokens = 0
         self.session_output_tokens = 0
+        # Set by the engine on cancel — checked inside multi-request loops
+        # (Japanese retry, batch per-entry fallback, variants, rate-limit waits)
+        self.cancel_event = threading.Event()
+        # Cached OpenAI SDK clients keyed by (provider, api_key, base_url)
+        self._openai_clients: dict = {}
+        self._openai_lock = threading.Lock()
 
     @property
     def is_cloud(self) -> bool:
@@ -603,15 +655,22 @@ class AIClient:
     @property
     def _is_sugoi(self) -> bool:
         """True if using a Sugoi model (needs special sampling params)."""
-        return "sugoi" in self.model.lower() or "ultra" in self.model.lower()
+        return self._model_is_sugoi(self.model)
 
-    def _base_options(self, **overrides) -> dict:
+    @staticmethod
+    def _model_is_sugoi(model: str) -> bool:
+        m = (model or "").lower()
+        return "sugoi" in m or "ultra" in m
+
+    def _base_options(self, _model: str | None = None, **overrides) -> dict:
         """Build options dict with model-appropriate defaults.
 
         Sugoi Ultra recommends: temperature 0.1, top_k 40, top_p 0.95,
         min_p 0.05, repeat_penalty 1.1.  All other models use temp 0 + seed 42.
+        ``_model`` overrides which model the defaults are chosen for
+        (e.g. the polish model).
         """
-        if self._is_sugoi:
+        if self._model_is_sugoi(_model or self.model):
             opts = {
                 "temperature": 0.1,
                 "top_k": 40,
@@ -656,50 +715,53 @@ class AIClient:
             return self.base_url
         return None  # SDK default (OpenAI)
 
-    @contextmanager
-    def _polish_model_swap(self):
-        """Temporarily switch self.model to self.polish_model for a polish call.
-
-        No-op if polish_model is unset or matches the main model. Restores
-        the original model on exit even if the call raises.
-        """
-        if not self.polish_model or self.polish_model == self.model:
-            yield
-            return
-        original = self.model
-        self.model = self.polish_model
-        try:
-            yield
-        finally:
-            self.model = original
-
     def _chat(self, *, messages: list, stream: bool = False,
-              timeout: int = 120, **kwargs) -> dict:
-        """Send a chat request, routing to Ollama or cloud based on provider."""
-        if self.is_cloud:
-            return self._chat_openai(messages=messages, timeout=timeout, **kwargs)
+              timeout: int = 120, model: str | None = None, **kwargs) -> dict:
+        """Send a chat request, routing to Ollama or cloud based on provider.
 
+        ``model`` overrides self.model for this request only (used by polish
+        so parallel workers never mutate shared client state).
+
+        Raises:
+            ServerUnreachable: connection refused/reset or timeout.
+            RateLimited: HTTP 429.
+            ConnectionError: other HTTP errors (bad model, 5xx, ...).
+            ValueError: response body is not valid JSON.
+        """
+        if self.is_cloud:
+            return self._chat_openai(messages=messages, timeout=timeout,
+                                     model=model, **kwargs)
+
+        kwargs.pop("json_schema", None)  # cloud-only — Ollama rejects/ignores it
+        model = model or self.model
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": messages,
             "stream": stream,
             "think": False,    # Disable Qwen3 chain-of-thought (huge speed win)
             "keep_alive": -1,  # Keep model loaded in VRAM indefinitely
             **kwargs,
         }
-        r = requests.post(
-            f"{self.base_url}/api/chat",
-            json=payload,
-            timeout=timeout,
-        )
+        try:
+            r = requests.post(
+                f"{self.base_url}/api/chat",
+                json=payload,
+                timeout=timeout,
+            )
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise ServerUnreachable(f"Cannot reach Ollama at {self.base_url}: {e}") from e
+        except requests.RequestException as e:
+            raise ConnectionError(f"Ollama request failed: {e}") from e
         if r.status_code != 200:
             # Friendly error messages for common failures
             body = r.text[:200]
             if r.status_code == 404:
                 raise ConnectionError(
-                    f"Model '{self.model}' not found. "
-                    f"Run: ollama pull {self.model}"
+                    f"Model '{model}' not found. "
+                    f"Run: ollama pull {model}"
                 )
+            if r.status_code == 429:
+                raise RateLimited(f"Ollama rate limited (429): {body}")
             raise ConnectionError(
                 f"Ollama error {r.status_code}: {body}"
             )
@@ -772,7 +834,27 @@ class AIClient:
             log.debug("Failed to unload models: %s", exc)
             return 0
 
-    def _chat_openai(self, *, messages: list, timeout: int = 120, **kwargs) -> dict:
+    def _get_openai_client(self, openai_mod):
+        """Return a cached OpenAI SDK client for the current provider/key/url.
+
+        Creating a client per request leaks connection pools; one client per
+        (provider, key, base_url) is shared across worker threads.
+        """
+        base_url = self._get_openai_base_url()
+        cache_key = (self.provider, self.api_key, base_url)
+        with self._openai_lock:
+            client = self._openai_clients.get(cache_key)
+            if client is None:
+                client = openai_mod.OpenAI(
+                    api_key=self.api_key,
+                    base_url=base_url,
+                    max_retries=1,
+                )
+                self._openai_clients[cache_key] = client
+            return client
+
+    def _chat_openai(self, *, messages: list, timeout: int = 120,
+                     model: str | None = None, **kwargs) -> dict:
         """Send a chat request via the OpenAI-compatible SDK (cloud providers).
 
         Returns a dict in Ollama response format for compatibility:
@@ -786,20 +868,22 @@ class AIClient:
                 "Install it with:  pip install openai"
             )
 
-        client = openai.OpenAI(
-            api_key=self.api_key,
-            base_url=self._get_openai_base_url(),
-            timeout=timeout,
-        )
+        client = self._get_openai_client(openai).with_options(timeout=timeout)
+        model = model or self.model
 
         # Extract Ollama-style options and map to OpenAI params
         options = kwargs.get("options", {})
+        reasoning = _is_reasoning_model(model)
         params: dict = {
-            "model": self.model,
+            "model": model,
             "messages": messages,
-            "temperature": options.get("temperature", 0),
-            "max_tokens": options.get("num_predict", 1024),
         }
+        if reasoning:
+            # gpt-5* / o*: no temperature, max_completion_tokens instead of max_tokens
+            params["max_completion_tokens"] = options.get("num_predict", 1024)
+        else:
+            params["temperature"] = options.get("temperature", 0)
+            params["max_tokens"] = options.get("num_predict", 1024)
 
         # JSON mode: enforce structured output for batch translation
         fmt = kwargs.get("format")
@@ -815,7 +899,7 @@ class AIClient:
             params["response_format"] = {"type": "json_object"}
 
         # Provider-specific adjustments (ported from DazedMTL)
-        model_config = get_model_pricing(self.model)
+        model_config = get_model_pricing(model)
         freq_penalty = model_config.get("frequency_penalty", 0.0)
 
         if self.provider == "Google Gemini":
@@ -825,7 +909,7 @@ class AIClient:
             seed = options.get("seed")
             if seed is not None:
                 params["seed"] = seed
-            if freq_penalty > 0:
+            if freq_penalty > 0 and not reasoning:
                 params["frequency_penalty"] = freq_penalty
 
         try:
@@ -836,12 +920,13 @@ class AIClient:
                 "Check your key in Settings."
             )
         except openai.APIConnectionError as e:
-            raise ConnectionError(f"Cannot reach {self.provider} API: {e}")
-        except openai.RateLimitError:
-            raise ConnectionError(
+            # Also covers APITimeoutError (subclass)
+            raise ServerUnreachable(f"Cannot reach {self.provider} API: {e}") from e
+        except openai.RateLimitError as e:
+            raise RateLimited(
                 f"Rate limit exceeded for {self.provider}. "
                 "Wait a moment and try again."
-            )
+            ) from e
         except openai.APIStatusError as e:
             raise ConnectionError(f"{self.provider} API error ({e.status_code}): {e.message}")
 
@@ -923,7 +1008,7 @@ class AIClient:
             resp = r.json()
 
         raw = resp.get("message", {}).get("content", "")
-        return _THINK_RE.sub("", raw).strip()
+        return self._strip_thinking(raw)
 
     def is_available(self) -> bool:
         """Check if the translation backend is reachable."""
@@ -1108,7 +1193,7 @@ class AIClient:
             if result and self.target_language == "Pig Latin":
                 result = _to_pig_latin(result)
             return result if result else text
-        except (requests.RequestException, ConnectionError):
+        except (requests.RequestException, ConnectionError, ValueError):
             return text
 
     def translate_names_batch(self, items: list[tuple[str, str, str]]) -> dict[str, str]:
@@ -1171,7 +1256,7 @@ class AIClient:
             raw = self._strip_thinking(data.get("message", {}).get("content", "").strip())
             if not raw:
                 return {}
-        except (requests.RequestException, ConnectionError):
+        except (requests.RequestException, ConnectionError, ValueError):
             return {}
 
         expected_keys = [key for key, *_ in items]
@@ -1190,12 +1275,25 @@ class AIClient:
 
     @staticmethod
     def _strip_thinking(text: str) -> str:
-        """Remove Qwen3 <think>...</think> reasoning blocks from output."""
-        return _THINK_RE.sub('', text).strip()
+        """Remove Qwen3 <think>...</think> reasoning blocks from output.
+
+        Also drops an unclosed <think> (truncated output) and everything after it.
+        """
+        text = _THINK_RE.sub('', text)
+        text = _THINK_UNCLOSED_RE.sub('', text)
+        return text.strip()
 
     @staticmethod
-    def _strip_notes(text: str) -> str:
-        """Remove translator notes/commentary the LLM sometimes appends."""
+    def _strip_notes(text: str, original: str = "") -> str:
+        """Remove translator notes/commentary the LLM sometimes appends.
+
+        If ``original`` (the source text) itself contains a separator line
+        (e.g. a "——" dramatic pause), separator lines in the output are real
+        content and only labelled notes (TL note:, Translator's note: ...)
+        are stripped.
+        """
+        if original and _SOURCE_SEP_LINE_RE.search(original):
+            return _NOTE_STRIP_NO_SEP_RE.sub('', text).rstrip()
         return _NOTE_STRIP_RE.sub('', text).rstrip()
 
     @staticmethod
@@ -1259,7 +1357,12 @@ class AIClient:
 
     @staticmethod
     def _restore_codes(text: str, mapping: dict) -> str:
-        """Put control codes back from placeholders."""
+        """Put control codes back from placeholders.
+
+        First normalizes LLM-mangled forms (<<CODE1>>, [CODE1], « CODE 1 »)
+        back to «CODE1» so they restore instead of leaking into the game.
+        """
+        text = _PLACEHOLDER_NORMALIZE_RE.sub('«CODE\\1»', text)
         for key, code in mapping.items():
             text = text.replace(key, code)
         return text
@@ -1292,9 +1395,32 @@ class AIClient:
         codes in the mapping and creates an explicit hint so the LLM can
         use correct pronouns for referenced characters.
         """
-        if not code_map or not self.actor_genders:
+        hints = self._code_hint_lines(code_map)
+        if not hints:
             return ""
+        return self._CODE_HINT_HEADER + "\n".join(hints)
+
+    _CODE_HINT_HEADER = (
+        "Character name codes (these will display as character names "
+        "in-game — use the CORRECT pronouns for each):\n"
+    )
+
+    def _actor_display_name(self, actor_id: int) -> str:
+        """English actor name when known (matches what the LLM outputs), else JP."""
+        return (self.actor_names_en.get(actor_id)
+                or self.actor_names.get(actor_id)
+                or f"Actor {actor_id}")
+
+    def _code_hint_lines(self, code_map: dict, label: str = "") -> list[str]:
+        """Hint lines for \\N[n] placeholders in one code map.
+
+        ``label`` (e.g. a batch key "Line3") prefixes each line so per-line
+        «CODEn» numbering in a batch doesn't collide.
+        """
+        if not code_map or not self.actor_genders:
+            return []
         hints = []
+        prefix = f"{label} " if label else ""
         for placeholder, code in code_map.items():
             m = self._ACTOR_NAME_CODE_RE.match(code)
             if not m:
@@ -1303,21 +1429,15 @@ class AIClient:
             gender = self.actor_genders.get(actor_id, "")
             if not gender or gender == "unknown":
                 continue
-            name = self.actor_names.get(actor_id, f"Actor {actor_id}")
+            name = self._actor_display_name(actor_id)
             if gender == "female":
                 pronoun = "she/her"
             elif gender == "male":
                 pronoun = "he/him"
             else:
                 pronoun = "they/them"
-            hints.append(f"  {placeholder} = name of {name} ({pronoun})")
-        if not hints:
-            return ""
-        return (
-            "Character name codes (these will display as character names "
-            "in-game — use the CORRECT pronouns for each):\n"
-            + "\n".join(hints)
-        )
+            hints.append(f"  {prefix}{placeholder} = name of {name} ({pronoun})")
+        return hints
 
     def _build_speaker_hint(self, context: str) -> str:
         """If context identifies a speaker, add their gender as a translation hint.
@@ -1335,21 +1455,29 @@ class AIClient:
         speaker = m.group(1).strip()
         if not speaker:
             return ""
-        for actor_id, name in self.actor_names.items():
-            if name.lower() == speaker.lower():
-                gender = self.actor_genders.get(actor_id, "")
-                if gender == "female":
-                    return (
-                        f"Speaker: {name} is FEMALE. "
-                        "Lines spoken by her use first-person I/me. "
-                        "Others referring to her use she/her.\n"
-                    )
-                elif gender == "male":
-                    return (
-                        f"Speaker: {name} is MALE. "
-                        "Lines spoken by him use first-person I/me. "
-                        "Others referring to him use he/him.\n"
-                    )
+        # Speaker names in context may already be translated to English
+        # (_update_speaker_names), so match against both JP and EN names.
+        # Snapshot the dicts — the GUI thread may mutate them mid-batch.
+        speaker_l = speaker.lower()
+        names_jp = list(self.actor_names.copy().items())
+        names_en = list(self.actor_names_en.copy().items())
+        for actor_id, raw_name in names_jp + names_en:
+            if not isinstance(raw_name, str) or raw_name.lower() != speaker_l:
+                continue
+            name = self._actor_display_name(actor_id)
+            gender = self.actor_genders.get(actor_id, "")
+            if gender == "female":
+                return (
+                    f"Speaker: {name} is FEMALE. "
+                    "Lines spoken by her use first-person I/me. "
+                    "Others referring to her use she/her.\n"
+                )
+            elif gender == "male":
+                return (
+                    f"Speaker: {name} is MALE. "
+                    "Lines spoken by him use first-person I/me. "
+                    "Others referring to him use he/him.\n"
+                )
         return ""
 
     def _filter_glossary(self, text: str, context: str = "") -> dict[str, str]:
@@ -1361,7 +1489,8 @@ class AIClient:
         if not self.glossary:
             return {}
         search_text = text + "\n" + context
-        return {jp: en for jp, en in self.glossary.items() if jp in search_text}
+        # Snapshot — the GUI thread may add terms while workers iterate
+        return {jp: en for jp, en in self.glossary.copy().items() if jp in search_text}
 
     @staticmethod
     def _glossary_en_lower(en: str) -> str:
@@ -1454,19 +1583,28 @@ class AIClient:
     _CONTRACTION_RE = re.compile(
         r"\b(\w+)\s*(['\u2019])\s*(ve|re|ll|t|s|d|m)\b", re.IGNORECASE)
 
-    def _postprocess_result(self, result: str, code_map: dict) -> str:
-        """Strip thinking/notes, apply Pig Latin, restore control codes."""
+    def _postprocess_result(self, result: str, code_map: dict,
+                            source: str = "") -> str:
+        """Strip thinking/notes, apply Pig Latin, restore control codes.
+
+        ``source`` is the cleaned source text the LLM saw (placeholders +
+        converted brackets); used to avoid stripping content that mirrors it.
+        """
         result = self._strip_thinking(result)
-        result = self._strip_notes(result)
+        result = self._strip_notes(result, source)
         if self.target_language == "Pig Latin":
             result = _to_pig_latin(result)
         if code_map:
             result = self._restore_codes(result, code_map)
         # Fix contraction spacing artifacts (I 've → I've, Couldn' t → Couldn't)
         result = self._CONTRACTION_RE.sub(r"\1\2\3", result)
-        # Strip outer quotes if LLM wrapped the entire translation in them
+        # Strip outer quotes if LLM wrapped the entire translation in them.
+        # Only a single wrapping pair (exactly 2 quotes) — `"Yes," she said,
+        # "go."` must survive — and only if the source wasn't itself quoted.
         if (result.startswith('"') and result.endswith('"')
-                and len(result) > 1 and '\n' not in result):
+                and len(result) > 1 and '\n' not in result
+                and result.count('"') == 2
+                and not source.lstrip().startswith('"')):
             result = result[1:-1]
         # Strip leading whitespace from continuation lines (JP formatting
         # artifact — continuation 401 lines often have leading spaces that
@@ -1541,15 +1679,13 @@ class AIClient:
         # Build messages: system → history pairs → current request
         messages = [{"role": "system", "content": self.system_prompt}]
         if history:
-            for hist_jp, hist_en in history:
+            for hist_jp, hist_en in self._placeholder_history(history):
                 messages.append({"role": "user", "content": f"Translate this:\n{hist_jp}"})
                 messages.append({"role": "assistant", "content": hist_en})
         messages.append({"role": "user", "content": user_msg})
 
-        # Scale context window for history
-        num_ctx = 4096
-        if history:
-            num_ctx = min(4096 + len(history) * 256, 8192)
+        # Size context window to the actual prompt (system prompt + history)
+        num_ctx = _estimate_num_ctx(messages, 1024)
 
         try:
             data = self._chat(
@@ -1561,15 +1697,17 @@ class AIClient:
 
             # Guard: treat empty LLM output as a failure so we don't
             # silently mark entries as "translated" with blank text.
+            # ValueError (not ConnectionError) — a bad response is not a
+            # server-down signal.
             if not self._strip_thinking(result):
-                raise ConnectionError("Ollama returned empty translation")
+                raise ValueError("LLM returned empty translation")
 
             # Save raw result (with «CODEn» placeholders) before restoring codes
             raw_result = self._strip_thinking(result)
-            result = self._postprocess_result(result, code_map)
+            result = self._postprocess_result(result, code_map, clean_text)
 
             # Auto-retry if the translation still contains Japanese characters
-            if self._contains_japanese(result):
+            if self._contains_japanese(result) and not self.cancel_event.is_set():
                 log.info("Translation contains Japanese — retrying with stronger prompt")
                 retry_msg = (
                     "Your translation still contains Japanese characters. "
@@ -1591,20 +1729,37 @@ class AIClient:
                         options=self._base_options(num_predict=1024, num_ctx=num_ctx),
                     )
                     retry_result = data2.get("message", {}).get("content", "").strip()
-                    if retry_result:
-                        result = self._postprocess_result(retry_result, code_map)
-                except (requests.RequestException, ConnectionError) as exc:
+                    if self._strip_thinking(retry_result):
+                        result = self._postprocess_result(retry_result, code_map, clean_text)
+                except (requests.RequestException, ConnectionError, ValueError) as exc:
                     log.debug("Japanese-retry failed, keeping original: %s", exc)
 
             return result
-        except (requests.RequestException, ConnectionError) as e:
+        except (ConnectionError, ValueError):
+            raise  # keep subclass (ServerUnreachable / RateLimited) intact
+        except requests.RequestException as e:
             raise ConnectionError(f"API error: {e}") from e
+
+    def _placeholder_history(self, history: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """Convert history pairs to the same «CODEn» form the current request uses.
+
+        History is stored with raw control codes (\\C[2], \\N[1]); without this
+        the model sees raw codes in examples but placeholders in the request.
+        """
+        out = []
+        for hist_jp, hist_en in history:
+            jp, _ = self._extract_codes(hist_jp or "")
+            en, _ = self._extract_codes(hist_en or "")
+            out.append((self._convert_jp_brackets(jp), en))
+        return out
 
     def polish(self, text: str) -> str:
         """Polish an existing English translation for grammar and fluency.
 
         Uses the same placeholder system to protect control codes.
-        Returns the polished text, or the original on failure.
+        Returns the polished text, or the original if the model returns
+        nothing.  Request failures raise (ConnectionError / ValueError) so
+        callers can report them instead of counting a silent no-op as done.
         """
         if not text or not text.strip():
             return text
@@ -1620,26 +1775,29 @@ class AIClient:
             )
         user_msg += f"Polish this:\n{clean_text}"
 
+        polish_model = self.polish_model or None
         try:
-            with self._polish_model_swap():
-                data = self._chat(
-                    messages=[
-                        {"role": "system", "content": _POLISH_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    timeout=120,
-                    options=self._base_options(num_predict=1024, num_ctx=4096),
-                )
-            result = self._strip_thinking(data.get("message", {}).get("content", "").strip())
-            if not result:
-                return text  # Keep original on empty response
+            data = self._chat(
+                messages=[
+                    {"role": "system", "content": _POLISH_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                timeout=120,
+                model=polish_model,
+                options=self._base_options(polish_model, num_predict=1024, num_ctx=4096),
+            )
+        except (ConnectionError, ValueError):
+            raise
+        except requests.RequestException as e:
+            raise ConnectionError(f"API error: {e}") from e
+        result = self._strip_thinking(data.get("message", {}).get("content", "").strip())
+        if not result:
+            return text  # Keep original on empty response
 
-            if code_map:
-                result = self._restore_codes(result, code_map)
+        if code_map:
+            result = self._restore_codes(result, code_map)
 
-            return result
-        except (requests.RequestException, ConnectionError):
-            return text  # Keep original on error
+        return result
 
     # ── Batch JSON translation ──────────────────────────────────
 
@@ -1683,9 +1841,22 @@ class AIClient:
         if not isinstance(result, dict):
             raise ValueError(f"Could not parse JSON from LLM response: {raw[:200]}")
 
-        # Validate: at least one expected key must be present
-        found = {k: str(v).strip() for k, v in result.items()
-                 if k in expected_keys and v is not None and str(v).strip()}
+        # Validate: at least one expected key must be present.
+        # A list of strings (model split a multi-line entry) is joined with
+        # newlines; any other non-string value (dict, number, mixed list) is
+        # rejected so it falls back to single-entry translation instead of
+        # writing "['a', 'b']" / "{...}" into the game.
+        found = {}
+        for k, v in result.items():
+            if k not in expected_keys:
+                continue
+            if isinstance(v, list) and v and all(isinstance(x, str) for x in v):
+                v = "\n".join(v)
+            if not isinstance(v, str):
+                continue
+            v = v.strip()
+            if v:
+                found[k] = v
         if not found:
             raise ValueError(f"No expected keys found in response. Expected {expected_keys}, got {list(result.keys())}")
 
@@ -1737,7 +1908,7 @@ class AIClient:
         # Translation history as context (DazedMTL passes previous translations)
         if history:
             history_lines = []
-            for hist_jp, hist_en in history[-10:]:
+            for hist_jp, hist_en in self._placeholder_history(history[-10:]):
                 history_lines.append(f"JP: {hist_jp}")
                 history_lines.append(f"EN: {hist_en}")
             messages.append({
@@ -1770,13 +1941,13 @@ class AIClient:
                 "These are internal engine formatting tags — NOT names or variables. "
                 "You MUST output them exactly as-is.\n\n"
             )
-            # Build combined code hints from all entries
-            combined_map = {}
-            for cm in code_maps.values():
-                combined_map.update(cm)
-            code_hints = self._build_code_hints(combined_map)
-            if code_hints:
-                user_msg += code_hints + "\n\n"
+            # Code hints per line — each line numbers its «CODEn» from 1, so
+            # label hints by key (e.g. "Line3 «CODE1» = ...") to avoid collisions
+            hint_lines = []
+            for key, cm in code_maps.items():
+                hint_lines.extend(self._code_hint_lines(cm, label=key))
+            if hint_lines:
+                user_msg += self._CODE_HINT_HEADER + "\n".join(hint_lines) + "\n\n"
 
         # Glossary placed last (before text) for maximum attention from smaller models
         batch_search_text = "\n".join(original for _key, original, _ctx, _field in entries)
@@ -1812,15 +1983,14 @@ class AIClient:
                 },
             }
 
-        # For cloud APIs, set explicit token budgets.
-        # For local Ollama, omit num_predict/num_ctx so the model uses its
-        # own defaults (Qwen3.5 has 262K context — no need to constrain).
-        opts = self._base_options()
-        if self.is_cloud:
-            num_predict = max(2048, min(256 * len(entries), 8192))
-            num_ctx = max(4096, 2000 + 256 * len(entries) + num_predict)
-            opts["num_predict"] = num_predict
-            opts["num_ctx"] = num_ctx
+        # Explicit token budgets for both local and cloud. Ollama's default
+        # num_ctx (2-4K) silently truncates the system prompt on big batches;
+        # size the window to the prompt (~2 chars/token for JP), cap 16K.
+        num_predict = max(2048, min(256 * len(entries), 8192))
+        opts = self._base_options(
+            num_predict=num_predict,
+            num_ctx=_estimate_num_ctx(messages, num_predict),
+        )
 
         try:
             data = self._chat(
@@ -1830,11 +2000,13 @@ class AIClient:
                 json_schema=json_schema,
                 options=opts,
             )
-            raw = self._strip_thinking(data.get("message", {}).get("content", "").strip())
-            if not raw:
-                raise ConnectionError("Empty response for batch translation")
-        except (requests.RequestException, ConnectionError) as e:
+        except (ConnectionError, ValueError):
+            raise
+        except requests.RequestException as e:
             raise ConnectionError(f"API error: {e}") from e
+        raw = self._strip_thinking(data.get("message", {}).get("content", "").strip())
+        if not raw:
+            raise ValueError("Empty response for batch translation")
 
         parsed = self._parse_batch_response(raw, expected_keys)
 
@@ -1850,41 +2022,47 @@ class AIClient:
         results = {}
         retry_entries = []
         for key, translation in parsed.items():
-            translation = self._strip_notes(translation)
+            source = payload.get(key, "")
+            translation = self._strip_notes(translation, source)
 
             # Content validation: empty or suspiciously short translations
             orig = next((o for k, o, _c, _f in entries if k == key), "")
             if not translation.strip():
-                retry_entries.append((key, orig, ""))
+                retry_entries.append((key, orig))
                 continue
             if len(orig) > 10 and len(translation.strip()) <= 2:
-                retry_entries.append((key, orig, translation))
+                retry_entries.append((key, orig))
                 continue
 
             if self._contains_japanese(translation):
                 if orig:
-                    retry_entries.append((key, orig, translation))
+                    retry_entries.append((key, orig))
                     continue
-            if self.target_language == "Pig Latin":
-                translation = _to_pig_latin(translation)
-            if code_maps.get(key):
-                translation = self._restore_codes(translation, code_maps[key])
+            # Same cleanup as the single-entry path (Pig Latin, code restore,
+            # contraction fix, outer-quote strip, continuation-line lstrip)
+            translation = self._postprocess_result(
+                translation, code_maps.get(key, {}), source)
+            # Placeholder the model invented or mangled beyond normalization —
+            # would leak «CODEn» into the game; retry this line on its own.
+            if _PLACEHOLDER_RE.search(translation):
+                retry_entries.append((key, orig))
+                continue
             results[key] = translation
 
-        # Retry entries with Japanese or bad content via single translate()
-        for key, original, bad_result in retry_entries:
-            log.info("Batch entry %s needs retry (Japanese/empty/short)", key)
+        # Retry entries with Japanese or bad content via single translate().
+        # On failure the key is left out so the entry stays untranslated /
+        # reported as an error rather than accepting a bad result.
+        for key, original in retry_entries:
+            if self.cancel_event.is_set():
+                break
+            log.info("Batch entry %s needs retry (Japanese/empty/short/codes)", key)
             try:
                 ctx = next((c for k, _o, c, _f in entries if k == key), "")
                 fld = next((f for k, _o, _c, f in entries if k == key), "")
                 result = self.translate(text=original, context=ctx, field=fld)
                 results[key] = result
-            except ConnectionError:
-                # Fall back to the bad result with codes restored
-                if bad_result and code_maps.get(key):
-                    bad_result = self._restore_codes(bad_result, code_maps[key])
-                if bad_result:
-                    results[key] = bad_result
+            except (ConnectionError, ValueError) as exc:
+                log.debug("Batch entry %s single retry failed: %s", key, exc)
 
         return results
 
@@ -1948,30 +2126,34 @@ class AIClient:
                 },
             }
 
-        opts = self._base_options()
-        if self.is_cloud:
-            num_predict = max(2048, min(256 * len(entries), 8192))
-            num_ctx = max(4096, 2000 + 256 * len(entries) + num_predict)
-            opts["num_predict"] = num_predict
-            opts["num_ctx"] = num_ctx
+        messages = [
+            {"role": "system", "content": batch_sys},
+            {"role": "user", "content": user_msg},
+        ]
+        polish_model = self.polish_model or None
+        num_predict = max(2048, min(256 * len(entries), 8192))
+        opts = self._base_options(
+            polish_model,
+            num_predict=num_predict,
+            num_ctx=_estimate_num_ctx(messages, num_predict),
+        )
 
         try:
-            with self._polish_model_swap():
-                data = self._chat(
-                    messages=[
-                        {"role": "system", "content": batch_sys},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    timeout=120 + 30 * len(entries),
-                    format="json",
-                    json_schema=json_schema,
-                    options=opts,
-                )
-            raw = self._strip_thinking(data.get("message", {}).get("content", "").strip())
-            if not raw:
-                raise ConnectionError("Empty response for batch polish")
-        except (requests.RequestException, ConnectionError) as e:
+            data = self._chat(
+                messages=messages,
+                timeout=120 + 30 * len(entries),
+                model=polish_model,
+                format="json",
+                json_schema=json_schema,
+                options=opts,
+            )
+        except (ConnectionError, ValueError):
+            raise
+        except requests.RequestException as e:
             raise ConnectionError(f"API error: {e}") from e
+        raw = self._strip_thinking(data.get("message", {}).get("content", "").strip())
+        if not raw:
+            raise ValueError("Empty response for batch polish")
 
         parsed = self._parse_batch_response(raw, expected_keys)
 
@@ -1995,7 +2177,7 @@ class AIClient:
         try:
             v = self.translate(text=text, context=context, field=field)
             variants.append(v)
-        except ConnectionError:
+        except (ConnectionError, ValueError):
             pass
 
         # Pre-process once for all creative variants
@@ -2011,7 +2193,7 @@ class AIClient:
         # Additional variants: slight temperature for creative variation
         seeds = [123, 456, 789, 1001, 2025]
         for i in range(count - 1):
-            if i >= len(seeds):
+            if i >= len(seeds) or self.cancel_event.is_set():
                 break
             try:
                 data = self._chat(
@@ -2020,7 +2202,8 @@ class AIClient:
                              "num_predict": 1024, "num_ctx": 4096},
                 )
                 result = self._postprocess_result(
-                    data.get("message", {}).get("content", "").strip(), code_map)
+                    data.get("message", {}).get("content", "").strip(), code_map,
+                    clean_text)
                 if result and result not in variants:
                     variants.append(result)
                 elif result:
@@ -2031,10 +2214,11 @@ class AIClient:
                                  "num_predict": 1024, "num_ctx": 4096},
                     )
                     result2 = self._postprocess_result(
-                        data2.get("message", {}).get("content", "").strip(), code_map)
+                        data2.get("message", {}).get("content", "").strip(), code_map,
+                        clean_text)
                     if result2 and result2 not in variants:
                         variants.append(result2)
-            except (requests.RequestException, ConnectionError) as exc:
+            except (requests.RequestException, ConnectionError, ValueError) as exc:
                 log.debug("Variant %d/%d failed: %s", len(variants) + 1, 3, exc)
 
         return variants

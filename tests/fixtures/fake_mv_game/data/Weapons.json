@@ -1,0 +1,11 @@
+[
+  null,
+  {
+    "id": 1,
+    "name": "木の剣",
+    "description": "ただの木の剣。",
+    "note": "",
+    "wtypeId": 1,
+    "price": 10
+  }
+]
