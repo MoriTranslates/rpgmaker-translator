@@ -58,6 +58,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
+      # Release builds install the exact pins; make sure they still resolve
+      # (e.g. a pydantic-core bump without the matching pydantic bump).
+      - name: Check release lock file resolves
+        if: runner.os == 'Windows' && matrix.python == '3.14'
+        run: python -m pip install --dry-run --quiet -r requirements-lock.txt
+
       - name: Lint (ruff)
         run: python -m ruff check --output-format=github .
 

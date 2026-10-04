@@ -7,6 +7,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # pydantic pins an exact pydantic-core; bumping core alone breaks the
+      # lock file. It is updated together with pydantic instead.
+      - dependency-name: "pydantic-core"
+      - dependency-name: "pydantic_core"
     groups:
       python-minor-patch:
         update-types: [minor, patch]
