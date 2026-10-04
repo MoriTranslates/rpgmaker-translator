@@ -20,6 +20,7 @@ from ..image_translator import (
     ALL_IMAGE_EXTS, ENCRYPTED_EXTS,
     read_encryption_key, decrypt_rpgmvp, encrypt_to_rpgmvp,
 )
+from . import theme
 
 log = logging.getLogger(__name__)
 
@@ -71,13 +72,19 @@ _STATUS_LABELS = {
     "error": "Error",
 }
 
-_STATUS_COLORS_DARK = {
-    "pending":    QColor(60, 60, 70),
-    "translated": QColor(30, 70, 40),
-    "skipped":    QColor(55, 55, 55),
-    "no_text":    QColor(50, 50, 60),
-    "error":      QColor(80, 40, 40),
+# Row tint per image status -> theme token
+_STATUS_ROW_TOKENS = {
+    "pending":    "row_untranslated",
+    "translated": "row_reviewed",
+    "skipped":    "row_skipped",
+    "no_text":    "row_skipped",
+    "error":      "row_untranslated",
 }
+
+
+def _status_row_color(status: str):
+    token = _STATUS_ROW_TOKENS.get(status)
+    return theme.qcolor(token) if token else None
 
 
 # ── Worker ───────────────────────────────────────────────────────
@@ -181,6 +188,19 @@ class ImagePanel(QWidget):
         self._trans_pixmap = None
         self._build_ui()
 
+    @staticmethod
+    def _preview_css() -> str:
+        return (f"background-color: {theme.c('field')}; "
+                f"border: 1px solid {theme.c('border')}; "
+                f"color: {theme.c('text_dim')};")
+
+    def apply_theme(self):
+        """Re-color previews and rows after a dark/light switch."""
+        self.orig_label.setStyleSheet(self._preview_css())
+        self.trans_label.setStyleSheet(self._preview_css())
+        if self._entries:
+            self._refresh_table()
+
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -190,7 +210,9 @@ class ImagePanel(QWidget):
 
         # ── Left: folder list ─────────────────────────────────────
         self.folder_list = QListWidget()
-        self.folder_list.setMaximumWidth(200)
+        self.folder_list.setMinimumWidth(140)
+        self.folder_list.setMaximumWidth(240)
+        self.folder_list.setToolTip("Image folders found under img/")
         self.folder_list.currentItemChanged.connect(self._on_folder_clicked)
         hsplit.addWidget(self.folder_list)
 
@@ -258,7 +280,7 @@ class ImagePanel(QWidget):
         self.orig_label = QLabel("Select an image to preview")
         self.orig_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.orig_label.setMinimumHeight(150)
-        self.orig_label.setStyleSheet("background-color: #181825; border: 1px solid #313244;")
+        self.orig_label.setStyleSheet(self._preview_css())
         orig_box.addWidget(self.orig_label)
         preview_layout.addWidget(orig_group)
 
@@ -267,7 +289,7 @@ class ImagePanel(QWidget):
         self.trans_label = QLabel("Not yet translated")
         self.trans_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.trans_label.setMinimumHeight(150)
-        self.trans_label.setStyleSheet("background-color: #181825; border: 1px solid #313244;")
+        self.trans_label.setStyleSheet(self._preview_css())
         trans_box.addWidget(self.trans_label)
         preview_layout.addWidget(trans_group)
 
@@ -276,7 +298,8 @@ class ImagePanel(QWidget):
         # ── Image table ───────────────────────────────────────────
         self.image_table = QTableWidget()
         self.image_table.setColumnCount(5)
-        self.image_table.setHorizontalHeaderLabels(["St", "Filename", "Regions", "Status", "Verify"])
+        self.image_table.setHorizontalHeaderLabels(["", "Filename", "Regions", "Status", "Verify"])
+        self.image_table.verticalHeader().setVisible(False)
         header = self.image_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.image_table.setColumnWidth(0, 30)
@@ -438,7 +461,7 @@ class ImagePanel(QWidget):
             dot_item = QTableWidgetItem(dot)
             dot_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             dot_item.setData(Qt.ItemDataRole.UserRole, i)  # store real index
-            color = _STATUS_COLORS_DARK.get(entry.status)
+            color = _status_row_color(entry.status)
             if color:
                 dot_item.setBackground(color)
             self.image_table.setItem(row, 0, dot_item)
@@ -468,13 +491,13 @@ class ImagePanel(QWidget):
                 if entry.error:
                     verify_text = "\u26a0 " + entry.error[:40]  # warning + truncated issues
                     verify_item = QTableWidgetItem(verify_text)
-                    verify_item.setForeground(QColor(255, 180, 60))
+                    verify_item.setForeground(theme.qcolor("caution"))
                 elif entry.verify_ok is None:
                     verify_item = QTableWidgetItem("?")  # not verified / unparseable
-                    verify_item.setForeground(QColor(150, 150, 150))
+                    verify_item.setForeground(theme.qcolor("text_dim"))
                 else:
                     verify_item = QTableWidgetItem("\u2713")  # checkmark
-                    verify_item.setForeground(QColor(80, 200, 80))
+                    verify_item.setForeground(theme.qcolor("ok"))
             else:
                 verify_item = QTableWidgetItem("")
             verify_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)

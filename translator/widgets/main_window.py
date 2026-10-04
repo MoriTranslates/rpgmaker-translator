@@ -17,159 +17,11 @@ from PyQt6.QtWidgets import (
     QApplication, QProgressDialog, QMenu, QInputDialog, QDialog, QTabWidget,
     QCheckBox, QDialogButtonBox,
 )
-from PyQt6.QtCore import Qt, QSize, QTimer
-from PyQt6.QtGui import QAction, QPalette, QColor
+from PyQt6.QtCore import Qt, QSize, QTimer, QByteArray
+from PyQt6.QtGui import QAction, QPalette, QColor, QKeySequence, QShortcut
 
-DARK_STYLESHEET = """
-QMainWindow, QDialog, QWidget {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-}
-QMenuBar, QToolBar {
-    background-color: #181825;
-    color: #cdd6f4;
-    border-bottom: 1px solid #313244;
-}
-QMenuBar::item:selected, QToolBar QToolButton:hover {
-    background-color: #313244;
-}
-QMenu {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-    border: 1px solid #313244;
-}
-QMenu::item:selected {
-    background-color: #45475a;
-}
-QMenu::separator {
-    height: 1px;
-    background-color: #313244;
-    margin: 4px 8px;
-}
-QTreeWidget, QTableWidget, QPlainTextEdit, QLineEdit, QComboBox {
-    background-color: #181825;
-    color: #cdd6f4;
-    border: 1px solid #313244;
-    selection-background-color: #45475a;
-}
-QTableWidget::item {
-    padding: 4px;
-}
-QHeaderView::section {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-    border: 1px solid #313244;
-    padding: 4px;
-}
-QPushButton {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    padding: 5px 15px;
-    border-radius: 3px;
-}
-QPushButton:hover {
-    background-color: #45475a;
-}
-QPushButton:pressed {
-    background-color: #585b70;
-}
-QProgressBar {
-    border: 1px solid #313244;
-    background-color: #181825;
-    text-align: center;
-    color: #cdd6f4;
-}
-QProgressBar::chunk {
-    background-color: #89b4fa;
-}
-QStatusBar {
-    background-color: #181825;
-    color: #a6adc8;
-}
-QGroupBox {
-    border: 1px solid #313244;
-    border-radius: 4px;
-    margin-top: 8px;
-    padding-top: 16px;
-    color: #cdd6f4;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-}
-QTabWidget::pane {
-    border: 1px solid #313244;
-}
-QTabBar::tab {
-    background-color: #181825;
-    color: #a6adc8;
-    padding: 6px 16px;
-    border: 1px solid #313244;
-}
-QTabBar::tab:selected {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-}
-QSplitter::handle {
-    background-color: #313244;
-}
-QLabel {
-    color: #cdd6f4;
-}
-QMessageBox {
-    background-color: #1e1e2e;
-}
-QMessageBox QLabel {
-    color: #cdd6f4;
-    min-width: 320px;
-}
-QMessageBox QPushButton {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    padding: 6px 24px;
-    min-width: 80px;
-    border-radius: 3px;
-}
-QMessageBox QPushButton:hover {
-    background-color: #45475a;
-}
-QMessageBox QPushButton:default {
-    border: 1px solid #89b4fa;
-    color: #89b4fa;
-}
-QInputDialog {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-}
-QTextEdit {
-    background-color: #181825;
-    color: #cdd6f4;
-    border: 1px solid #313244;
-    selection-background-color: #45475a;
-}
-QCheckBox {
-    color: #cdd6f4;
-    spacing: 6px;
-}
-QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
-    border: 1px solid #45475a;
-    border-radius: 3px;
-    background-color: #181825;
-}
-QCheckBox::indicator:checked {
-    background-color: #89b4fa;
-    border-color: #89b4fa;
-}
-QDialogButtonBox QPushButton {
-    padding: 6px 24px;
-    min-width: 80px;
-}
-"""
-
+from ..version import __version__
+from ..resource_paths import app_dir
 from ..ai_client import AIClient, build_system_prompt
 from ..rpgmaker_mv import RPGMakerMVParser
 from ..tyranoscript import TyranoScriptParser
@@ -204,6 +56,8 @@ from .event_viewer import EventViewerPanel
 from .model_suggestion_dialog import ModelSuggestionDialog
 from .pipeline_bar import PipelineBar
 from .background_task import run_in_thread, running_count, wait_all
+from . import theme
+from .welcome_page import WelcomePage
 
 
 class MainWindow(QMainWindow):
@@ -219,13 +73,22 @@ class MainWindow(QMainWindow):
         "or", "but", "nor", "by", "with", "from", "as", "is", "vs",
     }
 
-    # Settings file lives next to main.py
-    _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "_settings.json")
+    _APP_TITLE = f"RPG Maker Translator v{__version__}"
+
+    # Settings file lives next to main.py (or next to the .exe when frozen)
+    _SETTINGS_FILE = os.path.join(app_dir(), "_settings.json")
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RPG Maker Translator — Local LLM")
-        self.setMinimumSize(1200, 700)
+        self.setWindowTitle(self._APP_TITLE)
+        icon_file = theme.icon_path("app.svg")
+        if icon_file:
+            from PyQt6.QtGui import QIcon
+            QApplication.setWindowIcon(QIcon(icon_file))  # dialogs inherit it
+        # Small enough for a 1366x768 laptop at 125% scaling; the default
+        # size (and any remembered geometry) is applied in _restore_window_state
+        self.setMinimumSize(960, 600)
+        self.resize(1400, 900)
 
         # Core objects
         self.client = AIClient()
@@ -297,7 +160,10 @@ class MainWindow(QMainWindow):
         self._build_menubar()
         self._build_toolbar()
         self._build_statusbar()
+        self._build_welcome()
+        self._polish_actions()
         self._connect_signals()
+        self._restore_window_state()
         self.pipeline_bar.step_requested.connect(self._on_pipeline_step)
 
         # Apply dark mode by default
@@ -336,7 +202,11 @@ class MainWindow(QMainWindow):
         text_tab.addWidget(left_panel)
         self.trans_table = TranslationTable()
         text_tab.addWidget(self.trans_table)
-        text_tab.setSizes([250, 950])
+        text_tab.setStretchFactor(0, 0)
+        text_tab.setStretchFactor(1, 1)
+        text_tab.setCollapsible(1, False)
+        text_tab.setSizes([260, 1140])
+        self.text_splitter = text_tab
         self.tabs.addTab(text_tab, "Text Translation")
 
         # Tab 2: Image Translation
@@ -359,8 +229,68 @@ class MainWindow(QMainWindow):
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
         central_layout.addWidget(self.pipeline_bar)
-        central_layout.addWidget(self.tabs, 1)
+        # Welcome page (no project) and the workspace tabs share one slot
+        from PyQt6.QtWidgets import QStackedWidget
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self.tabs)
+        central_layout.addWidget(self._stack, 1)
         self.setCentralWidget(central)
+
+    def _build_welcome(self):
+        """Start page shown until a project is opened (needs menu actions)."""
+        self._welcome = WelcomePage(self.open_action, self.load_action)
+        self._stack.addWidget(self._welcome)
+        self._show_workspace(False)
+
+    def _show_workspace(self, show: bool):
+        """Switch between the welcome page and the project workspace."""
+        self._stack.setCurrentWidget(self.tabs if show else self._welcome)
+
+    def _polish_actions(self):
+        """Make menu help discoverable: tooltips on hover + status-bar tips."""
+        for menu in self.menuBar().findChildren(QMenu):
+            menu.setToolTipsVisible(True)
+        for action in self.findChildren(QAction):
+            tip = action.toolTip()
+            # Qt's default tooltip is just the text — only real help text counts
+            if tip and tip.replace("&&", "&") != action.text().replace("&&", "&"):
+                action.setStatusTip(tip.split("\n")[0])
+
+    # ── Window geometry persistence ────────────────────────────────
+
+    def _restore_window_state(self):
+        """Restore window size/position and splitter layout from settings."""
+        ui = getattr(self, "_ui_state", None) or {}
+        geo = ui.get("geometry")
+        if not geo:
+            # First launch: 1400x900, but never larger than the screen
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                w = min(1400, int(avail.width() * 0.92))
+                h = min(900, int(avail.height() * 0.92))
+                self.resize(max(w, self.minimumWidth()),
+                            max(h, self.minimumHeight()))
+                frame = self.frameGeometry()
+                frame.moveCenter(avail.center())
+                self.move(frame.topLeft())
+        try:
+            if geo:
+                self.restoreGeometry(QByteArray.fromBase64(geo.encode("ascii")))
+            split = ui.get("text_splitter")
+            if split:
+                self.text_splitter.restoreState(
+                    QByteArray.fromBase64(split.encode("ascii")))
+        except (AttributeError, ValueError, TypeError):
+            pass  # Corrupt/foreign value — keep the defaults
+
+    def _capture_window_state(self) -> dict:
+        def b64(data) -> str:
+            return bytes(data.toBase64()).decode("ascii")
+        return {
+            "geometry": b64(self.saveGeometry()),
+            "text_splitter": b64(self.text_splitter.saveState()),
+        }
 
     def _build_menubar(self):
         """Build the menu bar with organized menus."""
@@ -369,25 +299,28 @@ class MainWindow(QMainWindow):
         # ── Project menu ──────────────────────────────────────────
         project_menu = menubar.addMenu("Project")
 
-        self.open_action = QAction("Open Project...", self)
+        self.open_action = QAction("Open Project\u2026", self)
         self.open_action.setShortcut("Ctrl+O")
+        self.open_action.setToolTip("Open a game folder (engine is detected automatically)")
         self.open_action.triggered.connect(self._open_project)
         project_menu.addAction(self.open_action)
 
         self.save_action = QAction("Save State", self)
         self.save_action.setShortcut("Ctrl+S")
+        self.save_action.setToolTip("Save translation progress to _translation_state.json")
         self.save_action.triggered.connect(self._save_state)
         self.save_action.setEnabled(False)
         project_menu.addAction(self.save_action)
 
-        self.save_as_action = QAction("Save State As...", self)
+        self.save_as_action = QAction("Save State As\u2026", self)
         self.save_as_action.setShortcut("Ctrl+Shift+S")
         self.save_as_action.triggered.connect(self._save_state_as)
         self.save_as_action.setEnabled(False)
         project_menu.addAction(self.save_as_action)
 
-        self.load_action = QAction("Load State...", self)
+        self.load_action = QAction("Load State\u2026", self)
         self.load_action.setShortcut("Ctrl+L")
+        self.load_action.setToolTip("Resume from a saved translation state file")
         self.load_action.triggered.connect(self._load_state)
         project_menu.addAction(self.load_action)
 
@@ -395,13 +328,15 @@ class MainWindow(QMainWindow):
 
         self.close_action = QAction("Close Project", self)
         self.close_action.setShortcut("Ctrl+W")
+        self.close_action.setToolTip("Close the current project")
         self.close_action.triggered.connect(self._close_project)
         self.close_action.setEnabled(False)
         project_menu.addAction(self.close_action)
 
         project_menu.addSeparator()
 
-        self.rename_action = QAction("Rename Folder...", self)
+        self.rename_action = QAction("Rename Folder\u2026", self)
+        self.rename_action.setToolTip("Rename the game folder to \"English Title - WIP\"")
         self.rename_action.triggered.connect(self._rename_folder)
         self.rename_action.setEnabled(False)
         project_menu.addAction(self.rename_action)
@@ -409,7 +344,7 @@ class MainWindow(QMainWindow):
         # Import submenu
         import_menu = project_menu.addMenu("Import")
 
-        self.import_action = QAction("From Save State...", self)
+        self.import_action = QAction("From Save State\u2026", self)
         self.import_action.setToolTip(
             "Import translations from an older version's save state"
         )
@@ -417,7 +352,7 @@ class MainWindow(QMainWindow):
         self.import_action.setEnabled(False)
         import_menu.addAction(self.import_action)
 
-        self.import_folder_action = QAction("From Game Folder...", self)
+        self.import_folder_action = QAction("From Game Folder\u2026", self)
         self.import_folder_action.setToolTip(
             "Import translations from an already-translated game folder"
         )
@@ -425,7 +360,7 @@ class MainWindow(QMainWindow):
         self.import_folder_action.setEnabled(False)
         import_menu.addAction(self.import_folder_action)
 
-        self.scan_plugin_edits_action = QAction("Plugin Parameters...", self)
+        self.scan_plugin_edits_action = QAction("Plugin Parameters\u2026", self)
         self.scan_plugin_edits_action.setToolTip(
             "Compare two plugins.js files and import translated parameters"
         )
@@ -468,7 +403,7 @@ class MainWindow(QMainWindow):
         self.cleanup_action.setEnabled(False)
         translate_menu.addAction(self.cleanup_action)
 
-        self.wordwrap_action = QAction("4. Wrap Text to Lines", self)
+        self.wordwrap_action = QAction("4. Wrap Text to Lines\u2026", self)
         self.wordwrap_action.setToolTip(
             "Redistribute translated text across lines to fit message window width"
         )
@@ -479,13 +414,16 @@ class MainWindow(QMainWindow):
         translate_menu.addSeparator()
 
         self.stop_action = QAction("Stop", self)
+        self.stop_action.setToolTip(
+            "Stop the running translation after the current requests finish. "
+            "Completed entries are kept.")
         self.stop_action.triggered.connect(self._stop_translation)
         self.stop_action.setEnabled(False)
         translate_menu.addAction(self.stop_action)
 
         translate_menu.addSeparator()
 
-        self.find_replace_action = QAction("Find && Replace...", self)
+        self.find_replace_action = QAction("Find && Replace\u2026", self)
         self.find_replace_action.setShortcut("Ctrl+H")
         self.find_replace_action.setToolTip("Find and replace text in translations")
         self.find_replace_action.triggered.connect(self.trans_table.show_replace_bar)
@@ -502,7 +440,7 @@ class MainWindow(QMainWindow):
         self.batch_action.setEnabled(False)
         advanced_menu.addAction(self.batch_action)
 
-        self.batch_actor_action = QAction("Batch by Actor", self)
+        self.batch_actor_action = QAction("Batch by Actor\u2026", self)
         self.batch_actor_action.setShortcut("Ctrl+Shift+A")
         self.batch_actor_action.setToolTip(
             "Translate dialogue grouped by speaker — female speakers first, "
@@ -551,7 +489,7 @@ class MainWindow(QMainWindow):
         translate_menu.addSeparator()
 
         self.translate_images_action = QAction(
-            "Translate Images (Experimental)...", self)
+            "Translate Images (Experimental)\u2026", self)
         self.translate_images_action.setShortcut("Ctrl+I")
         self.translate_images_action.setToolTip(
             "OCR Japanese text from game images, translate, and render English overlays"
@@ -563,13 +501,15 @@ class MainWindow(QMainWindow):
         # ── Glossary menu ─────────────────────────────────────────
         glossary_menu = menubar.addMenu("Glossary")
 
-        self.edit_glossary_action = QAction("Edit Glossary...", self)
+        self.edit_glossary_action = QAction("Edit Glossary\u2026", self)
+        self.edit_glossary_action.setToolTip(
+            "Edit the general (all projects) and project glossaries")
         self.edit_glossary_action.triggered.connect(self._open_glossary)
         glossary_menu.addAction(self.edit_glossary_action)
 
         glossary_menu.addSeparator()
 
-        self.load_vocab_action = QAction("Import Vocab File...", self)
+        self.load_vocab_action = QAction("Import Vocab File\u2026", self)
         self.load_vocab_action.setToolTip(
             "Import a DazedMTL-style vocab.txt into project glossary"
         )
@@ -577,7 +517,7 @@ class MainWindow(QMainWindow):
         self.load_vocab_action.setEnabled(False)
         glossary_menu.addAction(self.load_vocab_action)
 
-        self.export_vocab_action = QAction("Export Vocab File...", self)
+        self.export_vocab_action = QAction("Export Vocab File\u2026", self)
         self.export_vocab_action.setToolTip(
             "Export glossary as a DazedMTL-compatible vocab.txt"
         )
@@ -588,7 +528,7 @@ class MainWindow(QMainWindow):
         glossary_menu.addSeparator()
 
         self.scan_glossary_action = QAction(
-            "Scan Translated Game...", self)
+            "Scan Translated Game\u2026", self)
         self.scan_glossary_action.setToolTip(
             "Open a translated game folder and harvest JP\u2192EN pairs "
             "to add to your general glossary"
@@ -599,7 +539,7 @@ class MainWindow(QMainWindow):
         glossary_menu.addAction(self.scan_glossary_action)
 
         self.scan_project_glossary_action = QAction(
-            "Build from Translations", self)
+            "Build from Translations\u2026", self)
         self.scan_project_glossary_action.setToolTip(
             "Scan this project's translations for terms to add "
             "to your general glossary"
@@ -611,7 +551,7 @@ class MainWindow(QMainWindow):
 
         glossary_menu.addSeparator()
 
-        self.apply_glossary_action = QAction("Apply Glossary to All", self)
+        self.apply_glossary_action = QAction("Apply Glossary to All\u2026", self)
         self.apply_glossary_action.setToolTip(
             "Find translated entries where glossary terms are inconsistent "
             "and offer to fix them"
@@ -651,7 +591,7 @@ class MainWindow(QMainWindow):
 
         game_menu.addSeparator()
 
-        self.txt_export_action = QAction("Export Raw Text...", self)
+        self.txt_export_action = QAction("Export Raw Text\u2026", self)
         self.txt_export_action.setToolTip(
             "Export all original and translated text to a plain text file"
         )
@@ -659,7 +599,7 @@ class MainWindow(QMainWindow):
         self.txt_export_action.setEnabled(False)
         game_menu.addAction(self.txt_export_action)
 
-        self.create_patch_action = QAction("Share Translation Data...", self)
+        self.create_patch_action = QAction("Share Translation Data\u2026", self)
         self.create_patch_action.setToolTip(
             "Export translation mappings as a zip for other translators "
             "(no game data, copyright-safe)"
@@ -668,7 +608,7 @@ class MainWindow(QMainWindow):
         self.create_patch_action.setEnabled(False)
         game_menu.addAction(self.create_patch_action)
 
-        self.export_zip_action = QAction("Create Install Package...", self)
+        self.export_zip_action = QAction("Create Install Package\u2026", self)
         self.export_zip_action.setToolTip(
             "Export translated game files + install.bat as a zip \u2014 "
             "end users just extract and run"
@@ -678,7 +618,7 @@ class MainWindow(QMainWindow):
         game_menu.addAction(self.export_zip_action)
 
         self.export_folder_zip_action = QAction(
-            "Create Patch from Game Folder...", self
+            "Create Patch from Game Folder\u2026", self
         )
         self.export_folder_zip_action.setToolTip(
             "Package a game folder's current data/ files into a zip \u2014 "
@@ -691,8 +631,28 @@ class MainWindow(QMainWindow):
 
         # ── Settings (top-level action) ───────────────────────────
         self.settings_action = QAction("Settings", self)
+        self.settings_action.setShortcut("Ctrl+,")
+        self.settings_action.setToolTip(
+            "Model, provider, prompt, word wrap and appearance (Ctrl+,)")
         self.settings_action.triggered.connect(self._open_settings)
         menubar.addAction(self.settings_action)
+
+        # ── Help menu ─────────────────────────────────────────────
+        help_menu = menubar.addMenu("Help")
+        about_action = QAction("About RPG Maker Translator…", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+
+    def _show_about(self):
+        QMessageBox.about(
+            self, "About RPG Maker Translator",
+            f"<b>RPG Maker Translator</b> v{__version__}<br><br>"
+            "Local-LLM translation tool for RPG Maker and visual novel games.<br><br>"
+            "Licensed under the Business Source License 1.1 — free for "
+            "non-commercial use.<br>"
+            '<a href="https://github.com/MoriTranslates/rpgmaker-translator">'
+            "github.com/MoriTranslates/rpgmaker-translator</a>",
+        )
 
     def _build_toolbar(self):
         """Build a slim toolbar with quick-access controls."""
@@ -707,6 +667,18 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.stop_action)
         toolbar.addSeparator()
         toolbar.addAction(self.export_action)
+        stop_btn = toolbar.widgetForAction(self.stop_action)
+        if stop_btn is not None:
+            stop_btn.setObjectName("stopButton")  # red while a run is active
+        # Toolbar buttons show the shortcut in their tooltip (set on the
+        # action — QToolButton re-syncs its tooltip whenever the action changes)
+        for action in (self.batch_db_action, self.batch_dialogue_action,
+                       self.export_action):
+            keys = action.shortcut().toString(
+                QKeySequence.SequenceFormat.NativeText)
+            if keys and keys not in action.toolTip():
+                action.setToolTip(f"{action.toolTip()}  ({keys})")
+        self.toolbar = toolbar
 
     def _build_statusbar(self):
         """Build the bottom status bar with progress."""
@@ -714,7 +686,8 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.statusbar)
 
         self.progress_bar = QProgressBar()
-        self.progress_bar.setFixedWidth(300)
+        self.progress_bar.setMinimumWidth(180)
+        self.progress_bar.setMaximumWidth(320)
         self.progress_bar.setVisible(False)
         self.statusbar.addPermanentWidget(self.progress_bar)
 
@@ -726,6 +699,10 @@ class MainWindow(QMainWindow):
         # File tree
         self.file_tree.file_selected.connect(self._filter_by_file)
         self.file_tree.all_selected.connect(self._show_all_entries)
+
+        # Ctrl+F jumps to the table's search box from anywhere in the window
+        self._find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        self._find_shortcut.activated.connect(self._focus_search)
 
         # Translation table
         self.trans_table.translate_requested.connect(self._translate_selected)
@@ -749,6 +726,13 @@ class MainWindow(QMainWindow):
         self.engine.checkpoint.connect(self._on_checkpoint)
         self.engine.finished.connect(self._on_batch_finished)
         self.engine.server_down.connect(self._on_server_down)
+
+    def _focus_search(self):
+        if not self.project.entries:
+            return
+        self.tabs.setCurrentIndex(0)
+        self.trans_table.search_edit.setFocus()
+        self.trans_table.search_edit.selectAll()
 
     # ── Actions ────────────────────────────────────────────────────
 
@@ -871,11 +855,25 @@ class MainWindow(QMainWindow):
                 progress.setValue(0)
                 QApplication.processEvents()
 
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusbar.showMessage(f"Reading {os.path.basename(path)}\u2026")
+        self.statusbar.repaint()
         try:
             entries = self.handler.load_project(path)
         except FileNotFoundError as e:
-            QMessageBox.warning(self, "Error", str(e))
+            QApplication.restoreOverrideCursor()
+            self.statusbar.clearMessage()
+            QMessageBox.warning(
+                self, "Can't Open Project",
+                f"{e}\n\nPick the game's top-level folder (the one that "
+                "contains the game .exe).")
             return
+        except Exception:
+            QApplication.restoreOverrideCursor()
+            raise
+        else:
+            QApplication.restoreOverrideCursor()
+            self.statusbar.clearMessage()
         finally:
             # Close progress dialog if it was opened
             if self._project_type == "wolfrpg" and 'progress' in locals():
@@ -1044,7 +1042,8 @@ class MainWindow(QMainWindow):
 
         self.pipeline_bar.setVisible(False)
 
-        self.setWindowTitle("RPG Maker Translator")
+        self.setWindowTitle(self._APP_TITLE)
+        self._show_workspace(False)
         self.statusbar.showMessage("Project closed.", 5000)
 
     # ── Project lifecycle helpers ─────────────────────────────────
@@ -1848,7 +1847,11 @@ class MainWindow(QMainWindow):
         try:
             project = TranslationProject.load_state(path)
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to load state:\n{e}")
+            QMessageBox.warning(
+                self, "Can't Load Save State",
+                f"The save file could not be read:\n{e}\n\n"
+                "If it was written by a newer version or edited by hand, try "
+                "the autosave (_translation_autosave.json) in the game folder.")
             return False
         self._reset_project_runtime_state()
         self.project = project
@@ -1933,6 +1936,7 @@ class MainWindow(QMainWindow):
     def _enable_project_actions(self):
         """Enable all project-dependent menu actions."""
         has_path = bool(self.project.project_path)
+        self._show_workspace(True)
         for action in self._project_actions():
             action.setEnabled(True)
         # Actions that need the game folder on disk
@@ -2100,7 +2104,8 @@ class MainWindow(QMainWindow):
         try:
             old_project = TranslationProject.load_state(path)
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to load old state:\n{e}")
+            QMessageBox.warning(self, "Can't Load Save State",
+                                f"The old save file could not be read:\n{e}")
             return
 
         old_translated = sum(
@@ -2165,11 +2170,12 @@ class MainWindow(QMainWindow):
         try:
             donor_entries = parser.load_project_raw(folder)
         except FileNotFoundError as e:
-            QMessageBox.warning(self, "Error", str(e))
+            QMessageBox.warning(self, "Can't Read Game Folder", str(e))
             return
         except Exception as e:
             QMessageBox.warning(
-                self, "Error", f"Failed to parse game folder:\n{e}"
+                self, "Can't Read Game Folder",
+                f"Failed to read the game folder:\n{e}"
             )
             return
 
@@ -2486,7 +2492,8 @@ class MainWindow(QMainWindow):
         try:
             glossary, genders = self._parse_vocab_file(filepath)
         except (OSError, UnicodeDecodeError) as e:
-            QMessageBox.warning(self, "Error", f"Failed to read file:\n{e}")
+            QMessageBox.warning(self, "Can't Read Vocab File",
+                                f"The file could not be read:\n{e}")
             return
 
         if not glossary:
@@ -2602,11 +2609,12 @@ class MainWindow(QMainWindow):
         try:
             donor_entries = parser.load_project_raw(folder)
         except FileNotFoundError as e:
-            QMessageBox.warning(self, "Error", str(e))
+            QMessageBox.warning(self, "Can't Read Game Folder", str(e))
             return
         except Exception as e:
             QMessageBox.warning(
-                self, "Error", f"Failed to parse game folder:\n{e}")
+                self, "Can't Read Game Folder",
+                f"Failed to read the game folder:\n{e}")
             return
 
         if not donor_entries:
@@ -2778,7 +2786,10 @@ class MainWindow(QMainWindow):
     def _export_to_game(self):
         """Write translations back to game files."""
         if not self.project.project_path:
-            QMessageBox.warning(self, "Error", "No project path set. Open a project first.")
+            QMessageBox.warning(
+                self, "No Game Folder",
+                "This project has no game folder on disk.\n\n"
+                "Open the game folder with Project \u203a Open Project\u2026 first.")
             return
 
         translated = [e for e in self.project.entries if e.status in ("translated", "reviewed")]
@@ -2837,8 +2848,15 @@ class MainWindow(QMainWindow):
             # Sync font setting to parser before export
             if hasattr(self.parser, 'game_font'):
                 self.parser.game_font = self._game_font
-            self.handler.save_project(
-                self.project.project_path, self.project.entries)
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self.statusbar.showMessage("Writing translations to game files…")
+            self.statusbar.repaint()  # paint now; no input re-entrancy
+            try:
+                self.handler.save_project(
+                    self.project.project_path, self.project.entries)
+            finally:
+                QApplication.restoreOverrideCursor()
+                self.statusbar.clearMessage()
 
             # MV/MZ post-export: plugin injection
             plugin_msg = ""
@@ -2897,9 +2915,7 @@ class MainWindow(QMainWindow):
             return ""
 
         # Check local cache
-        app_dir = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))))
-        tools_dir = os.path.join(app_dir, "tools")
+        tools_dir = os.path.join(app_dir(), "tools")
         cached = os.path.join(tools_dir, "easyrpg-player.exe")
 
         if not os.path.isfile(cached):
@@ -2941,6 +2957,16 @@ class MainWindow(QMainWindow):
 
         # Engines with parser-based restore (everything except MV/MZ)
         if hasattr(self.handler.parser, 'restore_originals') and self._project_type not in ("rpgmaker_mv", "rpgmaker_mz"):
+            reply = QMessageBox.question(
+                self, "Restore Original Game Files",
+                "This will overwrite the game's translated files with the "
+                "original Japanese versions from backup.\n\n"
+                "Your translation state is NOT affected \u2014 only the game "
+                "files.\n\nContinue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
             try:
                 self.handler.restore_originals(self.project.project_path)
                 QMessageBox.information(
@@ -2958,7 +2984,10 @@ class MainWindow(QMainWindow):
         backup_dir = data_dir + "_original" if data_dir else None
 
         if not data_dir:
-            QMessageBox.warning(self, "Error", "Could not find data directory.")
+            QMessageBox.warning(
+                self, "Data Folder Not Found",
+                "Could not find the game's data/ folder.\n\n"
+                "Make sure the project points at the game's top-level folder.")
             return
 
         if not backup_dir or not os.path.isdir(backup_dir):
@@ -3024,7 +3053,8 @@ class MainWindow(QMainWindow):
     def _open_in_rpgmaker(self):
         """Create a workspace project with directory junctions and open in RPG Maker."""
         if not self.project or not self.project.project_path:
-            QMessageBox.warning(self, "Error", "No project loaded.")
+            QMessageBox.warning(self, "No Project Open",
+                                "Open a game folder first (Project \u203a Open Project\u2026).")
             return
 
         project_path = self.project.project_path
@@ -3033,7 +3063,7 @@ class MainWindow(QMainWindow):
         content_root = self.parser.find_content_root(project_path)
         if not content_root:
             QMessageBox.warning(
-                self, "Error",
+                self, "Data Folder Not Found",
                 "Could not find game data directory.\n"
                 "Make sure the project has a data/ folder."
             )
@@ -3043,7 +3073,7 @@ class MainWindow(QMainWindow):
         engine = self.parser.detect_engine(project_path)
         if not engine:
             QMessageBox.warning(
-                self, "Error",
+                self, "Unknown RPG Maker Version",
                 "Could not detect RPG Maker version.\n"
                 "Expected rpg_core.js (MV) or rmmz_core.js (MZ) in the js/ folder."
             )
@@ -3646,13 +3676,17 @@ class MainWindow(QMainWindow):
     # ── Dark mode ──────────────────────────────────────────────────
 
     def _apply_dark_mode(self):
-        """Apply or remove dark stylesheet."""
-        app = QApplication.instance()
-        if self._dark_mode:
-            app.setStyleSheet(DARK_STYLESHEET)
-        else:
-            app.setStyleSheet("")
+        """Apply the dark (Catppuccin Mocha) or light (Latte) theme everywhere."""
+        theme.apply(self._dark_mode)
+        # Widgets that paint per-item colors re-read the palette
+        self.trans_table.set_dark_mode(self._dark_mode)
         self.event_viewer.set_dark_mode(self._dark_mode)
+        self.queue_panel.apply_theme()
+        self.pipeline_bar.apply_theme()
+        self.gpu_monitor.apply_theme()
+        self.image_panel.apply_theme()
+        self.file_tree.apply_theme()
+        self._welcome.apply_theme()
 
     # ── Glossary merge ─────────────────────────────────────────────
 
@@ -3759,6 +3793,8 @@ class MainWindow(QMainWindow):
             self.parser.extract_comments = cfg["extract_comments"]
         if "engine_settings" in cfg and isinstance(cfg["engine_settings"], dict):
             self._engine_overrides = cfg["engine_settings"]
+        if isinstance(cfg.get("ui_state"), dict):
+            self._ui_state = cfg["ui_state"]
 
     def _save_settings(self):
         """Persist current settings to _settings.json."""
@@ -3791,6 +3827,9 @@ class MainWindow(QMainWindow):
             "game_font": getattr(self, "_game_font", "Consolas"),
             "extract_comments": self.parser.extract_comments,
             "engine_settings": self._engine_overrides,
+            "ui_state": (self._capture_window_state()
+                         if hasattr(self, "text_splitter")
+                         else getattr(self, "_ui_state", {})),
         }
         # Atomic write: a crash mid-write must never leave a truncated file
         tmp = self._SETTINGS_FILE + ".tmp"
@@ -4281,7 +4320,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dlg)
 
         header = QLabel("Word Wrap Settings")
-        header.setStyleSheet("font-size: 15px; font-weight: bold; margin-bottom: 4px;")
+        header.setStyleSheet("font-size: 12pt; font-weight: bold; margin-bottom: 4px;")
         layout.addWidget(header)
 
         info = QLabel(
@@ -4342,7 +4381,9 @@ class MainWindow(QMainWindow):
         scenario_dir = self.tyrano_parser._find_scenario_dir(
             self.project.project_path)
         if not scenario_dir:
-            QMessageBox.warning(self, "Error", "Cannot find scenario directory.")
+            QMessageBox.warning(
+                self, "Scenario Folder Not Found",
+                "Cannot find the data/scenario folder for this TyranoScript game.")
             return
 
         from pathlib import Path
@@ -4362,7 +4403,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dlg)
 
         header = QLabel("TyranoScript Word Wrap")
-        header.setStyleSheet("font-size: 15px; font-weight: bold; margin-bottom: 4px;")
+        header.setStyleSheet("font-size: 12pt; font-weight: bold; margin-bottom: 4px;")
         layout.addWidget(header)
 
         info = QLabel(
@@ -4426,7 +4467,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dlg)
 
         header = QLabel("SRPG Studio Word Wrap")
-        header.setStyleSheet("font-size: 15px; font-weight: bold;")
+        header.setStyleSheet("font-size: 12pt; font-weight: bold;")
         layout.addWidget(header)
 
         # Chars per line spinner
@@ -5225,7 +5266,8 @@ class MainWindow(QMainWindow):
                 f"This file contains NO game data — safe to distribute."
             )
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to create patch:\n{e}")
+            QMessageBox.warning(self, "Patch Not Created",
+                                f"Failed to create the patch:\n{e}")
 
     def _export_patch_zip(self):
         """Export translated game files + install.bat as a distributable zip."""
@@ -5344,7 +5386,8 @@ class MainWindow(QMainWindow):
                 f"End users: extract into the game folder and run install.bat."
             )
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to create patch zip:\n{e}")
+            QMessageBox.warning(self, "Package Not Created",
+                                f"Failed to create the install package:\n{e}")
 
     def _export_game_as_patch(self):
         """Package a game folder's current files into a distributable zip.
@@ -5438,7 +5481,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Patch Created", msg)
         except Exception as e:
             QMessageBox.warning(
-                self, "Error", f"Failed to create patch zip:\n{e}"
+                self, "Patch Not Created", f"Failed to create the patch zip:\n{e}"
             )
 
     # ── Re-translate with diff ─────────────────────────────────────
@@ -5673,7 +5716,8 @@ class MainWindow(QMainWindow):
     def _translate_images(self):
         """Switch to Image Translation tab and initialize it."""
         if not self.project.project_path:
-            QMessageBox.warning(self, "Error", "Open a project first.")
+            QMessageBox.warning(self, "No Project Open",
+                                "Open a game folder first (Project \u203a Open Project\u2026).")
             return
 
         self.image_panel.set_project(self.project.project_path, self.client)

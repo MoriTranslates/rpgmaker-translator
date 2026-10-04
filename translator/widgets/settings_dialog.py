@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QComboBox, QPlainTextEdit, QPushButton,
     QLabel, QGroupBox, QMessageBox, QSpinBox,
     QCheckBox, QApplication, QProgressDialog, QTabWidget, QWidget,
-    QSizePolicy,
+    QSizePolicy, QScrollArea, QFrame,
 )
 from PyQt6.QtCore import Qt, QThread, QEventLoop, pyqtSignal
 
@@ -17,6 +17,7 @@ from ..ai_client import (
 )
 from ..rpgmaker_mv import RPGMakerMVParser
 from .model_suggestion_dialog import ModelSuggestionDialog, normalize_model_tag
+from . import theme
 
 
 class _ModelFetcher(QThread):
@@ -76,7 +77,8 @@ class SettingsDialog(QDialog):
         self.engine_overrides = engine_overrides or {}
         self.engine_handlers = engine_handlers or {}
         self.setWindowTitle("Settings")
-        self.setMinimumSize(600, 500)
+        self.setMinimumSize(620, 520)
+        self.resize(680, 640)
         self._build_ui()
         self._load_current()
 
@@ -97,6 +99,8 @@ class SettingsDialog(QDialog):
         btn_row.addStretch()
 
         save_btn = QPushButton("Save")
+        save_btn.setDefault(True)
+        theme.make_primary(save_btn)
         save_btn.clicked.connect(self._save)
         btn_row.addWidget(save_btn)
 
@@ -367,7 +371,7 @@ class SettingsDialog(QDialog):
         vbox.addWidget(self.dark_mode_check)
 
         vbox.addStretch()
-        self.tabs.addTab(tab, "Options")
+        self._add_scroll_tab(tab, "Options")
 
     # ── Tab 4: Engines ─────────────────────────────────────────────
 
@@ -382,7 +386,7 @@ class SettingsDialog(QDialog):
             "then customize individual engines as needed."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color: #a6adc8; margin-bottom: 8px;")
+        info.setStyleSheet(theme.hint_css() + " margin-bottom: 8px;")
         vbox.addWidget(info)
 
         # Columns: Engine | Context | Batch | Workers | Model
@@ -443,7 +447,7 @@ class SettingsDialog(QDialog):
 
         # No model combo for default row — model is always per-engine or global
         default_model_label = QLabel("  (set per engine)")
-        default_model_label.setStyleSheet("color: #6c7086;")
+        default_model_label.setStyleSheet(theme.hint_css())
         self.engine_table.setCellWidget(0, 4, default_model_label)
 
         # ── Engine rows ──
@@ -496,7 +500,7 @@ class SettingsDialog(QDialog):
                 (key, ctx_spin, batch_spin, workers_spin, model_combo))
 
         self.engine_table.resizeRowsToContents()
-        vbox.addWidget(self.engine_table)
+        vbox.addWidget(self.engine_table, 1)
 
         # Reset to defaults button
         reset_btn = QPushButton("Reset All to Defaults")
@@ -508,7 +512,18 @@ class SettingsDialog(QDialog):
         vbox.addLayout(btn_row)
 
         vbox.addStretch()
-        self.tabs.addTab(tab, "Engines")
+        self._add_scroll_tab(tab, "Engines")
+
+    def _add_scroll_tab(self, page: QWidget, title: str):
+        """Add a tall tab inside a scroll area so it never gets squashed
+        (small screens / 150% scaling) — it scrolls instead."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        self.tabs.addTab(scroll, title)
 
     def _on_default_changed(self):
         """Push Default row values to all engine rows."""
@@ -654,7 +669,7 @@ class SettingsDialog(QDialog):
                 self.model_combo.setCurrentText(current)
             self.model_combo.blockSignals(False)
             self.status_label.setText(f"{provider}: {len(models)} model(s) available")
-            self.status_label.setStyleSheet("color: #89b4fa;")
+            self.status_label.setStyleSheet(f"color: {theme.c('accent')};")
         elif is_ollama:
             # Fetch models from Ollama in background
             self.status_label.setStyleSheet("")
@@ -807,11 +822,11 @@ class SettingsDialog(QDialog):
             if current in models:
                 self.model_combo.setCurrentText(current)
             self.status_label.setText(f"Found {len(models)} model(s)")
-            self.status_label.setStyleSheet("color: green;")
+            self.status_label.setStyleSheet(f"color: {theme.c('ok')};")
         else:
             self.model_combo.setCurrentText(current)
             self.status_label.setText("Could not fetch models -- is Ollama running?")
-            self.status_label.setStyleSheet("color: red;")
+            self.status_label.setStyleSheet(f"color: {theme.c('error')};")
         self.model_combo.blockSignals(False)
         # Only trigger model-changed if the model actually changed
         new_model = self.model_combo.currentText()
@@ -927,12 +942,12 @@ class SettingsDialog(QDialog):
                 self.model_hint_label.setText(
                     "Sugoi detected \u2014 DazedMTL Full prompt recommended (click Reset Default)"
                 )
-                self.model_hint_label.setStyleSheet("color: #a6e3a1;")
+                self.model_hint_label.setStyleSheet(f"color: {theme.c('ok')};")
             else:
                 self.model_hint_label.setText(
                     "Sugoi is JP\u2192EN only \u2014 using general prompt for " + current_lang
                 )
-                self.model_hint_label.setStyleSheet("color: #fab387;")
+                self.model_hint_label.setStyleSheet(f"color: {theme.c('caution')};")
         else:
             self.model_hint_label.setText("")
 

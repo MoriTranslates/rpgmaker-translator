@@ -11,6 +11,8 @@ venv/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.ruff_cache/
 
 # IDE
 .vscode/
@@ -27,6 +29,11 @@ _reference/
 
 # Settings (contains API keys)
 _settings.json
+_settings.json.bak
+
+# Runtime files written next to the app
+_error.log
+tools/
 
 # Benchmark
 benchmark/

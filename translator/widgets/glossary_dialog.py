@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..default_glossary import CATEGORIES as DEFAULT_GLOSSARY_CATEGORIES
+from . import theme
 
 
 class GlossaryDialog(QDialog):
@@ -124,6 +125,8 @@ class GlossaryDialog(QDialog):
         btn_row.addStretch()
 
         save_btn = QPushButton("Save")
+        save_btn.setDefault(True)
+        theme.make_primary(save_btn)
         save_btn.clicked.connect(self._save)
         btn_row.addWidget(save_btn)
 
@@ -167,7 +170,25 @@ class GlossaryDialog(QDialog):
         for row in rows:
             self.general_table.removeRow(row)
 
+    def _confirm_clear(self, table, label: str) -> bool:
+        filled = sum(
+            1 for r in range(table.rowCount())
+            if (table.item(r, 0) and table.item(r, 0).text().strip()))
+        if not filled:
+            return True
+        reply = QMessageBox.question(
+            self, "Clear Glossary",
+            f"Remove all {filled} {label} glossary terms?\n\n"
+            "Nothing is saved until you press Save, so Cancel still "
+            "undoes this.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
     def _clear_general(self):
+        if not self._confirm_clear(self.general_table, "general"):
+            return
         self.general_table.setRowCount(0)
         self._add_general_row()
 
@@ -192,6 +213,8 @@ class GlossaryDialog(QDialog):
             self.project_table.removeRow(row)
 
     def _clear_project(self):
+        if not self._confirm_clear(self.project_table, "project"):
+            return
         self.project_table.setRowCount(0)
         self._add_project_row()
 

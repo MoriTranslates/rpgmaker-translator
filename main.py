@@ -10,10 +10,12 @@ import time
 import traceback
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
+from translator.resource_paths import app_dir
+from translator.version import __version__
 from translator.widgets.main_window import MainWindow
 
-# Error log lives next to _settings.json (project root)
-_ERROR_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_error.log")
+# Error log lives next to _settings.json (project root, or beside the .exe)
+_ERROR_LOG = os.path.join(app_dir(), "_error.log")
 
 _window = None
 _showing_error = False
@@ -68,6 +70,8 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("RPG Maker Translator")
+    app.setApplicationVersion(__version__)
+    app.setOrganizationName("MoriTranslates")
     app.setStyle("Fusion")
 
     _window = MainWindow()

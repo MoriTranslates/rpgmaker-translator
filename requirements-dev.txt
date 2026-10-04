@@ -1,2 +1,5 @@
+# Development / CI tooling.  Install with:  pip install -r requirements-dev.txt
 -r requirements.txt
-pytest>=8
+pytest>=9.1,<10
+ruff==0.16.10            # exact pin: new ruff releases can add findings
+pyinstaller>=6.18,<7     # Windows release bundle (packaging/rpgmaker_translator.spec)

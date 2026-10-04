@@ -5,6 +5,8 @@ import logging
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar
 from PyQt6.QtCore import QProcess, QTimer
 
+from . import theme
+
 log = logging.getLogger(__name__)
 
 _QUERY = "name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw"
@@ -21,6 +23,7 @@ class GPUMonitorPanel(QWidget):
     def __init__(self, parent=None, poll_ms: int = 2000):
         super().__init__(parent)
         self._available = False
+        self._temp = None
         self._build_ui()
         self._proc = QProcess(self)
         self._proc.finished.connect(self._on_proc_finished)
@@ -37,7 +40,7 @@ class GPUMonitorPanel(QWidget):
 
         # GPU name
         self._name_label = QLabel("GPU: detecting...")
-        self._name_label.setStyleSheet("font-weight: bold; font-size: 11px;")
+        self._name_label.setStyleSheet("font-weight: bold; font-size: 8pt;")
         layout.addWidget(self._name_label)
 
         # VRAM bar
@@ -45,7 +48,7 @@ class GPUMonitorPanel(QWidget):
         vram_row.setSpacing(4)
         self._vram_label = QLabel("VRAM:")
         self._vram_label.setFixedWidth(42)
-        self._vram_label.setStyleSheet("font-size: 11px;")
+        self._vram_label.setStyleSheet("font-size: 8pt;")
         vram_row.addWidget(self._vram_label)
 
         self._vram_bar = QProgressBar()
@@ -60,7 +63,7 @@ class GPUMonitorPanel(QWidget):
         util_row.setSpacing(4)
         self._util_label = QLabel("GPU:")
         self._util_label.setFixedWidth(42)
-        self._util_label.setStyleSheet("font-size: 11px;")
+        self._util_label.setStyleSheet("font-size: 8pt;")
         util_row.addWidget(self._util_label)
 
         self._util_bar = QProgressBar()
@@ -74,10 +77,10 @@ class GPUMonitorPanel(QWidget):
         stats_row = QHBoxLayout()
         stats_row.setSpacing(8)
         self._temp_label = QLabel("Temp: --")
-        self._temp_label.setStyleSheet("font-size: 11px;")
+        self._temp_label.setStyleSheet("font-size: 8pt;")
         stats_row.addWidget(self._temp_label)
         self._power_label = QLabel("Power: --")
-        self._power_label.setStyleSheet("font-size: 11px;")
+        self._power_label.setStyleSheet("font-size: 8pt;")
         stats_row.addWidget(self._power_label)
         stats_row.addStretch()
         layout.addLayout(stats_row)
@@ -142,12 +145,8 @@ class GPUMonitorPanel(QWidget):
 
         # Temp + Power
         self._temp_label.setText(f"Temp: {temp}\u00b0C")
-        if temp >= 80:
-            self._temp_label.setStyleSheet("font-size: 11px; color: #f38ba8;")
-        elif temp >= 65:
-            self._temp_label.setStyleSheet("font-size: 11px; color: #fab387;")
-        else:
-            self._temp_label.setStyleSheet("font-size: 11px; color: #a6e3a1;")
+        self._temp = temp
+        self._color_temp()
 
         self._power_label.setText(f"Power: {power:.0f}W")
 
@@ -167,22 +166,43 @@ class GPUMonitorPanel(QWidget):
         self._util_bar.setFormat("N/A")
         self._temp_label.setText("Temp: --")
         self._power_label.setText("Power: --")
+        self._temp = None
+        self._color_temp()
+
+    def _color_temp(self):
+        temp = getattr(self, "_temp", None)
+        if temp is None:
+            self._temp_label.setStyleSheet("font-size: 8pt;")
+            return
+        token = "error" if temp >= 80 else "caution" if temp >= 65 else "ok"
+        self._temp_label.setStyleSheet(
+            f"font-size: 8pt; color: {theme.c(token)};")
+
+    def apply_theme(self):
+        """Re-color bars/labels after a dark/light switch."""
+        self._color_bar(self._vram_bar, self._vram_bar.value())
+        self._color_bar(self._util_bar, self._util_bar.value())
+        self._color_temp()
 
     @staticmethod
     def _color_bar(bar: QProgressBar, pct: int):
-        """Color the progress bar based on percentage (Catppuccin palette)."""
+        """Color the progress bar based on percentage (theme palette)."""
         if pct >= 90:
-            color = "#f38ba8"  # red
+            token = "error"
         elif pct >= 70:
-            color = "#fab387"  # peach
+            token = "caution"
         elif pct >= 50:
-            color = "#f9e2af"  # yellow
+            token = "warn"
         else:
-            color = "#a6e3a1"  # green
+            token = "ok"
+        # Semi-transparent chunk keeps the centered text readable in both themes
+        chunk = theme.qcolor(token)
         bar.setStyleSheet(
-            f"QProgressBar {{ border: 1px solid #585b70; border-radius: 3px; "
-            f"background: #313244; font-size: 10px; color: #cdd6f4; }}"
-            f"QProgressBar::chunk {{ background: {color}; border-radius: 2px; }}"
+            f"QProgressBar {{ border: 1px solid {theme.c('border_strong')}; "
+            f"border-radius: 3px; background: {theme.c('field')}; "
+            f"font-size: 7pt; color: {theme.c('text')}; }}"
+            f"QProgressBar::chunk {{ background: rgba({chunk.red()}, "
+            f"{chunk.green()}, {chunk.blue()}, 150); border-radius: 2px; }}"
         )
 
     @property

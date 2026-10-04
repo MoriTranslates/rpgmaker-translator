@@ -12,8 +12,9 @@ import shutil
 from pathlib import Path
 
 from .image_translator import encrypt_to_rpgmvp, read_encryption_key
+from .resource_paths import resource_path
 
-_ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
+_ASSETS_DIR = resource_path("assets")
 _SPLASH_PNG = os.path.join(_ASSETS_DIR, "TranslationSplash.png")
 _PLUGIN_JS = os.path.join(_ASSETS_DIR, "plugins", "TranslationSplash.js")
 

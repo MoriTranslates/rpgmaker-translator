@@ -13,6 +13,7 @@ from PyQt6.QtGui import QColor, QFont
 
 from ..utils import event_prefix, extract_event_context
 from .spell_checker import SpellHighlighter, build_spell_menu_actions
+from . import theme
 
 # Files that contain events (not database flat entries)
 _EVENT_FILES = {"CommonEvents.json", "Troops.json"}
@@ -29,13 +30,8 @@ _DB_FILES = {
 # Fields that are not part of event dialogue flow
 _SKIP_FIELDS = {"speaker_name", "displayName"}
 
-# Status icons
-_STATUS_ICONS = {
-    "untranslated": "\u2610",  # ballot box
-    "translated":   "\u2714",  # check
-    "reviewed":     "\u2705",  # green check
-    "skipped":      "\u23ed",  # skip
-}
+# Status icons — shared with the translation table so both views match
+_STATUS_ICONS = theme.STATUS_ICONS
 
 _MAP_RE = re.compile(r'^Map\d+\.json$', re.IGNORECASE)
 
@@ -67,34 +63,14 @@ class EventViewerPanel(QWidget):
 
         # Left: event tree
         self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Event", "Progress"])
-        self._tree.setColumnWidth(0, 220)
-        self._tree.setColumnWidth(1, 80)
+        self._tree.setHeaderLabels(["Event", "Reviewed"])
+        th = self._tree.header()
+        th.setStretchLastSection(False)
+        th.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        th.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._tree.setMinimumWidth(200)
         self._tree.setIndentation(16)
         self._tree.currentItemChanged.connect(self._on_tree_selection_changed)
-        self._tree.setStyleSheet("""
-            QTreeWidget {
-                background-color: #1e1e2e;
-                color: #cdd6f4;
-                border: 1px solid #313244;
-                font-size: 12px;
-            }
-            QTreeWidget::item {
-                padding: 2px 4px;
-            }
-            QTreeWidget::item:selected {
-                background-color: #45475a;
-                color: #cdd6f4;
-            }
-            QHeaderView::section {
-                background-color: #181825;
-                color: #a6adc8;
-                border: 1px solid #313244;
-                padding: 3px 6px;
-                font-weight: bold;
-                font-size: 11px;
-            }
-        """)
         splitter.addWidget(self._tree)
 
         # Right: detail panel
@@ -105,28 +81,14 @@ class EventViewerPanel(QWidget):
         # Header row: event name + mark reviewed button
         header = QHBoxLayout()
         self._event_label = QLabel("Select an event from the tree")
-        self._event_label.setStyleSheet(
-            "font-weight: bold; font-size: 13px; color: #cdd6f4;")
+        self._event_label.setStyleSheet(theme.heading_css())
         header.addWidget(self._event_label, 1)
 
         self._review_btn = QPushButton("Mark Event Reviewed")
+        self._review_btn.setToolTip(
+            "Mark every translated line in this event as reviewed")
         self._review_btn.setEnabled(False)
         self._review_btn.clicked.connect(self._mark_event_reviewed)
-        self._review_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #313244;
-                color: #a6e3a1;
-                border: 1px solid #45475a;
-                padding: 4px 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #45475a;
-            }
-            QPushButton:disabled {
-                color: #6c7086;
-            }
-        """)
         header.addWidget(self._review_btn)
         detail_layout.addLayout(header)
 
@@ -156,30 +118,6 @@ class EventViewerPanel(QWidget):
             QHeaderView.ResizeMode.ResizeToContents)
         self._detail_table.setAlternatingRowColors(False)
         self._detail_table.currentCellChanged.connect(self._on_row_selected)
-        self._detail_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #1e1e2e;
-                color: #cdd6f4;
-                gridline-color: #313244;
-                border: 1px solid #313244;
-                font-size: 12px;
-            }
-            QTableWidget::item {
-                padding: 3px 4px;
-            }
-            QTableWidget::item:selected {
-                background-color: #45475a;
-                color: #cdd6f4;
-            }
-            QHeaderView::section {
-                background-color: #181825;
-                color: #a6adc8;
-                border: 1px solid #313244;
-                padding: 3px 6px;
-                font-weight: bold;
-                font-size: 11px;
-            }
-        """)
 
         # Vertical splitter: table (top 70%) + editor (bottom 30%)
         v_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -191,45 +129,17 @@ class EventViewerPanel(QWidget):
         editor_layout.setContentsMargins(0, 2, 0, 0)
 
         orig_box = QGroupBox("Original (JP)")
-        orig_box.setStyleSheet("""
-            QGroupBox {
-                color: #a6adc8; font-weight: bold; font-size: 11px;
-                border: 1px solid #313244; border-radius: 4px;
-                margin-top: 6px; padding-top: 14px;
-            }
-            QGroupBox::title { subcontrol-origin: margin; left: 8px; }
-        """)
         orig_inner = QVBoxLayout(orig_box)
         self._orig_editor = QTextEdit()
         self._orig_editor.setReadOnly(True)
         self._orig_editor.setAcceptRichText(False)
-        self._orig_editor.setStyleSheet("""
-            QTextEdit {
-                background-color: #181825; color: #bac2de;
-                border: 1px solid #313244; font-size: 13px;
-            }
-        """)
         orig_inner.addWidget(self._orig_editor)
         editor_layout.addWidget(orig_box)
 
-        trans_box = QGroupBox("Translation (EN)")
-        trans_box.setStyleSheet("""
-            QGroupBox {
-                color: #a6adc8; font-weight: bold; font-size: 11px;
-                border: 1px solid #313244; border-radius: 4px;
-                margin-top: 6px; padding-top: 14px;
-            }
-            QGroupBox::title { subcontrol-origin: margin; left: 8px; }
-        """)
+        trans_box = QGroupBox("Translation (EN) — editable")
         trans_inner = QVBoxLayout(trans_box)
         self._trans_editor = QTextEdit()
         self._trans_editor.setAcceptRichText(False)
-        self._trans_editor.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e2e; color: #cdd6f4;
-                border: 1px solid #45475a; font-size: 13px;
-            }
-        """)
         self._trans_editor.textChanged.connect(self._on_editor_changed)
         self._trans_editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._trans_editor.customContextMenuRequested.connect(self._show_trans_context_menu)
@@ -241,6 +151,12 @@ class EventViewerPanel(QWidget):
         v_splitter.setSizes([500, 200])
 
         detail_layout.addWidget(v_splitter)
+
+        self._hint_label = QLabel(
+            "↑/↓ move between lines  ·  Space toggles reviewed  "
+            "·  edits in the Translation box save automatically")
+        self._hint_label.setStyleSheet(theme.hint_css())
+        detail_layout.addWidget(self._hint_label)
 
         splitter.addWidget(detail_widget)
         splitter.setSizes([300, 900])
@@ -361,11 +277,16 @@ class EventViewerPanel(QWidget):
         self._refresh_tree_stats()
 
     def set_dark_mode(self, enabled: bool):
-        """Toggle dark/light mode."""
+        """Toggle dark/light mode (colors come from the shared theme)."""
         self._dark_mode = enabled
-        # Re-render current event if any
+        self._hint_label.setStyleSheet(theme.hint_css())
+        self._refresh_tree_stats()
+        # Re-color the current event in place (keeps the selected row)
         if self._current_prefix:
-            self._show_event(self._current_prefix)
+            self._detail_table.blockSignals(True)
+            for row, entry in enumerate(self._current_entries):
+                self._apply_row_colors(row, entry)
+            self._detail_table.blockSignals(False)
 
     # ── Internal: build data structures ──────────────────────────────
 
@@ -502,14 +423,14 @@ class EventViewerPanel(QWidget):
         if total == 0:
             return
         if reviewed == total:
-            item.setForeground(0, QColor("#a6e3a1"))  # green
-            item.setForeground(1, QColor("#a6e3a1"))
+            name_fg = badge_fg = theme.qcolor("ok")
         elif reviewed > 0:
-            item.setForeground(0, QColor("#f9e2af"))  # yellow
-            item.setForeground(1, QColor("#f9e2af"))
+            name_fg = badge_fg = theme.qcolor("warn")
         else:
-            item.setForeground(0, QColor("#cdd6f4"))  # default
-            item.setForeground(1, QColor("#9399b2"))
+            name_fg, badge_fg = theme.qcolor("text"), theme.qcolor("text_dim")
+        item.setForeground(0, name_fg)
+        item.setForeground(1, badge_fg)
+        item.setToolTip(1, f"{reviewed} of {total} lines reviewed")
 
     def _refresh_tree_stats(self):
         """Update progress badges on all tree items."""
@@ -616,30 +537,15 @@ class EventViewerPanel(QWidget):
             f"{filename} \u2014 {display}  ({reviewed}/{total} reviewed)")
 
     def _apply_row_colors(self, row: int, entry):
-        """Apply Catppuccin colors to a detail table row."""
-        if self._dark_mode:
-            base_bg = QColor("#1e1e2e")
-            alt_bg = QColor("#181825")
-            text_fg = QColor("#bac2de")
-            untrans_fg = QColor("#f38ba8")
-            reviewed_fg = QColor("#a6e3a1")
-            speaker_fg = QColor("#89b4fa")
-        else:
-            base_bg = QColor("#ffffff")
-            alt_bg = QColor("#f5f5f5")
-            text_fg = QColor("#333333")
-            untrans_fg = QColor("#cc3333")
-            reviewed_fg = QColor("#228833")
-            speaker_fg = QColor("#0066cc")
-
-        bg = base_bg if row % 2 == 0 else alt_bg
+        """Apply theme colors to a detail table row."""
+        bg = theme.qcolor("field") if row % 2 == 0 else theme.qcolor("field_alt")
 
         if entry.status == "untranslated":
-            fg = untrans_fg
+            fg = theme.qcolor("error")
         elif entry.status == "reviewed":
-            fg = reviewed_fg
+            fg = theme.qcolor("ok")
         else:
-            fg = text_fg
+            fg = theme.qcolor("text_soft")
 
         for col in range(4):
             item = self._detail_table.item(row, col)
@@ -650,17 +556,13 @@ class EventViewerPanel(QWidget):
         # Speaker accent color
         spk_item = self._detail_table.item(row, 1)
         if spk_item and spk_item.text():
-            spk_item.setForeground(speaker_fg)
+            spk_item.setForeground(theme.qcolor("accent"))
 
-        # Status icon color
+        # Status icon color + text (status never relies on color alone)
         status_item = self._detail_table.item(row, 0)
         if status_item:
-            if entry.status == "reviewed":
-                status_item.setForeground(reviewed_fg)
-            elif entry.status == "translated":
-                status_item.setForeground(QColor("#a6e3a1"))
-            elif entry.status == "untranslated":
-                status_item.setForeground(untrans_fg)
+            status_item.setForeground(theme.status_fg(entry.status))
+            status_item.setToolTip(theme.STATUS_LABELS.get(entry.status, ""))
 
     # ── Internal: editing & review ───────────────────────────────────
 

@@ -1,8 +1,10 @@
 """File tree widget showing project files grouped by type."""
 
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QTreeWidget, QTreeWidgetItem
+from PyQt6.QtWidgets import QTreeWidget, QTreeWidgetItem, QHeaderView
 from PyQt6.QtCore import pyqtSignal, Qt
+
+from . import theme
 
 from ..project_model import TranslationProject
 
@@ -29,14 +31,22 @@ class FileTreeWidget(QTreeWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setHeaderLabels(["File", "Progress"])
-        self.setColumnWidth(0, 200)
-        self.setMinimumWidth(250)
+        self.setMinimumWidth(220)
+        # Name column takes the spare width; progress hugs its text, so the
+        # tree never needs a horizontal scrollbar at the default width.
+        header = self.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.setUniformRowHeights(True)
         self.itemClicked.connect(self._on_item_clicked)
+        self._project = None
 
     def load_project(self, project: TranslationProject):
         """Populate tree from a loaded translation project."""
         self.setUpdatesEnabled(False)
         self.clear()
+        self._project = project
 
         # "All Files" root item
         all_item = QTreeWidgetItem(self, ["All Files", f"{project.translated_count}/{project.total}"])
@@ -127,7 +137,28 @@ class FileTreeWidget(QTreeWidget):
                 file_item = QTreeWidgetItem(other_item, [filename, f"{translated}/{total}"])
                 file_item.setData(0, Qt.ItemDataRole.UserRole, filename)
 
+        if project.entries:
+            self._update_item_stats(self.invisibleRootItem(), project)
         self.setUpdatesEnabled(True)
+
+    def apply_theme(self):
+        """Re-color progress badges after a dark/light switch."""
+        if self._project is not None and self._project.entries:
+            self._update_item_stats(self.invisibleRootItem(), self._project)
+
+    @staticmethod
+    def _set_progress(item: QTreeWidgetItem, translated: int, total: int):
+        """Set the progress badge: text, completion tooltip and color."""
+        item.setText(1, f"{translated}/{total}")
+        pct = int(translated * 100 / total) if total else 0
+        item.setToolTip(1, f"{translated} of {total} translated ({pct}%)")
+        if total and translated >= total:
+            color = theme.qcolor("ok")
+        elif translated:
+            color = theme.qcolor("text")
+        else:
+            color = theme.qcolor("text_dim")
+        item.setForeground(1, color)
 
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int):
         """Handle click — emit the appropriate signal."""
@@ -149,13 +180,13 @@ class FileTreeWidget(QTreeWidget):
             child = item.child(i)
             filename = child.data(0, Qt.ItemDataRole.UserRole)
             if filename == "__ALL__":
-                child.setText(1, f"{project.translated_count}/{project.total}")
+                self._set_progress(child, project.translated_count, project.total)
                 self._update_item_stats(child, project)
             elif filename == "__SCRIPT_ALL__":
                 # Script Strings category — compute from script_variable entries
                 script_entries = [e for e in project.entries if e.field == "script_variable"]
                 translated = sum(1 for e in script_entries if e.status in ("translated", "reviewed"))
-                child.setText(1, f"{translated}/{len(script_entries)}")
+                self._set_progress(child, translated, len(script_entries))
                 cat_translated += translated
                 cat_total += len(script_entries)
                 self._update_item_stats(child, project)
@@ -165,19 +196,19 @@ class FileTreeWidget(QTreeWidget):
                 script_entries = [e for e in project.entries
                                   if e.field == "script_variable" and e.file == real_file]
                 translated = sum(1 for e in script_entries if e.status in ("translated", "reviewed"))
-                child.setText(1, f"{translated}/{len(script_entries)}")
+                self._set_progress(child, translated, len(script_entries))
                 cat_translated += translated
                 cat_total += len(script_entries)
             elif filename:
                 translated, total = project.stats_for_file(filename)
-                child.setText(1, f"{translated}/{total}")
+                self._set_progress(child, translated, total)
                 cat_translated += translated
                 cat_total += total
                 self._update_item_stats(child, project)
             else:
                 # Category node — recurse and sum up children
                 sub_t, sub_total = self._update_item_stats(child, project)
-                child.setText(1, f"{sub_t}/{sub_total}")
+                self._set_progress(child, sub_t, sub_total)
                 cat_translated += sub_t
                 cat_total += sub_total
         return cat_translated, cat_total

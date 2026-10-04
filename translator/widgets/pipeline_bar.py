@@ -4,6 +4,8 @@ from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
+from . import theme
+
 
 class _StepLabel(QLabel):
     """A single step indicator: number + name, styled by state."""
@@ -19,15 +21,19 @@ class _StepLabel(QLabel):
     def _refresh(self):
         if self._state == "done":
             icon = "\u2713"  # checkmark
-            color = "#a6e3a1"  # green
+            color = theme.c("ok")
+            tip = "Done"
         elif self._state == "active":
             icon = "\u25b6"  # play triangle
-            color = "#89b4fa"  # blue
+            color = theme.c("accent")
+            tip = "In progress"
         else:
-            icon = str(self.number)
-            color = "#6c7086"  # muted
+            icon = f"{self.number}."
+            color = theme.c("text_dim")
+            tip = "Not started"
 
         self.setText(f"{icon} {self.name}")
+        self.setToolTip(f"Step {self.number}: {self.name} \u2014 {tip}")
         self.setStyleSheet(f"color: {color}; padding: 2px 8px;")
         font = self.font()
         font.setBold(self._state in ("active", "done"))
@@ -102,13 +108,9 @@ class PipelineBar(QWidget):
 
         # Next Step nudge
         self.next_btn = QPushButton("Next Step")
-        self.next_btn.setFixedHeight(24)
-        self.next_btn.setStyleSheet(
-            "QPushButton { background-color: #89b4fa; color: #1e1e2e; "
-            "border: none; padding: 2px 12px; border-radius: 3px; font-weight: bold; }"
-            "QPushButton:hover { background-color: #74c7ec; }"
-            "QPushButton:disabled { background-color: #313244; color: #6c7086; }"
-        )
+        self.next_btn.setStyleSheet("QPushButton { padding: 2px 12px; }")
+        theme.make_primary(self.next_btn)
+        self.next_btn.setToolTip("Run the next step of the translation pipeline")
         self.next_btn.clicked.connect(self._on_next_clicked)
         self.next_btn.setVisible(False)
         self._layout.addWidget(self.next_btn)
@@ -117,7 +119,7 @@ class PipelineBar(QWidget):
 
         # Status hint
         self.hint_label = QLabel("")
-        self.hint_label.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        self.hint_label.setStyleSheet(theme.hint_css())
         self._layout.addWidget(self.hint_label)
 
     def _rebuild_steps(self):
@@ -141,11 +143,21 @@ class PipelineBar(QWidget):
             insert_pos += 1
             if i < len(self._steps) - 1:
                 arrow = QLabel("\u2192")
-                arrow.setStyleSheet("color: #45475a; padding: 0 4px;")
+                arrow.setStyleSheet(
+                    f"color: {theme.c('border_strong')}; padding: 0 4px;")
                 arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._arrow_labels.append(arrow)
                 self._layout.insertWidget(insert_pos, arrow)
                 insert_pos += 1
+
+    def apply_theme(self):
+        """Re-color step labels after a dark/light switch."""
+        for label in self._step_labels.values():
+            label._refresh()
+        for arrow in self._arrow_labels:
+            arrow.setStyleSheet(
+                f"color: {theme.c('border_strong')}; padding: 0 4px;")
+        self.hint_label.setStyleSheet(theme.hint_css())
 
     def set_engine(self, engine_key_or_steps):
         """Switch pipeline steps for the given engine.
@@ -190,7 +202,7 @@ class PipelineBar(QWidget):
         idx = [k for k, _ in self._steps].index(step_key)
         self._current_index = idx
         self.next_btn.setVisible(False)
-        self.hint_label.setText(f"{self._steps[idx][1]} in progress...")
+        self.hint_label.setText(f"{self._steps[idx][1]} in progress…")
 
     def mark_done(self, step_key: str):
         """Mark a step as completed and show Next Step nudge."""

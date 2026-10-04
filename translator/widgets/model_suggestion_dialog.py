@@ -11,6 +11,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 
+from . import theme
+
 log = logging.getLogger(__name__)
 
 # ── Model database ────────────────────────────────────────────────
@@ -164,7 +166,7 @@ class ModelSuggestionDialog(QDialog):
                 f"({vram_gb:.0f} GB VRAM)")
         else:
             header = QLabel("No NVIDIA GPU detected — showing all models")
-        header.setStyleSheet("font-size: 14px; padding: 4px;")
+        header.setStyleSheet("font-size: 11pt; padding: 4px;")
         layout.addWidget(header)
 
         # ── Sugoi models table ────────────────────────────────────
@@ -202,19 +204,19 @@ class ModelSuggestionDialog(QDialog):
             # Status
             if installed:
                 status = QTableWidgetItem("Installed")
-                status.setForeground(QColor("#a6e3a1"))  # green
+                status.setForeground(theme.qcolor("ok"))  # green
             elif fits:
                 status = QTableWidgetItem("Available")
-                status.setForeground(QColor("#f9e2af"))  # yellow
+                status.setForeground(theme.qcolor("warn"))  # yellow
             else:
                 status = QTableWidgetItem("Too large")
-                status.setForeground(QColor("#6c7086"))  # overlay0
+                status.setForeground(theme.qcolor("text_dim"))  # overlay0
             items.append(status)
 
             # Color coding
             for j, item in enumerate(items):
                 if not fits:
-                    item.setForeground(QColor("#6c7086"))
+                    item.setForeground(theme.qcolor("text_dim"))
                 if is_rec:
                     font = item.font()
                     font.setBold(True)
@@ -227,7 +229,7 @@ class ModelSuggestionDialog(QDialog):
             if is_rec:
                 for j in range(6):
                     self._table.item(i, j).setBackground(
-                        QColor(166, 227, 161, 30))  # subtle green bg
+                        theme.qcolor("row_reviewed"))  # subtle green bg
 
         self._table.selectionModel().selectionChanged.connect(
             self._on_sugoi_selected)
@@ -264,18 +266,18 @@ class ModelSuggestionDialog(QDialog):
             ]
             if installed:
                 status = QTableWidgetItem("Installed")
-                status.setForeground(QColor("#a6e3a1"))
+                status.setForeground(theme.qcolor("ok"))
             elif fits:
                 status = QTableWidgetItem("Available")
-                status.setForeground(QColor("#f9e2af"))
+                status.setForeground(theme.qcolor("warn"))
             else:
                 status = QTableWidgetItem("Too large")
-                status.setForeground(QColor("#6c7086"))
+                status.setForeground(theme.qcolor("text_dim"))
             items.append(status)
 
             for j, item in enumerate(items):
                 if not fits:
-                    item.setForeground(QColor("#6c7086"))
+                    item.setForeground(theme.qcolor("text_dim"))
                 item.setData(Qt.ItemDataRole.UserRole, tag)
                 self._qwen_table.setItem(i, j, item)
 
@@ -305,6 +307,7 @@ class ModelSuggestionDialog(QDialog):
 
         self._use_btn = QPushButton("Use Model")
         self._use_btn.setToolTip("Select this model and close")
+        theme.make_primary(self._use_btn)
         self._use_btn.clicked.connect(self._use_model)
         self._use_btn.setEnabled(False)
         cmd_layout.addWidget(self._use_btn)
@@ -313,7 +316,7 @@ class ModelSuggestionDialog(QDialog):
 
         # Status label for pull progress
         self._pull_status = QLabel("")
-        self._pull_status.setStyleSheet("font-size: 11px; color: #a6adc8;")
+        self._pull_status.setStyleSheet(theme.hint_css())
         layout.addWidget(self._pull_status)
 
         # Close
@@ -439,14 +442,14 @@ class ModelSuggestionDialog(QDialog):
             status_item = self._table.item(i, 5)
             if self._is_installed(tag):
                 status_item.setText("Installed")
-                status_item.setForeground(QColor("#a6e3a1"))
+                status_item.setForeground(theme.qcolor("ok"))
 
         for i in range(self._qwen_table.rowCount()):
             tag = self._qwen_table.item(i, 0).data(Qt.ItemDataRole.UserRole)
             status_item = self._qwen_table.item(i, 3)
             if self._is_installed(tag):
                 status_item.setText("Installed")
-                status_item.setForeground(QColor("#a6e3a1"))
+                status_item.setForeground(theme.qcolor("ok"))
 
     def done(self, result):
         """Stop any running pull before the dialog closes (Close/Esc/X)."""

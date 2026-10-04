@@ -11,6 +11,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from . import theme
+
 
 class PluginDiffDialog(QDialog):
     """Shows a table of plugin parameter diffs with per-row checkboxes.
@@ -66,6 +68,8 @@ class PluginDiffDialog(QDialog):
         btn_row.addStretch()
 
         apply_btn = QPushButton("Apply Selected")
+        apply_btn.setDefault(True)
+        theme.make_primary(apply_btn)
         apply_btn.clicked.connect(self.accept)
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)

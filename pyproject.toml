@@ -1,0 +1,65 @@
+# Project metadata + tool configuration.
+#
+# The app is distributed as a PyInstaller bundle (see packaging/) or run from
+# source with `python main.py`; it is not published to PyPI.  Runtime
+# dependencies live in requirements.txt (single source, read below).
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rpgmaker-translator"
+description = "Local/cloud LLM translation tool for RPG Maker and other Japanese game engines"
+readme = "README.md"
+license-files = ["LICENSE"]  # Business Source License 1.1 (not OSI) - see LICENSE
+authors = [{ name = "MoriTranslates" }]
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Environment :: X11 Applications :: Qt",
+    "Private :: Do Not Upload",
+]
+dynamic = ["version", "dependencies"]
+
+[project.optional-dependencies]
+# Keep in sync with requirements-dev.txt
+dev = ["pytest>=9.1,<10", "ruff==0.16.10", "pyinstaller>=6.18,<7"]
+
+[project.urls]
+Homepage = "https://github.com/MoriTranslates/rpgmaker-translator"
+Issues = "https://github.com/MoriTranslates/rpgmaker-translator/issues"
+Changelog = "https://github.com/MoriTranslates/rpgmaker-translator/blob/master/CHANGELOG.md"
+
+[tool.setuptools.dynamic]
+version = { attr = "translator.version.__version__" }
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+include = ["translator*"]
+
+# ---------------------------------------------------------------- pytest ---
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+xfail_strict = true
+
+# ------------------------------------------------------------------ ruff ---
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = ["_reference", "benchmark", "fix_mojibake.py", "tests/fixtures"]
+
+[tool.ruff.lint]
+# Lenient start: real-bug checks only (syntax errors + pyflakes).
+select = ["E9", "F"]
+# Pre-existing findings, not bugs - ignored so CI is green on day one.
+# Remove one at a time as the code is cleaned up (`ruff check --fix` handles
+# F401/F541/F811 automatically; F841 needs a human look).
+ignore = [
+    "F401",  # unused import (33)
+    "F541",  # f-string without placeholders (15)
+    "F811",  # redefinition of unused name (2, main_window.py local `Counter` imports)
+    "F841",  # unused local variable (18)
+]

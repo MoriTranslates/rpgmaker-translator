@@ -1,8 +1,11 @@
-PyQt6
-requests
-Pillow
-openai
-wordninja
-pycryptodome
-rubymarshal
-pyspellchecker
+# Runtime dependencies (compatible ranges; lower bounds = versions validated in dev/CI).
+# Keep in sync with [project].dependencies in pyproject.toml.
+# Release builds install the exact pins from requirements-lock.txt instead.
+PyQt6>=6.10,<7
+requests>=2.32,<3
+Pillow>=12.1,<13
+openai>=2.21,<3          # cloud API providers (OpenAI-compatible endpoints)
+wordninja>=2.0,<3        # post-processor: split glued English words
+pycryptodome>=3.23,<4    # Crowd / Kirikiri decryption (Crypto.*)
+rubymarshal>=1.2.10,<2   # RPG Maker VX Ace / XP .rvdata2 parsing
+pyspellchecker>=0.9,<1   # translation editor spell checker

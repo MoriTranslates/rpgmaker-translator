@@ -27,6 +27,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from . import theme
+
 log = logging.getLogger(__name__)
 
 
@@ -101,7 +103,7 @@ class TranslationWizard(QDialog):
         layout.addLayout(model_row)
 
         self.model_status = QLabel("")
-        self.model_status.setStyleSheet("font-size: 11px;")
+        self.model_status.setStyleSheet("font-size: 8pt;")
         layout.addWidget(self.model_status)
 
         layout.addSpacing(10)
@@ -268,7 +270,7 @@ class TranslationWizard(QDialog):
 
         self.step_label = QLabel("Ready")
         self.step_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.step_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        self.step_label.setStyleSheet(theme.heading_css())
         prog_layout.addWidget(self.step_label)
 
         self.progress_bar = QProgressBar()
@@ -290,6 +292,7 @@ class TranslationWizard(QDialog):
         self.start_btn = self.button_box.addButton(
             "Start Translation", QDialogButtonBox.ButtonRole.AcceptRole)
         self.start_btn.setDefault(True)
+        theme.make_primary(self.start_btn)
         self.cancel_btn = self.button_box.addButton(
             QDialogButtonBox.StandardButton.Cancel)
 
@@ -307,7 +310,7 @@ class TranslationWizard(QDialog):
             return
         from .settings_dialog import _CallWorker
         self.model_status.setText("Fetching models...")
-        self.model_status.setStyleSheet("font-size: 11px;")
+        self.model_status.setStyleSheet("font-size: 8pt;")
         self._model_worker = _CallWorker(self.mw.client.list_models, parent=self)
         self._model_worker.done.connect(self._apply_models)
         self._model_worker.start()
@@ -322,10 +325,12 @@ class TranslationWizard(QDialog):
         if models:
             self.model_combo.addItems(sorted(models))
             self.model_status.setText(f"{len(models)} model(s) available")
-            self.model_status.setStyleSheet("font-size: 11px; color: #a6e3a1;")
+            self.model_status.setStyleSheet(
+                f"font-size: 8pt; color: {theme.c('ok')};")
         else:
             self.model_status.setText("No models found — is Ollama running?")
-            self.model_status.setStyleSheet("font-size: 11px; color: #f38ba8;")
+            self.model_status.setStyleSheet(
+                f"font-size: 8pt; color: {theme.c('error')};")
 
         if current_model:
             if current_model not in models:
@@ -932,7 +937,7 @@ class TranslationWizard(QDialog):
 
         self.step_label.setText("Translation complete!")
         self.step_label.setStyleSheet(
-            "font-weight: bold; font-size: 14px; color: #a6e3a1;")
+            theme.heading_css() + f" color: {theme.c('ok')};")
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(1)
 
@@ -1011,7 +1016,7 @@ class WizardChoiceDialog(QDialog):
 
         label = QLabel("How would you like to translate this game?")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet("font-size: 14px; font-weight: bold; margin: 10px;")
+        label.setStyleSheet("font-size: 12pt; font-weight: bold; margin: 10px;")
         layout.addWidget(label)
 
         layout.addSpacing(10)
@@ -1041,18 +1046,20 @@ class WizardChoiceDialog(QDialog):
         btn = QPushButton()
         btn.setMinimumHeight(70)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet("""
-            QPushButton {
+        accent = theme.qcolor("accent")
+        btn.setStyleSheet(f"""
+            QPushButton {{
                 text-align: left;
                 padding: 12px 16px;
-                border: 2px solid #555;
+                border: 2px solid {theme.c('border_strong')};
                 border-radius: 8px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                border-color: #89b4fa;
-                background-color: rgba(137, 180, 250, 0.1);
-            }
+                font-size: 10pt;
+            }}
+            QPushButton:hover, QPushButton:focus {{
+                border-color: {theme.c('accent')};
+                background-color: rgba({accent.red()}, {accent.green()},
+                                       {accent.blue()}, 25);
+            }}
         """)
         btn.setText(f"{title}\n{description}")
         btn.clicked.connect(lambda: self._select(choice))

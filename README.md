@@ -40,7 +40,9 @@ Open a game folder. Hit Batch Translate. Get a playable translation. Supports 9 
 ## Table of Contents
 
 - [Key Features](#key-features)
+- [Download / Releases](#download--releases)
 - [Quick Start](#quick-start)
+- [Building from Source](#building-from-source)
 - [Recommended Models](#recommended-models)
 - [Cloud API Providers](#cloud-api-providers)
 - [Translation Workflow](#translation-workflow)
@@ -77,6 +79,23 @@ Open a game folder. Hit Batch Translate. Get a playable translation. Supports 9 
 
 ---
 
+## Download / Releases
+
+**Windows (no Python needed):** grab `RPGMakerTranslator-<version>-win64.zip` from the
+[Releases page](https://github.com/MoriTranslates/rpgmaker-translator/releases/latest),
+extract it anywhere (not inside `Program Files`), and run `RPGMakerTranslator.exe`.
+Your settings are saved next to the exe, so the folder is portable.
+
+- The exe is not code-signed yet, so Windows SmartScreen may say "Windows protected your PC" — click **More info → Run anyway**.
+- Each release lists a SHA256 checksum; verify with `Get-FileHash RPGMakerTranslator-*.zip` in PowerShell.
+- To update, extract the new zip and copy your old `_settings.json` into the new folder.
+- You still need [Ollama](https://ollama.com/download) (or a cloud API key) — see Quick Start step 1.
+- What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+
+Prefer running from source (any OS, latest code)? Follow the Quick Start below.
+
+---
+
 ## Quick Start
 
 ### 1. Install Ollama + Qwen 3.5
@@ -102,6 +121,27 @@ python main.py
 4. **Batch Dialogue** (`Ctrl+T`) — translate dialogue with auto-glossary
 5. **Game > Apply Translation** (`Ctrl+E`) — write back to game files
 6. **Game > Open in RPG Maker** (`Ctrl+R`) — QA in the visual editor (MV/MZ only)
+
+---
+
+## Building from Source
+
+Requires Python 3.12+ (3.14 recommended — it's what releases are built with).
+
+```powershell
+git clone https://github.com/MoriTranslates/rpgmaker-translator.git
+cd rpgmaker-translator
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements-dev.txt     # app + pytest, ruff, pyinstaller
+python -m pytest -q                     # run the test suite
+python main.py                          # run the app
+
+# Build the Windows bundle (dist\RPGMakerTranslator\ + a zip):
+powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development and release workflow.
 
 ---
 
@@ -289,4 +329,4 @@ All engines auto-detect when you open a game folder — no manual configuration 
 
 ## License
 
-MIT
+[Business Source License 1.1](LICENSE) — free for personal and other non-commercial use (fan translation, education, research). Commercial use requires a license from MoriTranslates. See [LICENSE](LICENSE) for the full terms.

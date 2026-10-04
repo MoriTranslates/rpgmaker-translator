@@ -6,6 +6,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from . import theme
+
 
 class GlossaryScanDialog(QDialog):
     """Shows JP→EN pairs from a translated game for user to pick glossary entries."""
@@ -91,6 +93,7 @@ class GlossaryScanDialog(QDialog):
 
         ok_btn = QPushButton("Add Selected")
         ok_btn.setDefault(True)
+        theme.make_primary(ok_btn)
         ok_btn.clicked.connect(self.accept)
         btn_row.addWidget(ok_btn)
 

@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QTabWidget,
 )
 from PyQt6.QtCore import (
-    pyqtSignal, Qt, QTimer, QAbstractTableModel, QModelIndex,
+    pyqtSignal, Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent,
 )
 from PyQt6.QtGui import (
     QColor, QAction, QTextCursor, QShortcut, QKeySequence, QKeyEvent,
@@ -24,33 +24,14 @@ from PyQt6.QtGui import (
 
 from ..project_model import TranslationEntry
 from .. import CONTROL_CODE_RE, JAPANESE_RE
+from . import theme
 
 _CODE_RE = CONTROL_CODE_RE  # local alias
 _JAPANESE_RE = JAPANESE_RE
 
 
-# Status colors — light mode
-STATUS_COLORS_LIGHT = {
-    "untranslated": QColor(255, 230, 230),   # light red
-    "translated":   QColor(255, 255, 210),   # light yellow
-    "reviewed":     QColor(210, 255, 210),   # light green
-    "skipped":      QColor(230, 230, 230),   # light gray
-}
-
-# Status colors — dark mode (muted, readable with light text)
-STATUS_COLORS_DARK = {
-    "untranslated": QColor(80, 40, 40),      # dark red
-    "translated":   QColor(70, 65, 30),      # dark yellow
-    "reviewed":     QColor(30, 70, 40),       # dark green
-    "skipped":      QColor(50, 50, 55),      # dark gray
-}
-
-STATUS_ICONS = {
-    "untranslated": "\u25cb",  # ○
-    "translated":   "\u25d0",  # ◐
-    "reviewed":     "\u25cf",  # ●
-    "skipped":      "\u2014",  # —
-}
+# Status visuals live in the shared theme (icons double as non-color cue)
+STATUS_ICONS = theme.STATUS_ICONS
 
 # Column indices
 COL_STATUS = 0
@@ -73,10 +54,6 @@ class TranslationTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._entries: list[TranslationEntry] = []
         self._dark_mode = True
-
-    @property
-    def _status_colors(self):
-        return STATUS_COLORS_DARK if self._dark_mode else STATUS_COLORS_LIGHT
 
     def set_entries(self, entries: list, dupe_counts: dict = None):
         self.beginResetModel()
@@ -118,9 +95,15 @@ class TranslationTableModel(QAbstractTableModel):
         elif role == Qt.ItemDataRole.ToolTipRole:
             if col == COL_FIELD:
                 return f"{entry.field} — {entry.id}"
+            if col == COL_STATUS:
+                return theme.STATUS_LABELS.get(entry.status, entry.status)
 
         elif role == Qt.ItemDataRole.BackgroundRole:
-            return self._status_colors.get(entry.status, QColor(255, 255, 255))
+            return theme.status_row_color(entry.status)
+
+        elif role == Qt.ItemDataRole.ForegroundRole:
+            if col == COL_STATUS:
+                return theme.status_fg(entry.status)
 
         elif role == Qt.ItemDataRole.TextAlignmentRole:
             if col == COL_STATUS:
@@ -158,6 +141,10 @@ class TranslationTableModel(QAbstractTableModel):
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             return _COLUMN_HEADERS[section] if section < len(_COLUMN_HEADERS) else ""
+        if (orientation == Qt.Orientation.Horizontal
+                and role == Qt.ItemDataRole.ToolTipRole and section == COL_STATUS):
+            return ("Status: ○ untranslated  ◐ translated  "
+                    "● reviewed  — skipped")
         return None
 
     # ── Helpers for external updates ──────────────────────────────
@@ -219,12 +206,23 @@ class TranslationTable(QWidget):
 
         # ── Filter bar ─────────────────────────────────────────────
         filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(4, 4, 4, 2)
+        filter_row.setSpacing(6)
 
         filter_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Search (use + for AND, e.g. Alice+she)...")
+        self.search_edit.setPlaceholderText("Search all files (Ctrl+F) — Alice+she = both")
+        self.search_edit.setToolTip(
+            "Searches original and translated text across every file.\n"
+            "Control codes are ignored. Join terms with + to require all of them.\n"
+            "Esc clears the search.")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setMinimumWidth(140)
         self.search_edit.textChanged.connect(self._schedule_filter)
-        filter_row.addWidget(self.search_edit)
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self.search_edit,
+                  activated=self.search_edit.clear,
+                  context=Qt.ShortcutContext.WidgetShortcut)
+        filter_row.addWidget(self.search_edit, 1)
 
         filter_row.addWidget(QLabel("Status:"))
         self.status_filter = QComboBox()
@@ -258,11 +256,17 @@ class TranslationTable(QWidget):
         self.speaker_filter = QComboBox()
         self.speaker_filter.addItem("All Speakers")
         self.speaker_filter.setToolTip("Filter dialogue by speaker (from event headers)")
+        # Long speaker names must not push the filter bar off-screen
+        self.speaker_filter.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.speaker_filter.setMinimumContentsLength(10)
         self.speaker_filter.currentTextChanged.connect(self._on_filter_changed)
         filter_row.addWidget(self.speaker_filter)
 
-        self.jp_check = QCheckBox("JP in translation")
-        self.jp_check.setToolTip("Show only entries where the translation still contains Japanese characters")
+        self.jp_check = QCheckBox("JP left")
+        self.jp_check.setToolTip(
+            "JP left in translation: show only entries whose translation "
+            "still contains Japanese characters")
         self.jp_check.stateChanged.connect(self._on_filter_changed)
         filter_row.addWidget(self.jp_check)
 
@@ -281,13 +285,13 @@ class TranslationTable(QWidget):
 
         replace_row.addWidget(QLabel("Find:"))
         self._find_edit = QLineEdit()
-        self._find_edit.setPlaceholderText("Text to find in translations...")
+        self._find_edit.setPlaceholderText("Text to find in translations…")
         self._find_edit.returnPressed.connect(self._replace_next)
         replace_row.addWidget(self._find_edit)
 
         replace_row.addWidget(QLabel("Replace:"))
         self._replace_edit = QLineEdit()
-        self._replace_edit.setPlaceholderText("Replace with...")
+        self._replace_edit.setPlaceholderText("Replace with…")
         self._replace_edit.returnPressed.connect(self._replace_next)
         replace_row.addWidget(self._replace_edit)
 
@@ -328,6 +332,7 @@ class TranslationTable(QWidget):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.setWordWrap(True)
+        self.table.verticalHeader().setVisible(False)  # row numbers unused
 
         # Column widths
         header = self.table.horizontalHeader()
@@ -339,6 +344,14 @@ class TranslationTable(QWidget):
         header.setSectionResizeMode(COL_TRANSLATION, QHeaderView.ResizeMode.Stretch)
 
         vsplit.addWidget(self.table)
+
+        # Centered hint shown when the table has no rows
+        self._empty_label = QLabel(self.table.viewport())
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setWordWrap(True)
+        self._empty_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.table.viewport().installEventFilter(self)
 
         # ── Tabbed bottom panel: Editor + Event Context ─────────────
         self.bottom_tabs = QTabWidget()
@@ -354,7 +367,7 @@ class TranslationTable(QWidget):
         self.orig_editor = QTextEdit()
         self.orig_editor.setReadOnly(True)
         self.orig_editor.setAcceptRichText(False)
-        self.orig_editor.setPlaceholderText("Select a row to view original text...")
+        self.orig_editor.setPlaceholderText("Select a row to see its original text…")
         self.orig_editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.orig_editor.customContextMenuRequested.connect(self._show_orig_context_menu)
         orig_box.addWidget(self.orig_editor)
@@ -365,7 +378,8 @@ class TranslationTable(QWidget):
         trans_box = QVBoxLayout(trans_group)
         self.trans_editor = QTextEdit()
         self.trans_editor.setAcceptRichText(False)
-        self.trans_editor.setPlaceholderText("Select a row to edit translation...")
+        self.trans_editor.setPlaceholderText(
+            "Type the English translation here (select a row first)…")
         self.trans_editor.textChanged.connect(self._on_editor_changed)
         self.trans_editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.trans_editor.customContextMenuRequested.connect(self._show_editor_context_menu)
@@ -428,6 +442,8 @@ class TranslationTable(QWidget):
 
         # ── Stats bar ──────────────────────────────────────────────
         self.stats_label = QLabel("No entries loaded")
+        self.stats_label.setContentsMargins(4, 2, 4, 2)
+        self.stats_label.setStyleSheet(theme.hint_css())
         layout.addWidget(self.stats_label)
 
     def set_dark_mode(self, dark: bool):
@@ -435,6 +451,11 @@ class TranslationTable(QWidget):
         self._dark_mode = dark
         self._model._dark_mode = dark
         self._model.refresh_all()
+        self.stats_label.setStyleSheet(theme.hint_css())
+        self._update_empty_state()
+        if (self.bottom_tabs.currentIndex() == 1
+                and 0 <= self._selected_row < len(self._visible_entries)):
+            self._update_context_pane(self._visible_entries[self._selected_row])
 
     def set_entries(self, entries: list):
         """Load full project entries into the table."""
@@ -1144,24 +1165,14 @@ class TranslationTable(QWidget):
             if ctx_display else "Event Context")
 
         # Theme colors
-        if self._dark_mode:
-            base_bg = QColor("#1e1e2e")
-            alt_bg = QColor("#181825")
-            sel_bg = QColor("#45475a")
-            text_fg = QColor("#bac2de")
-            sel_fg = QColor("#cdd6f4")
-            untrans_fg = QColor("#f38ba8")
-            speaker_fg = QColor("#89b4fa")
-            speaker_sel_fg = QColor("#89dceb")
-        else:
-            base_bg = QColor("#ffffff")
-            alt_bg = QColor("#f5f5f5")
-            sel_bg = QColor("#cce0ff")
-            text_fg = QColor("#333333")
-            sel_fg = QColor("#000000")
-            untrans_fg = QColor("#cc3333")
-            speaker_fg = QColor("#0066cc")
-            speaker_sel_fg = QColor("#004499")
+        base_bg = theme.qcolor("field")
+        alt_bg = theme.qcolor("field_alt")
+        sel_bg = theme.qcolor("selection")
+        text_fg = theme.qcolor("text_soft")
+        sel_fg = theme.qcolor("selection_text")
+        untrans_fg = theme.qcolor("error")
+        speaker_fg = theme.qcolor("accent")
+        speaker_sel_fg = theme.qcolor("accent_alt")
 
         self.context_table.setRowCount(end - start)
         highlight_row = -1
@@ -1237,6 +1248,10 @@ class TranslationTable(QWidget):
 
     def eventFilter(self, obj, event):
         """Ctrl+C on context table → copy selected cell text to clipboard."""
+        if (obj is self.table.viewport()
+                and event.type() == QEvent.Type.Resize):
+            self._empty_label.setGeometry(self.table.viewport().rect())
+            return False
         if obj is self.context_table and isinstance(event, QKeyEvent):
             if (event.key() == Qt.Key.Key_C
                     and event.modifiers() == Qt.KeyboardModifier.ControlModifier):
@@ -1435,6 +1450,24 @@ class TranslationTable(QWidget):
         if not find:
             return
 
+        # Project-wide and not undoable — confirm with the real numbers first
+        hits = [e for e in self._all_entries
+                if e.translation and find in e.translation]
+        if not hits:
+            self._replace_status.setText("No matches found")
+            return
+        occurrences = sum(e.translation.count(find) for e in hits)
+        reply = QMessageBox.question(
+            self, "Replace All",
+            f"Replace {occurrences} occurrence(s) of “{find}” "
+            f"with “{replace}” in {len(hits)} translation(s) "
+            "across the whole project?\n\nThis can't be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
         entries_changed = 0
         total_occurrences = 0
         for entry in self._all_entries:
@@ -1539,8 +1572,26 @@ class TranslationTable(QWidget):
         self._entries = prev_entries
         self._apply_filter()
 
+    def _update_empty_state(self):
+        """Show a centered hint instead of a blank grid when nothing is listed."""
+        if self._visible_entries:
+            self._empty_label.hide()
+            return
+        if not self._all_entries:
+            text = ("No project open\n\nUse Project › Open Project… "
+                    "(Ctrl+O) to load a game folder.")
+        else:
+            text = ("No entries match the current filters\n\n"
+                    "Clear the search box or set Status / Field / Speaker "
+                    "back to All.")
+        self._empty_label.setText(text)
+        self._empty_label.setStyleSheet(theme.hint_css() + " font-size: 11pt;")
+        self._empty_label.setGeometry(self.table.viewport().rect())
+        self._empty_label.show()
+
     def _update_stats(self):
         """Update the stats label."""
+        self._update_empty_state()
         total = len(self._visible_entries)
         translated = sum(1 for e in self._visible_entries if e.status in ("translated", "reviewed"))
         reviewed = sum(1 for e in self._visible_entries if e.status == "reviewed")

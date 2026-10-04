@@ -10,18 +10,30 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
 from ..translation_engine import _event_key
+from . import theme
 
 
-# Status icons and colors
-_STATUS = {
-    "queued":      ("⏳", QColor("#9399b2")),
-    "translating": ("⚙", QColor("#89b4fa")),
-    "done":        ("✔", QColor("#a6e3a1")),
-    "error":       ("✘", QColor("#f38ba8")),
-    "skipped":     ("⏭", QColor("#6c7086")),
-    "tm":          ("♻", QColor("#cba6f7")),
-    "glossary":    ("\U0001f4d6", QColor("#f9e2af")),
+# Status icons and theme color tokens
+_STATUS_TOKENS = {
+    "queued":      ("⏳", "text_muted"),
+    "translating": ("⚙", "accent"),
+    "done":        ("✔", "ok"),
+    "error":       ("✘", "error"),
+    "skipped":     ("⏭", "text_dim"),
+    "tm":          ("♻", "special"),
+    "glossary":    ("📖", "warn"),
 }
+
+
+class _StatusLookup:
+    """``_STATUS[key]`` -> (icon, QColor) resolved against the current theme."""
+
+    def __getitem__(self, key):
+        icon, token = _STATUS_TOKENS[key]
+        return icon, theme.qcolor(token)
+
+
+_STATUS = _StatusLookup()
 
 DB_KEY = "__database__"
 
@@ -69,6 +81,9 @@ def _friendly_event_name(key: str) -> str:
 class QueuePanel(QWidget):
     """Live translation queue, grouped by event with expandable rows."""
 
+    _IDLE_TEXT = ("No batch running — start one from the Translate menu "
+                  "and its progress appears here")
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._entries = []
@@ -85,13 +100,14 @@ class QueuePanel(QWidget):
 
         # Header row
         header = QHBoxLayout()
-        self._summary_label = QLabel("No batch running")
+        self._summary_label = QLabel(self._IDLE_TEXT)
         self._summary_label.setStyleSheet("font-weight: bold;")
         header.addWidget(self._summary_label)
         header.addStretch()
 
         # Expand / collapse all
         expand_btn = QPushButton("Expand All")
+        expand_btn.setToolTip("Expand every event to show individual entries")
         expand_btn.clicked.connect(lambda: self._tree.expandAll())
         header.addWidget(expand_btn)
 
@@ -107,6 +123,8 @@ class QueuePanel(QWidget):
         header.addWidget(self._filter_combo)
 
         clear_btn = QPushButton("Clear Log")
+        clear_btn.setToolTip(
+            "Clear this view. Translations are not affected.")
         clear_btn.clicked.connect(self.clear)
         header.addWidget(clear_btn)
 
@@ -134,28 +152,6 @@ class QueuePanel(QWidget):
         self._tree.setAlternatingRowColors(True)
         self._tree.setRootIsDecorated(True)
         self._tree.setUniformRowHeights(True)
-        self._tree.setStyleSheet("""
-            QTreeWidget {
-                background-color: #1e1e2e;
-                alternate-background-color: #24243a;
-                color: #cdd6f4;
-                border: 1px solid #313244;
-                font-size: 12px;
-            }
-            QTreeWidget::item { padding: 2px 4px; }
-            QTreeWidget::item:selected {
-                background-color: #45475a;
-                color: #cdd6f4;
-            }
-            QHeaderView::section {
-                background-color: #181825;
-                color: #a6adc8;
-                border: 1px solid #313244;
-                padding: 3px 6px;
-                font-weight: bold;
-                font-size: 11px;
-            }
-        """)
         layout.addWidget(self._tree)
 
         # Stats row
@@ -200,7 +196,7 @@ class QueuePanel(QWidget):
         # DB files alphabetical
         db_order.sort()
 
-        dim = QColor("#7f849c")
+        dim = theme.qcolor("text_dim")
         queued_color = _STATUS["queued"][1]
 
         def make_entry_item(e):
@@ -335,6 +331,17 @@ class QueuePanel(QWidget):
                 f"Average: {elapsed / self._done_count:.1f}s/entry"
             )
 
+    def apply_theme(self):
+        """Re-color existing rows after a dark/light switch."""
+        for item in self._entry_items.values():
+            status = item.data(0, Qt.ItemDataRole.UserRole)
+            if status in _STATUS_TOKENS:
+                item.setForeground(0, _STATUS[status][1])
+        for key, node in self._event_items.items():
+            node.setForeground(1, theme.qcolor("text_dim"))
+            if key in self._event_counts:
+                self._refresh_node(node, key)
+
     def clear(self):
         self._tree.clear()
         self._entries = []
@@ -343,7 +350,7 @@ class QueuePanel(QWidget):
         self._event_counts = {}
         self._done_count = 0
         self._start_time = 0
-        self._summary_label.setText("No batch running")
+        self._summary_label.setText(self._IDLE_TEXT)
         self._eta_label.setText("")
         self._speed_label.setText("")
 

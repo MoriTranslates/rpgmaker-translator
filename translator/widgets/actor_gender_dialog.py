@@ -6,6 +6,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from . import theme
+
 
 GENDER_OPTIONS = ["unknown", "female", "male"]
 
@@ -113,10 +115,14 @@ class ActorGenderDialog(QDialog):
         btn_row.addStretch()
 
         ok_btn = QPushButton("Apply")
+        ok_btn.setDefault(True)
+        theme.make_primary(ok_btn)
         ok_btn.clicked.connect(self.accept)
         btn_row.addWidget(ok_btn)
 
         skip_btn = QPushButton("Skip (use auto-detect)")
+        skip_btn.setToolTip(
+            "Keep the auto-detected genders shown above without changes")
         skip_btn.clicked.connect(self.reject)
         btn_row.addWidget(skip_btn)
 

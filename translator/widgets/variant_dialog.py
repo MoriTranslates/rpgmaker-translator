@@ -6,6 +6,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from . import theme
+
 
 class VariantDialog(QDialog):
     """Shows multiple translation variants and lets the user pick one."""
@@ -61,6 +63,8 @@ class VariantDialog(QDialog):
         btn_row.addStretch()
 
         apply_btn = QPushButton("Apply Selected")
+        apply_btn.setDefault(True)
+        theme.make_primary(apply_btn)
         apply_btn.clicked.connect(self.accept)
         btn_row.addWidget(apply_btn)
 
