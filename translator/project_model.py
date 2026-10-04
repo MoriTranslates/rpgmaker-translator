@@ -8,6 +8,15 @@ from dataclasses import dataclass, field, asdict
 from datetime import date
 from typing import Optional
 
+# Version of the entry-ID numbering written into saved states / patches.
+#   1 (or missing) — legacy: MV/MZ event IDs used one counter shared by all
+#                    command kinds, bumped only for extracted text; Ren'Py
+#                    skipped dialogue from aliases starting "pass"/"return".
+#   2              — per-kind MV/MZ counters independent of extraction,
+#                    narrower bare \N[n] namebox detection, Ren'Py fix.
+# Older states are remapped on load by translator/state_migration.py.
+ID_SCHEME = 2
+
 
 @dataclass
 class TranslationEntry:
@@ -23,6 +32,14 @@ class TranslationEntry:
     has_face: bool = False # True when 101 header has a face graphic (narrower text area)
 
 
+def _read_id_scheme(data: dict) -> int:
+    """ID scheme stored in a state / patch dict (missing or bad = 1)."""
+    try:
+        return int(data.get("id_scheme", 1))
+    except (TypeError, ValueError):
+        return 1
+
+
 @dataclass
 class TranslationProject:
     """Holds all translation entries for an RPG Maker project."""
@@ -31,6 +48,12 @@ class TranslationProject:
     entries: list = field(default_factory=list)
     glossary: dict = field(default_factory=dict)  # JP -> EN forced mappings
     actor_genders: dict = field(default_factory=dict)  # actor_id -> gender
+    # Entry-ID scheme of ``entries`` (see ID_SCHEME).  Fresh parses are
+    # current; load_state() reports what the file was written with.
+    id_scheme: int = ID_SCHEME
+    # Translated entries from a pre-migration state that no longer match
+    # any entry of the game (kept as dicts so nothing is silently lost).
+    migration_orphans: list = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -95,7 +118,10 @@ class TranslationProject:
             "entries": [asdict(e) for e in self.entries],
             "glossary": self.glossary,
             "actor_genders": self.actor_genders,
+            "id_scheme": self.id_scheme,
         }
+        if self.migration_orphans:
+            data["migration_orphans"] = self.migration_orphans
         dir_name = os.path.dirname(path) if os.path.dirname(path) else "."
         os.makedirs(dir_name, exist_ok=True)
         # Atomic write: write to temp file then rename to prevent corruption
@@ -132,6 +158,10 @@ class TranslationProject:
             except (ValueError, TypeError):
                 pass  # Skip malformed keys (e.g. manually edited save files)
         project.actor_genders = actor_genders
+        # Missing key = written before ID schemes existed (legacy scheme 1)
+        project.id_scheme = _read_id_scheme(data)
+        orphans = data.get("migration_orphans", [])
+        project.migration_orphans = orphans if isinstance(orphans, list) else []
         project._build_index()
         return project
 
@@ -159,9 +189,26 @@ class TranslationProject:
 
         stats = {"by_id": 0, "by_text": 0, "skipped": 0, "new": 0}
 
+        # Old states / patches written with an older ID scheme: their event
+        # IDs point at different entries now.  Remap them structurally
+        # (event + kind + text + order) onto this project's entries.
+        remap = {}
+        if getattr(old_project, "id_scheme", ID_SCHEME) < ID_SCHEME:
+            from .state_migration import remap_by_structure
+            remap = remap_by_structure(
+                list(old_by_id.values()), self.entries, self.project_type)
+
         for entry in self.entries:
             if entry.status != "untranslated":
                 stats["skipped"] += 1
+                continue
+
+            # Strategy 0: structural remap of an old-scheme ID
+            old = remap.get(id(entry))
+            if old is not None:
+                from .state_migration import transfer_entry
+                transfer_entry(old, entry, keep_context=False)
+                stats["by_id"] += 1
                 continue
 
             # Strategy 1: exact ID match
@@ -216,8 +263,15 @@ class TranslationProject:
                               "identical": int, "skipped": int, "new": int}
         """
         self._ensure_index()
+        from .state_migration import canonical_id, is_event_entry
 
-        donor_by_id = {e.id: e.original for e in donor_entries}
+        # Event IDs embed event / common-event / troop names, which an
+        # English release often translates — match on the name-free form.
+        donor_by_id = {canonical_id(e.id): e.original for e in donor_entries}
+        # A project still on an old ID scheme (migration skipped) numbers
+        # event entries differently from the donor parse: never ID-match
+        # those, it would attach English to the wrong line.
+        legacy_ids = getattr(self, "id_scheme", ID_SCHEME) < ID_SCHEME
 
         stats = {"imported": 0, "by_text": 0, "identical": 0,
                  "skipped": 0, "new": 0}
@@ -240,7 +294,10 @@ class TranslationProject:
                 continue
 
             # Strategy 2: ID matching (stable for database entries)
-            donor_text = donor_by_id.get(entry.id)
+            if legacy_ids and is_event_entry(entry.id):
+                donor_text = None
+            else:
+                donor_text = donor_by_id.get(canonical_id(entry.id))
             if donor_text is None:
                 stats["new"] += 1
                 continue
@@ -287,6 +344,7 @@ class TranslationProject:
             "entries": [asdict(e) for e in translated],
             "glossary": self.glossary,
             "actor_genders": self.actor_genders,
+            "id_scheme": self.id_scheme,
         }
 
         # metadata.json — human-readable info
@@ -363,6 +421,9 @@ class TranslationProject:
             except (ValueError, TypeError):
                 pass
         project.actor_genders = actor_genders
+        # Patches made before ID schemes existed carry legacy IDs —
+        # import_translations() remaps them onto the current scheme.
+        project.id_scheme = _read_id_scheme(data)
         project._build_index()
         # Stash metadata for the caller to display
         project._patch_metadata = metadata

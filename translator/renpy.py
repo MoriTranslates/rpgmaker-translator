@@ -30,12 +30,15 @@ _CHOICE_RE = re.compile(
 # Label definition: label name:
 _LABEL_RE = re.compile(r'^label\s+(\w+)\s*:')
 
-# Lines to skip (non-translatable Ren'Py commands)
+# Lines to skip (non-translatable Ren'Py commands).
+# Every keyword must end at a word boundary (\s, \s*:, \b ...) — a bare
+# prefix like "pass" would also swallow dialogue from a character alias
+# such as `passerby "..."`.
 _SKIP_RE = re.compile(
     r'^\s*(?:'
     r'default\s|init\s|python\s*:|image\s|transform\s|'
     r'scene\s|show\s|hide\s|with\s|play\s|stop\s|queue\s|'
-    r'pause\s|jump\s|call\s|return|pass|'
+    r'pause\s|jump\s|call\s|return\b|pass\b|'
     r'\$|if\s|elif\s|else\s*:|for\s|while\s|'
     r'#|label\s|menu\s*:|screen\s|style\s|'
     r'window\s|nvl\s|voice\s|camera\s|'
@@ -149,23 +152,37 @@ class RenPyParser:
     # ── Load project ──────────────────────────────────────────────────
 
     def load_project(self, project_dir: str,
-                     context_size: int = 3) -> list[TranslationEntry]:
-        """Extract all translatable strings from a Ren'Py project."""
+                     context_size: int = 3,
+                     prefer_backup: bool = False) -> list[TranslationEntry]:
+        """Extract all translatable strings from a Ren'Py project.
+
+        With ``prefer_backup`` each .rpy is read from ``game_original/``
+        when a backup copy exists (the live file holds exported English
+        after the first export) — used by the saved-state ID migration.
+        """
         game_dir = os.path.join(project_dir, "game")
+        backup_dir = os.path.join(project_dir, "game_original")
         entries: list[TranslationEntry] = []
+
+        def src_path(fname):
+            if prefer_backup:
+                bak = os.path.join(backup_dir, fname)
+                if os.path.isfile(bak):
+                    return bak
+            return os.path.join(game_dir, fname)
 
         # Parse character definitions first (for speaker context)
         self._char_names = {}
         for fname in sorted(os.listdir(game_dir)):
             if fname.endswith(".rpy"):
-                fpath = os.path.join(game_dir, fname)
+                fpath = src_path(fname)
                 self._parse_char_defs(fpath)
 
         # Extract character names from names.rpy (or wherever defines are)
         for fname in sorted(os.listdir(game_dir)):
             if not fname.endswith(".rpy"):
                 continue
-            fpath = os.path.join(game_dir, fname)
+            fpath = src_path(fname)
             entries.extend(self._extract_char_name_entries(fpath, fname))
 
         # Extract translatable strings from each .rpy file
@@ -174,7 +191,7 @@ class RenPyParser:
                 continue
             if fname in _SKIP_FILES:
                 continue
-            fpath = os.path.join(game_dir, fname)
+            fpath = src_path(fname)
             if not os.path.isfile(fpath):
                 continue
             try:

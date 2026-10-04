@@ -57,6 +57,12 @@ JP_REGEX = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uFF00-\uFFEF]')
 _NAMEBOX_RE = re.compile(r'\\[Nn]<([^>]+)>')
 # Actor code inside namebox: \n[1], \N[2], etc.
 _ACTOR_CODE_RE = re.compile(r'\\[Nn]\[(\d+)\]')
+# Bare actor code acting as a speaker label at the start of a dialogue
+# block: the whole first line, or followed by an opening quote / colon.
+# group(0) is just the code (lookahead), so the label punctuation stays in
+# the dialogue text.
+_BARE_NAMEBOX_RE = re.compile(
+    r'\\[Nn]\[(\d+)\](?=[ \t\u3000]*(?:$|\n|[「『：:]))')
 
 
 def _has_japanese(text: str) -> bool:
@@ -333,6 +339,32 @@ class RPGMakerMVParser:
             return self.load_project(project_dir)
         finally:
             self._require_japanese = True
+
+    def load_event_entries(self, project_dir: str) -> list:
+        """Parse only event-command entries (CommonEvents, Troops, Maps).
+
+        Reads the pristine ``data_original/`` backup when one exists (the
+        live ``data/`` holds exported English after the first export), so
+        the result matches what ``load_project`` produced on the untouched
+        game.  Used by the saved-state ID migration.
+        """
+        data_dir = self._find_data_dir(project_dir)
+        if not data_dir:
+            raise FileNotFoundError(f"No 'data' folder found in {project_dir}.")
+        backup_dir = data_dir + "_original"
+        src = backup_dir if os.path.isdir(backup_dir) else data_dir
+        self.load_warnings = []
+        self._actor_names = self._load_actor_names(src)
+        self._face_to_actor = self._load_face_to_actor(src)
+        entries = []
+        for parse_fn, fname in ((self._parse_common_events, "CommonEvents.json"),
+                                (self._parse_troops, "Troops.json")):
+            try:
+                entries.extend(parse_fn(src))
+            except Exception as exc:
+                self._note_load_failure(fname, exc)
+        entries.extend(self._parse_maps(src))
+        return entries
 
     def get_game_title(self, project_dir: str) -> str:
         """Read the raw game title from System.json (regardless of language)."""
@@ -1507,7 +1539,16 @@ class RPGMakerMVParser:
         entries = []
         recent_ctx = deque(maxlen=self.context_size)  # O(1) sliding window for context
         i = 0
-        dialog_counter = 0
+        # Entry-ID numbering (id scheme 2): one counter per command kind,
+        # bumped for EVERY command of that kind whether or not its text is
+        # extracted.  Numbering therefore depends only on the event
+        # structure — never on which strings are Japanese — so the
+        # Japanese game and its English release (load_project_raw) get the
+        # same IDs, and a non-Japanese choice / plugin command can't shift
+        # the IDs of later dialogue.  See translator/state_migration.py.
+        counters = {"dialog": 0, "choice": 0, "scroll": 0, "comment": 0,
+                    "change": 0, "plugin_mv": 0, "plugin_mz": 0,
+                    "script_var": 0}
         current_speaker = ""  # Track who is speaking
         current_has_face = False  # Track if current 101 header has a face graphic
 
@@ -1600,8 +1641,11 @@ class RPGMakerMVParser:
                             original=nb_name,
                         ))
                 elif not namebox:
-                    # Bare \n[N] or \N[N] at start of line (no angle brackets)
-                    bare_match = _ACTOR_CODE_RE.match(full_text)
+                    # Bare \n[N] / \N[N] used as a speaker label: alone on
+                    # the first line, or directly followed by 「『 or a colon.
+                    # Narration like "\N[1]は剣を手に入れた！" keeps its
+                    # subject (the code is part of the sentence).
+                    bare_match = _BARE_NAMEBOX_RE.match(full_text)
                     if bare_match:
                         actor_id = int(bare_match.group(1))
                         current_speaker = getattr(
@@ -1614,7 +1658,7 @@ class RPGMakerMVParser:
                 # Always create an entry for dialogue blocks so that the
                 # dialog counter stays aligned across game versions (even
                 # when some versions have blank/empty 401 lines).
-                dialog_counter += 1
+                counters["dialog"] += 1
                 extractable = self._should_extract(full_text)
                 ctx_parts = []
                 if current_speaker:
@@ -1624,7 +1668,7 @@ class RPGMakerMVParser:
                 ctx = "\n".join(ctx_parts)
 
                 entries.append(TranslationEntry(
-                    id=f"{filename}/{prefix}/dialog_{dialog_counter}",
+                    id=f"{filename}/{prefix}/dialog_{counters['dialog']}",
                     file=filename,
                     field="dialog",
                     original=full_text,
@@ -1639,13 +1683,13 @@ class RPGMakerMVParser:
 
             # Show Choices
             if code == CODE_SHOW_CHOICES and params:
+                counters["choice"] += 1
                 choices = params[0] if isinstance(params[0], list) else []
                 ctx = "\n---\n".join(recent_ctx) if recent_ctx else ""
                 for ci, choice in enumerate(choices):
                     if isinstance(choice, str) and self._should_extract(choice):
-                        dialog_counter += 1
                         entries.append(TranslationEntry(
-                            id=f"{filename}/{prefix}/choice_{dialog_counter}_{ci}",
+                            id=f"{filename}/{prefix}/choice_{counters['choice']}_{ci}",
                             file=filename,
                             field="choice",
                             original=choice,
@@ -1665,11 +1709,11 @@ class RPGMakerMVParser:
                     else:
                         break
                 full_text = "\n".join(lines)
-                dialog_counter += 1
+                counters["scroll"] += 1
                 extractable = self._should_extract(full_text)
                 ctx = "\n---\n".join(recent_ctx) if recent_ctx else ""
                 entries.append(TranslationEntry(
-                    id=f"{filename}/{prefix}/scroll_{dialog_counter}",
+                    id=f"{filename}/{prefix}/scroll_{counters['scroll']}",
                     file=filename,
                     field="scroll_text",
                     original=full_text,
@@ -1697,10 +1741,10 @@ class RPGMakerMVParser:
                     else:
                         break
                 full_text = "\n".join(lines)
+                counters["comment"] += 1
                 if self._should_extract(full_text):
-                    dialog_counter += 1
                     entries.append(TranslationEntry(
-                        id=f"{filename}/{prefix}/comment_{dialog_counter}",
+                        id=f"{filename}/{prefix}/comment_{counters['comment']}",
                         file=filename,
                         field="comment",
                         original=full_text,
@@ -1717,10 +1761,10 @@ class RPGMakerMVParser:
                     CODE_CHANGE_PROFILE: "profile",
                 }
                 fld = field_map[code]
+                counters["change"] += 1
                 if isinstance(text, str) and self._should_extract(text):
-                    dialog_counter += 1
                     entries.append(TranslationEntry(
-                        id=f"{filename}/{prefix}/change_{fld}_{dialog_counter}",
+                        id=f"{filename}/{prefix}/change_{fld}_{counters['change']}",
                         file=filename,
                         field=fld,
                         original=text,
@@ -1729,6 +1773,8 @@ class RPGMakerMVParser:
             # Plugin Command MV (356) — whitelist-based extraction.
             # Only extract text from known plugin commands via regex.
             # Full command stored in context for export reconstruction.
+            if code == CODE_PLUGIN_COMMAND_MV:
+                counters["plugin_mv"] += 1
             if code == CODE_PLUGIN_COMMAND_MV and params:
                 cmd_str = params[0] if isinstance(params[0], str) else ""
                 if cmd_str:
@@ -1737,9 +1783,8 @@ class RPGMakerMVParser:
                             continue
                         m = cmd_pattern.search(cmd_str)
                         if m and m.group(1) and _has_japanese(m.group(1)):
-                            dialog_counter += 1
                             entries.append(TranslationEntry(
-                                id=f"{filename}/{prefix}/plugin_mv_{dialog_counter}",
+                                id=f"{filename}/{prefix}/plugin_mv_{counters['plugin_mv']}",
                                 file=filename,
                                 field="plugin_command",
                                 original=m.group(1),
@@ -1749,6 +1794,8 @@ class RPGMakerMVParser:
 
             # Plugin Command MZ (357) — whitelist-based extraction.
             # Only extract specific param keys from known plugins.
+            if code == CODE_PLUGIN_COMMAND_MZ:
+                counters["plugin_mz"] += 1
             if code == CODE_PLUGIN_COMMAND_MZ and len(params) >= 4:
                 plugin_name = params[0] if isinstance(params[0], str) else ""
                 allowed_keys = _MZ_PLUGIN_COMMAND_WHITELIST.get(plugin_name)
@@ -1763,9 +1810,8 @@ class RPGMakerMVParser:
                             for key in allowed_keys:
                                 val = arg_dict.get(key, "")
                                 if isinstance(val, str) and _has_japanese(val):
-                                    dialog_counter += 1
                                     entries.append(TranslationEntry(
-                                        id=f"{filename}/{prefix}/plugin_mz_{dialog_counter}/{plugin_name}/{key}",
+                                        id=f"{filename}/{prefix}/plugin_mz_{counters['plugin_mz']}/{plugin_name}/{key}",
                                         file=filename,
                                         field="plugin_command",
                                         original=val,
@@ -1777,6 +1823,7 @@ class RPGMakerMVParser:
             # When expression is a quoted string literal like '"quest text"',
             # extract the inner text for translation.
             if self.extract_script_strings and code == CODE_CONTROL_VARIABLES:
+                counters["script_var"] += 1
                 if len(params) >= 5 and params[3] == 4:
                     expr = params[4] if isinstance(params[4], str) else ""
                     m = _CONTROL_VAR_STRING_RE.match(expr)
@@ -1785,9 +1832,8 @@ class RPGMakerMVParser:
                         text = re.sub(r'\\(.)', r'\1', m.group(1))
                         if text and _has_japanese(text):
                             var_id = params[0]
-                            dialog_counter += 1
                             entries.append(TranslationEntry(
-                                id=f"{filename}/{prefix}/script_var_{dialog_counter}",
+                                id=f"{filename}/{prefix}/script_var_{counters['script_var']}",
                                 file=filename,
                                 field="script_variable",
                                 original=text,
@@ -1797,6 +1843,8 @@ class RPGMakerMVParser:
             # Script (355/655) — experimental: extract string literals
             # from $gameVariables.setValue(N, "Japanese text") calls.
             if self.extract_script_strings and code == CODE_SCRIPT:
+                counters["script_var"] += 1
+                match_no = 0
                 # Collect full script: 355 line + all following 655 lines
                 script_lines = [params[0] if params and isinstance(params[0], str) else ""]
                 j = i + 1
@@ -1814,9 +1862,9 @@ class RPGMakerMVParser:
                     for m in pattern.finditer(full_script):
                         var_id, _quote, text = m.group(1), m.group(2), m.group(3)
                         if text and _has_japanese(text):
-                            dialog_counter += 1
+                            match_no += 1
                             entries.append(TranslationEntry(
-                                id=f"{filename}/{prefix}/script_var_{dialog_counter}",
+                                id=f"{filename}/{prefix}/script_var_{counters['script_var']}_{match_no}",
                                 file=filename,
                                 field="script_variable",
                                 original=text,

@@ -126,27 +126,27 @@ def test_mz_speaker_name_header(by_id):
 
 
 def test_choices(by_id):
-    yes = by_id["Map001.json/Ev1(EV001)/p0/choice_3_0"]
-    no = by_id["Map001.json/Ev1(EV001)/p0/choice_4_1"]
+    yes = by_id["Map001.json/Ev1(EV001)/p0/choice_1_0"]
+    no = by_id["Map001.json/Ev1(EV001)/p0/choice_1_1"]
     assert (yes.field, yes.original) == ("choice", "はい")
     assert (no.field, no.original) == ("choice", "いいえ")
 
 
 def test_nested_branch_dialogue(by_id):
-    e = by_id["Map001.json/Ev1(EV001)/p0/dialog_5"]
+    e = by_id["Map001.json/Ev1(EV001)/p0/dialog_3"]
     assert e.original == "ありがとう！"
 
 
 def test_scroll_text(by_id):
-    e = by_id["Map001.json/Ev1(EV001)/p0/scroll_6"]
+    e = by_id["Map001.json/Ev1(EV001)/p0/scroll_1"]
     assert e.field == "scroll_text"
     assert e.original == "遠い昔、\n世界は闇に包まれていた。"
 
 
 def test_change_name_and_plugin_command(by_id):
-    e = by_id["Map001.json/Ev1(EV001)/p0/change_name_7"]
+    e = by_id["Map001.json/Ev1(EV001)/p0/change_name_1"]
     assert (e.field, e.original) == ("name", "アリス姫")
-    p = by_id["Map001.json/Ev1(EV001)/p0/plugin_mv_8"]
+    p = by_id["Map001.json/Ev1(EV001)/p0/plugin_mv_1"]
     assert p.original == "宝箱"
     assert p.context == "[PLUGIN_CMD:D_TEXT 宝箱 24]"
 
