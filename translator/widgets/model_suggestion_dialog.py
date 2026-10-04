@@ -1,4 +1,5 @@
-"""Model suggestion dialog — GPU-aware recommendations for Sugoi/Qwen3 models."""
+"""Model suggestion dialog — GPU-aware model list (Qwen3.5 9B recommended,
+Sugoi Ultra as the alternative JP→EN specialist)."""
 
 import subprocess
 import logging
@@ -37,12 +38,17 @@ _SUGOI_MODELS = [
      "hf.co/sugoitoolkit/Sugoi-32B-Ultra-GGUF:F16"),
 ]
 
+# Recommended default for every target language
+RECOMMENDED_MODEL = "qwen3.5:9b"
+
 _QWEN3_MODELS = [
-    # (label, vram_gb, ollama_tag)
-    ("Qwen3 8B",       8, "qwen3:8b"),
-    ("Qwen3 14B",     12, "qwen3:14b"),
-    ("Qwen3 14B Q8",  17, "qwen3:14b-q8_0"),
-    ("Qwen3 30B MoE", 24, "qwen3:30b-a3b"),
+    # (label, vram_gb, ollama_tag, notes) — recommended model first
+    ("Qwen3.5 9B",     8, RECOMMENDED_MODEL,
+     "Recommended — 262K context, multimodal (text + images), ~6.6 GB"),
+    ("Qwen3 8B",       8, "qwen3:8b", "Older general model"),
+    ("Qwen3 14B",     12, "qwen3:14b", "Older general model"),
+    ("Qwen3 14B Q8",  17, "qwen3:14b-q8_0", "Older general model, 8-bit"),
+    ("Qwen3 30B MoE", 24, "qwen3:30b-a3b", "Older general model, large"),
 ]
 
 # VRAM headroom for Windows display + KV cache overhead
@@ -81,7 +87,7 @@ def normalize_model_tag(tag: str) -> str:
     return t
 
 
-def _recommend_model(vram_mb: float) -> str:
+def _best_sugoi_model(vram_mb: float) -> str:
     """Return the ollama tag of the best Sugoi model that fits in VRAM."""
     vram_gb = vram_mb / 1024
     usable = vram_gb - _VRAM_OVERHEAD_GB
@@ -90,6 +96,12 @@ def _recommend_model(vram_mb: float) -> str:
         if vram_needed <= usable:
             best = tag  # keep updating — list is ordered by quality ascending
     return best or _SUGOI_MODELS[0][5]  # fallback to smallest
+
+
+def _recommend_model(vram_mb: float = 0) -> str:
+    """The recommended model: Qwen3.5 9B (~6.6 GB, partial offload on
+    smaller GPUs still works)."""
+    return RECOMMENDED_MODEL
 
 
 # ── Pull worker ───────────────────────────────────────────────────
@@ -151,7 +163,7 @@ class ModelSuggestionDialog(QDialog):
 
         # Detect GPU
         self._gpu_name, self._vram_mb = _detect_gpu()
-        self._recommended = _recommend_model(self._vram_mb) if self._vram_mb else None
+        self._recommended = _recommend_model(self._vram_mb)
 
         self._build_ui()
 
@@ -170,7 +182,8 @@ class ModelSuggestionDialog(QDialog):
         layout.addWidget(header)
 
         # ── Sugoi models table ────────────────────────────────────
-        sugoi_group = QGroupBox("Sugoi Ultra — Japanese to English (Recommended)")
+        sugoi_group = QGroupBox(
+            "Sugoi Ultra — Alternative Japanese → English specialist")
         sugoi_layout = QVBoxLayout(sugoi_group)
 
         self._table = QTableWidget()
@@ -237,13 +250,14 @@ class ModelSuggestionDialog(QDialog):
         layout.addWidget(sugoi_group)
 
         # ── Qwen3 models (compact) ───────────────────────────────
-        qwen_group = QGroupBox("Qwen3 — Multi-Language (Non-English Targets)")
+        qwen_group = QGroupBox(
+            "Qwen3.5 — Recommended (all target languages, image OCR)")
         qwen_layout = QVBoxLayout(qwen_group)
 
         self._qwen_table = QTableWidget()
         self._qwen_table.setColumnCount(4)
         self._qwen_table.setHorizontalHeaderLabels(
-            ["Model", "VRAM", "Command", "Status"])
+            ["Model", "VRAM", "Notes", "Status"])
         self._qwen_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
         self._qwen_table.setEditTriggers(
@@ -254,15 +268,20 @@ class ModelSuggestionDialog(QDialog):
         self._qwen_table.setSelectionMode(
             QTableWidget.SelectionMode.SingleSelection)
         self._qwen_table.setRowCount(len(_QWEN3_MODELS))
-        self._qwen_table.setMaximumHeight(140)
+        self._qwen_table.setMaximumHeight(180)
+        header = self._qwen_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
 
-        for i, (label, vram_gb, tag) in enumerate(_QWEN3_MODELS):
+        for i, (label, vram_gb, tag, notes) in enumerate(_QWEN3_MODELS):
             fits = self._fits(vram_gb)
             installed = self._is_installed(tag)
+            is_rec = (tag == self._recommended)
             items = [
-                QTableWidgetItem(label),
+                QTableWidgetItem(f"{label} (Recommended)" if is_rec else label),
                 QTableWidgetItem(f"~{vram_gb} GB"),
-                QTableWidgetItem(f"ollama pull {tag}"),
+                QTableWidgetItem(notes),
             ]
             if installed:
                 status = QTableWidgetItem("Installed")
@@ -276,15 +295,22 @@ class ModelSuggestionDialog(QDialog):
             items.append(status)
 
             for j, item in enumerate(items):
-                if not fits:
+                if not fits and not is_rec:
                     item.setForeground(theme.qcolor("text_dim"))
+                if is_rec:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setBackground(theme.qcolor("row_reviewed"))
+                item.setToolTip(f"ollama pull {tag}")
                 item.setData(Qt.ItemDataRole.UserRole, tag)
                 self._qwen_table.setItem(i, j, item)
 
         self._qwen_table.selectionModel().selectionChanged.connect(
             self._on_qwen_selected)
         qwen_layout.addWidget(self._qwen_table)
-        layout.addWidget(qwen_group)
+        # Recommended family first, right under the GPU header
+        layout.insertWidget(1, qwen_group)
 
         # ── Command + buttons ─────────────────────────────────────
         cmd_layout = QHBoxLayout()
@@ -329,10 +355,12 @@ class ModelSuggestionDialog(QDialog):
 
         # Auto-select recommended
         if self._recommended:
-            for i in range(self._table.rowCount()):
-                item = self._table.item(i, 0)
-                if item and item.data(Qt.ItemDataRole.UserRole) == self._recommended:
-                    self._table.selectRow(i)
+            for table in (self._qwen_table, self._table):
+                rows = [i for i in range(table.rowCount())
+                        if table.item(i, 0) and table.item(i, 0).data(
+                            Qt.ItemDataRole.UserRole) == self._recommended]
+                if rows:
+                    table.selectRow(rows[0])
                     break
 
     def _fits(self, vram_needed_gb: float) -> bool:

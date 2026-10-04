@@ -425,7 +425,8 @@ _NAME_SYSTEM_PROMPT = (
 )
 
 # Supported target languages with quality ratings.
-# For JP→EN: Sugoi Ultra 14B is the best choice (fine-tuned on VN/RPG JP→EN data).
+# Qwen3.5 9B is the recommended default; Sugoi Ultra 14B is an alternative
+# JP→EN specialist (fine-tuned on VN/RPG JP→EN data).
 # For other languages: Qwen3 supports 119 languages, trained on 36T tokens.
 # Ratings reflect JP→target translation quality specifically.
 # 5★/4★ = works well even on 8b models
@@ -433,7 +434,7 @@ _NAME_SYSTEM_PROMPT = (
 # 2★    = 14b+ strongly recommended, may struggle on 8b
 # (name, stars, tooltip description)
 TARGET_LANGUAGES = [
-    ("English",               "\u2605\u2605\u2605\u2605\u2605", "Best — use Sugoi Ultra 14B for optimal JP→EN quality"),
+    ("English",               "\u2605\u2605\u2605\u2605\u2605", "Best — Qwen3.5 9B recommended; Sugoi Ultra 14B is an alternative JP→EN specialist"),
     ("Japanese",              "\u2605\u2605\u2605\u2605\u2605", "Excellent — Qwen's strongest CJK language. For EN→JP, CN→JP, KR→JP translation"),
     ("Chinese (Simplified)",  "\u2605\u2605\u2605\u2605\u2605", "Excellent — Qwen's native language, huge JP\u2194CN corpus. Works well on 8b+"),
     ("Chinese (Traditional)", "\u2605\u2605\u2605\u2605\u2606", "Excellent — close to Simplified, strong CJK support. Works well on 8b+"),

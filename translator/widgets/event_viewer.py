@@ -41,6 +41,8 @@ class EventViewerPanel(QWidget):
 
     status_changed = Signal()     # emitted when entries are modified
     entry_updated = Signal(str)   # emitted with entry_id after inline edit
+    bulk_edit_begin = Signal()    # before a multi-entry edit (undo snapshot)
+    bulk_edit_done = Signal(str)  # after it, with an undo label
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -621,6 +623,7 @@ class EventViewerPanel(QWidget):
         if not self._current_entries:
             return
 
+        self.bulk_edit_begin.emit()
         self._detail_table.blockSignals(True)
         for row, entry in enumerate(self._current_entries):
             # Only promote entries that actually have a translation
@@ -633,6 +636,7 @@ class EventViewerPanel(QWidget):
                 status_item.setText(_STATUS_ICONS.get(entry.status, ""))
             self._apply_row_colors(row, entry)
         self._detail_table.blockSignals(False)
+        self.bulk_edit_done.emit("Mark Event Reviewed")
 
         self._update_event_label()
 

@@ -179,6 +179,8 @@ class TranslationTable(QWidget):
     polish_requested = pyqtSignal(list)       # List of entry IDs to polish
     status_changed = pyqtSignal()             # Emitted when any status changes
     glossary_add = pyqtSignal(str, str, str)  # jp_term, en_term, "project"|"general"
+    bulk_edit_begin = pyqtSignal()            # before a project-wide edit (undo snapshot)
+    bulk_edit_done = pyqtSignal(str)          # after it, with an undo label
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1461,7 +1463,8 @@ class TranslationTable(QWidget):
             self, "Replace All",
             f"Replace {occurrences} occurrence(s) of “{find}” "
             f"with “{replace}” in {len(hits)} translation(s) "
-            "across the whole project?\n\nThis can't be undone.",
+            "across the whole project?\n\n"
+            "Undo with Translate › Undo Last Bulk Change (Ctrl+Shift+Z).",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
@@ -1470,6 +1473,7 @@ class TranslationTable(QWidget):
 
         entries_changed = 0
         total_occurrences = 0
+        self.bulk_edit_begin.emit()
         for entry in self._all_entries:
             if not entry.translation or find not in entry.translation:
                 continue
@@ -1479,6 +1483,7 @@ class TranslationTable(QWidget):
                 entry.status = "untranslated"
             total_occurrences += count
             entries_changed += 1
+        self.bulk_edit_done.emit("Replace All")
 
         if entries_changed:
             self._apply_filter()

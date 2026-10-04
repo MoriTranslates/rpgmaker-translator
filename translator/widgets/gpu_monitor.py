@@ -23,6 +23,8 @@ class GPUMonitorPanel(QWidget):
     def __init__(self, parent=None, poll_ms: int = 2000):
         super().__init__(parent)
         self._available = False
+        self._ever_available = False
+        self._disabled = False
         self._temp = None
         self._build_ui()
         self._proc = QProcess(self)
@@ -96,9 +98,8 @@ class GPUMonitorPanel(QWidget):
     def _on_proc_error(self, error):
         """nvidia-smi missing or crashed."""
         if error == QProcess.ProcessError.FailedToStart:
-            # No nvidia-smi on this machine — stop polling for good
-            self._timer.stop()
-            self._set_unavailable()
+            # No nvidia-smi on this machine — hide the panel for good
+            self._disable()
         elif error == QProcess.ProcessError.Crashed and self._available:
             self._set_unavailable()
 
@@ -110,7 +111,9 @@ class GPUMonitorPanel(QWidget):
             "utf-8", errors="replace")
         if exit_code != 0:
             if self._available:
-                self._set_unavailable()
+                self._set_unavailable()  # transient failure — keep the panel
+            elif not self._ever_available:
+                self._disable()  # nvidia-smi present but no usable NVIDIA GPU
             return
         try:
             line = output.strip().split("\n")[0]
@@ -128,6 +131,7 @@ class GPUMonitorPanel(QWidget):
             return
 
         self._available = True
+        self._ever_available = True
         self._name_label.setText(f"GPU: {name}")
 
         # VRAM
@@ -155,6 +159,17 @@ class GPUMonitorPanel(QWidget):
         super().showEvent(event)
         if self._timer.isActive():
             self._poll()
+
+    def _disable(self):
+        """No NVIDIA GPU / nvidia-smi: stop polling and hide the panel."""
+        self._disabled = True
+        self._timer.stop()
+        self._set_unavailable()
+        self.hide()
+
+    def setVisible(self, visible: bool):
+        # Never come back (e.g. a parent re-showing children) once disabled
+        super().setVisible(visible and not self._disabled)
 
     def _set_unavailable(self):
         """Mark GPU as unavailable."""

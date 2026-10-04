@@ -40,6 +40,11 @@ class FileTreeWidget(QTreeWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.setUniformRowHeights(True)
         self.itemClicked.connect(self._on_item_clicked)
+        # Keyboard navigation filters like a click does.  A mouse press also
+        # changes the current item; that change is left to itemClicked so a
+        # click never filters twice.
+        self.currentItemChanged.connect(self._on_current_item_changed)
+        self._suppress_current = False
         self._project = None
 
     def load_project(self, project: TranslationProject):
@@ -160,8 +165,32 @@ class FileTreeWidget(QTreeWidget):
             color = theme.qcolor("text_dim")
         item.setForeground(1, color)
 
+    def mousePressEvent(self, event):
+        self._suppress_current = True
+        try:
+            super().mousePressEvent(event)
+        finally:
+            self._suppress_current = False
+
+    def focusInEvent(self, event):
+        # Qt picks a default current item on first focus — not a user choice
+        self._suppress_current = True
+        try:
+            super().focusInEvent(event)
+        finally:
+            self._suppress_current = False
+
+    def _on_current_item_changed(self, current, previous):
+        """Arrow keys / programmatic selection — filter like a click."""
+        if current is None or self._suppress_current:
+            return
+        self._emit_for_item(current)
+
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int):
         """Handle click — emit the appropriate signal."""
+        self._emit_for_item(item)
+
+    def _emit_for_item(self, item: QTreeWidgetItem):
         filename = item.data(0, Qt.ItemDataRole.UserRole)
         if filename == "__ALL__":
             self.all_selected.emit()

@@ -9,12 +9,76 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-10-04
 
 First numbered release. Earlier builds were run from source only; from this
 version on, a ready-to-run Windows download is attached to each GitHub Release.
 
+### Why this version — please upgrade
+
+Every part of the app (translation engine, all game-format parsers, export,
+interface and image translation) was reviewed line by line and roughly 200
+bugs were fixed. A test suite of 400+ automated tests now runs a fake game
+through the full translate → export pipeline on every change, so these bugs
+can't quietly come back.
+
+Several bugs in the old version could **lose your work or damage game files**.
+If you used an earlier version, these are the ones that matter most:
+
+- **Lost progress:** opening a second game could auto-save it *over the first
+  game's save file*, wiping its translations.
+- **Translations in the wrong game:** switching or closing a project while a
+  batch was running could write the old game's translations into the new one.
+- **Edits landing on the wrong line:** after filtering the table or switching
+  events in the Event Viewer, typing could change a *different* entry than the
+  one shown in the editor.
+- **Crashes mid-batch:** the app could crash outright (losing anything since
+  the last auto-save) when the glossary updated during a batch, or get stuck
+  showing "translating" forever after an error.
+- **Good English being "fixed" into bad English:** the clean-up step split
+  correct words ("Understand" → "Under stand", "Nevertheless" → "Never the
+  less") and erased valid translations of lines quoted with `"…"`.
+- **Games that wouldn't start after Restore Originals** (MV/MZ with word wrap
+  injected), and an `uninstall.bat` in exported patches that never restored
+  anything.
+- **Corrupted game files:** Wolf RPG database export was off by one byte per
+  string and crashed partway; RPG Maker 2000/2003 treated its own backups as
+  maps; Ren'Py, VX Ace, RPG Maker 2000/2003 and CSV exports could put
+  translations on the wrong lines or drop the last line.
+- **Image translation** placed text in the wrong spot on most images, could
+  erase opaque title screens entirely, and overwrote original images without
+  a backup when exporting more than one folder.
+- **Security:** a malicious Kirikiri `.xp3` archive could write files outside
+  the game folder when extracted.
+
+The pre-overhaul code is preserved as the `legacy/v2` branch and the
+`v2-pre-overhaul` tag if you ever need it, but it is no longer maintained.
+
+### Upgrading from an older version
+- Your saved projects (`_translation_state.json` / auto-saves) and
+  `_settings.json` keep working — open them as usual. RPG Maker MV/MZ and
+  Ren'Py projects are upgraded automatically the first time you load them
+  (a backup of the old save is kept as `<name>.pre-v2.json`, and a message
+  tells you how many entries were carried over).
+- Lines that start with a character-name code (e.g. `\N[1]は剣を手に入れた！`)
+  used to lose the name. They are now kept as one line; the upgrade message
+  tells you how many to retranslate.
+- Re-export ("Apply Translation to Game") once after upgrading so your game
+  files get the corrected export.
+
 ### Added
+- Welcome screen and Project › Open Recent for your last 10 games.
+- Translate › Undo Last Bulk Change (Ctrl+Shift+Z) for Replace All, Apply
+  Glossary, Word Wrap, Clean Up, Consistency Pass, Reset All and Mark Event
+  Reviewed.
+- A working light theme, clearer error messages, confirmation before
+  destructive actions, and remembered window layout.
+- Qwen 3.5 9B is now the recommended model in the model picker; Sugoi Ultra
+  is listed as the alternative Japanese → English specialist.
+- "Import from Game Folder" (pulling text from an English release of the same
+  game) now matches lines reliably even when the English version adds or
+  renames things.
+- Help → About with the version number.
 - Windows download: a portable `RPGMakerTranslator-<version>-win64.zip` on the
   Releases page. Extract it and run `RPGMakerTranslator.exe`, no Python install needed.
 - Version number shown in the app and in the exe's Windows file properties.

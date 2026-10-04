@@ -16,8 +16,15 @@ from ..ai_client import (
     get_model_pricing, CLOUD_DEFAULT_WORKERS, LOCAL_DEFAULT_WORKERS,
 )
 from ..rpgmaker_mv import RPGMakerMVParser
-from .model_suggestion_dialog import ModelSuggestionDialog, normalize_model_tag
+from .model_suggestion_dialog import (
+    ModelSuggestionDialog, normalize_model_tag, RECOMMENDED_MODEL,
+)
 from . import theme
+
+
+def is_recommended_model(name: str) -> bool:
+    """True for the recommended default model (Qwen3.5 9B)."""
+    return normalize_model_tag(name) == normalize_model_tag(RECOMMENDED_MODEL)
 
 
 class _ModelFetcher(QThread):
@@ -808,17 +815,25 @@ class SettingsDialog(QDialog):
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
         if models:
+            # Recommended (Qwen3.5) first, then Sugoi, then everything else
+            recommended = sorted(m for m in models if is_recommended_model(m))
             sugoi = sorted(m for m in models if is_sugoi_model(m))
-            others = sorted(m for m in models if not is_sugoi_model(m))
-            for m in sugoi:
-                self.model_combo.addItem(m)
-                idx = self.model_combo.count() - 1
-                self.model_combo.setItemData(
-                    idx, "Recommended for JP\u2192EN (Sugoi \u2014 VN/RPG specialized)",
-                    Qt.ItemDataRole.ToolTipRole,
-                )
-            for m in others:
-                self.model_combo.addItem(m)
+            others = sorted(m for m in models
+                            if m not in recommended and m not in sugoi)
+            tips = (
+                (recommended, "Recommended \u2014 Qwen3.5: 262K context, "
+                              "multimodal (text + images), ~6.6 GB"),
+                (sugoi, "Alternative JP\u2192EN specialist "
+                        "(Sugoi \u2014 VN/RPG fine-tuned)"),
+                (others, ""),
+            )
+            for group, tip in tips:
+                for m in group:
+                    self.model_combo.addItem(m)
+                    if tip:
+                        self.model_combo.setItemData(
+                            self.model_combo.count() - 1, tip,
+                            Qt.ItemDataRole.ToolTipRole)
             if current in models:
                 self.model_combo.setCurrentText(current)
             self.status_label.setText(f"Found {len(models)} model(s)")

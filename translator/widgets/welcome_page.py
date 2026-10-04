@@ -1,8 +1,12 @@
 """Start page shown while no project is open (instead of an empty table)."""
 
-from PyQt6.QtCore import Qt
+import html
+import os
+
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
+    QListWidget, QListWidgetItem, QApplication,
 )
 
 from . import theme
@@ -26,12 +30,20 @@ _STEPS = (
      "The original files are backed up first."),
 )
 
+# Recent list: rows visible before it scrolls
+_RECENT_VISIBLE_ROWS = 5
+_RECENT_ROW_HEIGHT = 40
+_RECENT_PATH_WIDTH = 540  # px — longer paths are elided in the middle
+
 
 class WelcomePage(QWidget):
     """Friendly empty state with the two ways to get started."""
 
+    recent_selected = pyqtSignal(str)  # folder path of a recent project
+
     def __init__(self, open_action, load_action, parent=None):
         super().__init__(parent)
+        self._recent: list[str] = []
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 24, 24, 24)
         outer.addStretch(2)
@@ -73,6 +85,25 @@ class WelcomePage(QWidget):
         col.addLayout(buttons)
         col.addSpacing(16)
 
+        # ── Recent projects (hidden while the list is empty) ──
+        self._recent_box = QWidget()
+        recent_col = QVBoxLayout(self._recent_box)
+        recent_col.setContentsMargins(0, 0, 0, 8)
+        recent_col.setSpacing(4)
+        self._recent_header = QLabel("Recent projects")
+        recent_col.addWidget(self._recent_header)
+        self.recent_list = QListWidget()
+        self.recent_list.setObjectName("recentList")
+        self.recent_list.setFrameShape(QFrame.Shape.NoFrame)
+        self.recent_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.recent_list.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.recent_list.itemClicked.connect(self._on_recent_clicked)
+        self.recent_list.itemActivated.connect(self._on_recent_activated)
+        recent_col.addWidget(self.recent_list)
+        col.addWidget(self._recent_box)
+        self._recent_box.setVisible(False)
+
         self._step_labels = []
         for num, head, body in _STEPS:
             row = QHBoxLayout()
@@ -104,6 +135,48 @@ class WelcomePage(QWidget):
         self._card = card
         self.apply_theme()
 
+    # ── Recent projects ──────────────────────────────────────────
+
+    def set_recent(self, paths: list):
+        """Show these folders (most recent first); hide the section if empty."""
+        self._recent = list(paths)
+        self.recent_list.clear()
+        fm = self.fontMetrics()
+        for path in self._recent:
+            name = os.path.basename(os.path.normpath(path)) or path
+            shown_path = fm.elidedText(
+                path, Qt.TextElideMode.ElideMiddle, _RECENT_PATH_WIDTH)
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setToolTip(path)
+            item.setSizeHint(QSize(0, _RECENT_ROW_HEIGHT))
+            self.recent_list.addItem(item)
+            label = QLabel(
+                f"<span>{html.escape(name)}</span><br>"
+                f"<span style=\"color: {theme.c('text_dim')}; "
+                f"font-size: 8pt;\">{html.escape(shown_path)}</span>")
+            label.setTextFormat(Qt.TextFormat.RichText)
+            label.setContentsMargins(8, 2, 8, 2)
+            # Clicks go to the list item, not the label
+            label.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            self.recent_list.setItemWidget(item, label)
+        rows = min(len(self._recent), _RECENT_VISIBLE_ROWS)
+        self.recent_list.setFixedHeight(rows * _RECENT_ROW_HEIGHT + 4)
+        self._recent_box.setVisible(bool(self._recent))
+
+    def _on_recent_clicked(self, item: QListWidgetItem):
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path:
+            self.recent_selected.emit(path)
+
+    def _on_recent_activated(self, item: QListWidgetItem):
+        # Enter key only — mouse clicks are handled by itemClicked
+        if QApplication.mouseButtons() == Qt.MouseButton.NoButton:
+            self._on_recent_clicked(item)
+
+    # ── Theme ────────────────────────────────────────────────────
+
     def apply_theme(self):
         self._card.setStyleSheet(
             f"QFrame#welcomeCard {{ background-color: {theme.c('panel')}; "
@@ -112,9 +185,21 @@ class WelcomePage(QWidget):
         self._subtitle.setStyleSheet(
             f"font-size: 11pt; color: {theme.c('text_muted')};")
         self._engines.setStyleSheet(theme.hint_css() + " font-size: 8pt;")
+        self._recent_header.setStyleSheet(
+            f"font-weight: bold; color: {theme.c('text_soft')};")
+        self.recent_list.setStyleSheet(
+            f"QListWidget#recentList {{ background: transparent; "
+            f"border: none; outline: none; }}"
+            f"QListWidget#recentList::item {{ border-radius: 4px; }}"
+            f"QListWidget#recentList::item:hover {{ "
+            f"background: {theme.c('button')}; }}"
+            f"QListWidget#recentList::item:selected {{ "
+            f"background: {theme.c('selection')}; }}")
         for badge, text in self._step_labels:
             badge.setStyleSheet(
                 f"background-color: {theme.c('border')}; "
                 f"color: {theme.c('accent')}; border-radius: 12px; "
                 "font-weight: bold;")
             text.setStyleSheet(f"color: {theme.c('text_soft')};")
+        if self._recent:
+            self.set_recent(self._recent)  # path color comes from the theme

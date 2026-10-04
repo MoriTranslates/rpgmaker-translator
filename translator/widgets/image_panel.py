@@ -21,6 +21,7 @@ from ..image_translator import (
     read_encryption_key, decrypt_rpgmvp, encrypt_to_rpgmvp,
 )
 from . import theme
+from .background_task import run_in_thread
 
 log = logging.getLogger(__name__)
 
@@ -186,6 +187,7 @@ class ImagePanel(QWidget):
         # Store full-size pixmaps for rescaling on resize
         self._orig_pixmap = None
         self._trans_pixmap = None
+        self._rendering = False  # Apply Changes render in flight
         self._build_ui()
 
     @staticmethod
@@ -567,7 +569,7 @@ class ImagePanel(QWidget):
 
         # Populate region editor
         self._populate_regions(entry)
-        self.apply_btn.setEnabled(bool(entry.regions))
+        self.apply_btn.setEnabled(bool(entry.regions) and not self._rendering)
 
     def _scale_preview(self, label: QLabel, pixmap: QPixmap):
         """Scale pixmap to fit label while keeping aspect ratio."""
@@ -641,30 +643,57 @@ class ImagePanel(QWidget):
         if not regions:
             return
 
+        if self._rendering:
+            return
+
         # Update entry regions
         entry.regions = regions
 
-        # Render (always .png output)
+        # Render (always .png output) on a worker thread
         rel = os.path.join(entry.subdir, _png_output_name(entry.filename))
         out_path = os.path.join(self._out_base, rel)
-        try:
-            mode = self.render_mode.currentData() or ImageTranslator.RENDER_PRESERVE
-            self._translator.render_translated(
-                _source_path(self._img_dir, entry), regions, out_path, mode=mode)
+        mode = self.render_mode.currentData() or ImageTranslator.RENDER_PRESERVE
+        entries = self._entries  # detect a folder/project switch meanwhile
+        self._set_rendering(True)
+
+        def on_done(_result):
+            self._set_rendering(False)
+            if self._entries is not entries:
+                return  # Folder changed while rendering — nothing to show
             entry.output_path = out_path
             entry.status = "translated"
             entry.error = ""
             entry.verify_ok = None  # re-rendered — previous verify is stale
-
-            # Update preview
-            self._trans_pixmap = QPixmap(out_path)
-            self._scale_preview(self.trans_label, self._trans_pixmap)
-
-            # Refresh table row
+            # Update preview if this image is still the one shown
+            if (0 <= self._selected_idx < len(self._entries)
+                    and self._entries[self._selected_idx] is entry):
+                self._trans_pixmap = QPixmap(out_path)
+                self._scale_preview(self.trans_label, self._trans_pixmap)
             self._refresh_table()
 
-        except Exception as e:
-            QMessageBox.warning(self, "Render Error", f"Failed to render image: {e}")
+        def on_error(msg):
+            self._set_rendering(False)
+            QMessageBox.warning(
+                self, "Render Error", f"Failed to render image: {msg}")
+
+        run_in_thread(
+            self, self._translator.render_translated,
+            _source_path(self._img_dir, entry), regions, out_path,
+            mode=mode, on_done=on_done, on_error=on_error)
+
+    def _set_rendering(self, busy: bool):
+        """Busy state for Apply Changes (button disabled while rendering)."""
+        self._rendering = busy
+        self.apply_btn.setText("Rendering…" if busy else "Apply Changes")
+        if busy:
+            self.apply_btn.setEnabled(False)
+        else:
+            self.apply_btn.setEnabled(self._can_apply())
+
+    def _can_apply(self) -> bool:
+        if self._rendering or not (0 <= self._selected_idx < len(self._entries)):
+            return False
+        return bool(self._entries[self._selected_idx].regions)
 
     # ── Translation actions ───────────────────────────────────────
 
@@ -792,7 +821,7 @@ class ImagePanel(QWidget):
                 self._trans_pixmap = QPixmap(entry.output_path)
                 self._scale_preview(self.trans_label, self._trans_pixmap)
             self._populate_regions(entry)
-            self.apply_btn.setEnabled(bool(entry.regions))
+            self.apply_btn.setEnabled(bool(entry.regions) and not self._rendering)
 
     def _on_image_error(self, idx: int, msg: str):
         """Update UI after an image error."""

@@ -1,5 +1,6 @@
 """Main application window — ties together all widgets."""
 
+import functools
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ from PyQt6.QtWidgets import (
     QApplication, QProgressDialog, QMenu, QInputDialog, QDialog, QTabWidget,
     QCheckBox, QDialogButtonBox,
 )
-from PyQt6.QtCore import Qt, QSize, QTimer, QByteArray
+from PyQt6.QtCore import Qt, QSize, QTimer, QByteArray, QEventLoop
 from PyQt6.QtGui import QAction, QPalette, QColor, QKeySequence, QShortcut
 
 from ..version import __version__
@@ -58,6 +59,32 @@ from .pipeline_bar import PipelineBar
 from .background_task import run_in_thread, running_count, wait_all
 from . import theme
 from .welcome_page import WelcomePage
+
+_MAX_RECENT_PROJECTS = 10
+
+
+def _undoable(label: str):
+    """Make a no-argument bulk-edit method undoable (Undo Last Bulk Change).
+
+    Snapshots every entry before the method runs and records whatever it
+    changed afterwards.  Cancelled/no-op runs record nothing.  If the method
+    started an engine run (e.g. "Retranslate"), nothing is recorded — engine
+    changes land asynchronously and aren't undoable.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(self):
+            before = self._snapshot_entries()
+            project = self.project
+            was_running = self.engine.is_running
+            try:
+                return fn(self)
+            finally:
+                if (self.project is project
+                        and not (self.engine.is_running and not was_running)):
+                    self._record_undo(label, before)
+        return wrapper
+    return deco
 
 
 class MainWindow(QMainWindow):
@@ -149,6 +176,10 @@ class MainWindow(QMainWindow):
         self._vocab_genders = {}
         self._busy = False              # re-entrancy guard (actor pre-translate etc.)
         self._closing = False
+        self._recent_projects: list[str] = []  # most recent first
+        # Single-level undo for bulk edits: (label, {entry_id: (translation, status)})
+        self._undo_snapshot = None
+        self._pending_undo = None       # snapshot taken by a widget's bulk_edit_begin
         # Global (non per-engine) model / word wrap — what gets persisted
         self._global_model = self.client.model
         self._global_wordwrap = 0
@@ -211,7 +242,7 @@ class MainWindow(QMainWindow):
 
         # Tab 2: Image Translation
         self.image_panel = ImagePanel()
-        self.tabs.addTab(self.image_panel, "Image Translation (Experimental)")
+        self.tabs.addTab(self.image_panel, "Images (Beta)")
 
         # Tab 3: Event Viewer
         self.event_viewer = EventViewerPanel()
@@ -239,11 +270,15 @@ class MainWindow(QMainWindow):
     def _build_welcome(self):
         """Start page shown until a project is opened (needs menu actions)."""
         self._welcome = WelcomePage(self.open_action, self.load_action)
+        self._welcome.recent_selected.connect(self._open_recent_project)
         self._stack.addWidget(self._welcome)
+        self._refresh_recent_ui()
         self._show_workspace(False)
 
     def _show_workspace(self, show: bool):
         """Switch between the welcome page and the project workspace."""
+        if not show:
+            self._refresh_recent_ui()
         self._stack.setCurrentWidget(self.tabs if show else self._welcome)
 
     def _polish_actions(self):
@@ -304,6 +339,11 @@ class MainWindow(QMainWindow):
         self.open_action.setToolTip("Open a game folder (engine is detected automatically)")
         self.open_action.triggered.connect(self._open_project)
         project_menu.addAction(self.open_action)
+
+        self.recent_menu = project_menu.addMenu("Open Recent")
+        self.recent_menu.setToolTipsVisible(True)
+        # Rebuilt on open so folders deleted meanwhile disappear
+        self.recent_menu.aboutToShow.connect(self._refresh_recent_ui)
 
         self.save_action = QAction("Save State", self)
         self.save_action.setShortcut("Ctrl+S")
@@ -430,6 +470,15 @@ class MainWindow(QMainWindow):
         self.find_replace_action.setEnabled(False)
         translate_menu.addAction(self.find_replace_action)
 
+        self.undo_bulk_action = QAction("Undo Last Bulk Change", self)
+        self.undo_bulk_action.setShortcut("Ctrl+Shift+Z")
+        self.undo_bulk_action.setToolTip(
+            "Revert the last bulk edit (Replace All, Apply Glossary, Word Wrap, "
+            "Clean Up, Consistency Pass, Reset, Mark Event Reviewed)")
+        self.undo_bulk_action.triggered.connect(self._undo_last_bulk)
+        self.undo_bulk_action.setEnabled(False)
+        translate_menu.addAction(self.undo_bulk_action)
+
         # Advanced submenu — power-user batch modes and fixes
         advanced_menu = translate_menu.addMenu("Advanced")
 
@@ -489,7 +538,7 @@ class MainWindow(QMainWindow):
         translate_menu.addSeparator()
 
         self.translate_images_action = QAction(
-            "Translate Images (Experimental)\u2026", self)
+            "Translate Images (Beta)\u2026", self)
         self.translate_images_action.setShortcut("Ctrl+I")
         self.translate_images_action.setToolTip(
             "OCR Japanese text from game images, translate, and render English overlays"
@@ -719,6 +768,11 @@ class MainWindow(QMainWindow):
         self._ev_status_timer.timeout.connect(self._refresh_after_event_viewer_change)
         self.event_viewer.status_changed.connect(self._on_event_viewer_status_changed)
 
+        # Bulk edits inside the widgets (Replace All, Mark Event Reviewed)
+        for widget in (self.trans_table, self.event_viewer):
+            widget.bulk_edit_begin.connect(self._on_bulk_edit_begin)
+            widget.bulk_edit_done.connect(self._on_bulk_edit_done)
+
         # Engine
         self.engine.progress.connect(self._on_progress)
         self.engine.entry_done.connect(self._on_entry_done)
@@ -745,6 +799,26 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self._open_project_path(path)
+
+    def _open_recent_project(self, path: str):
+        """Open a folder from the recent list (same flow as Open Project)."""
+        if not os.path.isdir(path):
+            QMessageBox.warning(
+                self, "Folder Not Found",
+                f"This folder no longer exists:\n{path}")
+            self._recent_projects = [
+                p for p in self._recent_projects
+                if os.path.normcase(p) != os.path.normcase(path)]
+            self._write_recent_projects()
+            self._refresh_recent_ui()
+            return
+        if not self._ensure_idle_for_project_change():
+            return
+        self._open_project_path(path)
+
+    def _open_project_path(self, path: str):
+        """Open a game folder (after the idle check): resume or parse fresh."""
         # Save the outgoing project before anything replaces it
         self._autosave()
 
@@ -782,6 +856,7 @@ class MainWindow(QMainWindow):
                     )
                     folder = os.path.basename(path)
                     self.setWindowTitle(f"{self.handler.display_name} Translator \u2014 {folder}")
+                    self._add_recent_project(path)
                     # Offer wizard if there are untranslated entries
                     # Show choice BEFORE preloading so dialog appears instantly
                     wizard_chosen = False
@@ -969,6 +1044,7 @@ class MainWindow(QMainWindow):
         # Window title
         folder = os.path.basename(path)
         self.setWindowTitle(f"{self.handler.display_name} Translator — {folder}")
+        self._add_recent_project(path)
 
         # Offer folder rename for engines without actors (no pre-translate step)
         if not self.handler.has_actors:
@@ -1097,6 +1173,8 @@ class MainWindow(QMainWindow):
         Batch callers set self._batch_dupe_map after calling this.
         """
         self._run_kind = kind
+        # Engine runs change entries asynchronously — not undoable
+        self._clear_undo()
         self._batch_project = self.project
         self._user_stopped = False
         self._batch_dupe_map = {}
@@ -1123,6 +1201,83 @@ class MainWindow(QMainWindow):
         self._is_cleanup_retranslation = False
         self._user_stopped = False
         self._batch_project = None
+        self._clear_undo()
+
+    # ── Undo for bulk edits ───────────────────────────────────────
+
+    def _snapshot_entries(self) -> dict:
+        """{entry.id: (translation, status)} for every project entry."""
+        return {e.id: (e.translation, e.status) for e in self.project.entries}
+
+    def _record_undo(self, label: str, before: dict | None) -> int:
+        """Keep the entries a bulk op changed so it can be undone.
+
+        Only entries whose (translation, status) differs from ``before`` are
+        stored.  An op that changed nothing leaves the previous undo intact.
+        Returns the number of changed entries.
+        """
+        if not before:
+            return 0
+        changed = {}
+        for e in self.project.entries:
+            old = before.get(e.id)
+            if old is not None and old != (e.translation, e.status):
+                changed[e.id] = old
+        if changed:
+            self._undo_snapshot = (label, changed)
+            self._update_undo_action()
+        return len(changed)
+
+    def _clear_undo(self):
+        self._undo_snapshot = None
+        self._pending_undo = None
+        self._update_undo_action()
+
+    def _update_undo_action(self):
+        action = getattr(self, "undo_bulk_action", None)
+        if action is None:
+            return
+        snap = self._undo_snapshot
+        action.setEnabled(snap is not None)
+        if snap is not None:
+            label, changed = snap
+            tip = f"Undo: {label} ({len(changed)} entries)"
+        else:
+            tip = "Nothing to undo"
+        action.setToolTip(tip)
+        action.setStatusTip(tip)
+
+    def _on_bulk_edit_begin(self):
+        """A widget is about to run a bulk edit — snapshot first."""
+        self._pending_undo = self._snapshot_entries()
+
+    def _on_bulk_edit_done(self, label: str):
+        before, self._pending_undo = self._pending_undo, None
+        self._record_undo(label, before)
+
+    def _undo_last_bulk(self):
+        """Restore the entries changed by the last bulk edit."""
+        snap = self._undo_snapshot
+        if snap is None:
+            return
+        if self.engine.is_running or self._busy:
+            self.statusbar.showMessage(
+                "Can't undo while a translation run is in progress.", 5000)
+            return
+        label, changed = snap
+        restored = 0
+        for e in self.project.entries:
+            old = changed.get(e.id)
+            if old is not None:
+                e.translation, e.status = old
+                restored += 1
+        self._clear_undo()
+        self.trans_table.refresh()
+        self.event_viewer.refresh_current_event()
+        self.file_tree.refresh_stats(self.project)
+        self._autosave()
+        self.statusbar.showMessage(
+            f"Undid: {label} ({restored} entries)", 8000)
 
     def _check_engine_idle(self) -> bool:
         """Return True if a new engine run may start (nothing else in flight)."""
@@ -1235,6 +1390,7 @@ class MainWindow(QMainWindow):
             "Translating character info...", "Skip", 0, len(to_translate), self
         )
         progress.setWindowTitle("Pre-translating")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.setValue(0)
 
@@ -1255,8 +1411,9 @@ class MainWindow(QMainWindow):
                     f"of {len(to_translate)}..."
                 )
                 QApplication.processEvents()
-                batch_results = self.client.translate_names_batch(chunk)
-                results.update(batch_results)
+                batch_results = self._call_in_worker(
+                    self.client.translate_names_batch, chunk)
+                results.update(batch_results or {})
                 progress.setValue(min(i + len(chunk), len(to_translate)))
                 QApplication.processEvents()
 
@@ -1290,7 +1447,8 @@ class MainWindow(QMainWindow):
                 if progress.wasCanceled():
                     break
 
-                result = self.client.translate_name(text, hint=hint)
+                result = self._call_in_worker(
+                    self.client.translate_name, text, hint=hint)
                 if result and result != text:
                     if key == "gameTitle":
                         translated_title = result
@@ -1654,10 +1812,9 @@ class MainWindow(QMainWindow):
         folder_name = os.path.basename(path.rstrip("/\\"))
         if not self.client.is_available():
             return
-        self.statusbar.showMessage("Translating game title...")
-        QApplication.processEvents()
-        translated = self.client.translate_name(folder_name, hint="game title")
-        self.statusbar.clearMessage()
+        translated = self._run_blocking(
+            "Translating", "Translating game title…",
+            self.client.translate_name, folder_name, hint="game title")
         if translated and translated != folder_name:
             new_path = self._rename_project_folder(path, translated)
             self.project.project_path = new_path
@@ -1710,6 +1867,7 @@ class MainWindow(QMainWindow):
                 self._last_save_path = os.path.join(
                     new_path, os.path.basename(self._last_save_path)
                 )
+            self._add_recent_project(new_path, replace=path)
             return new_path
         except OSError as e:
             QMessageBox.warning(
@@ -1724,18 +1882,21 @@ class MainWindow(QMainWindow):
         if not self.project.project_path or not os.path.isdir(self.project.project_path):
             QMessageBox.warning(self, "No Project", "Open a project first.")
             return
+        if self._busy:
+            self.statusbar.showMessage(
+                "Busy — please wait for the current step to finish.", 5000)
+            return
 
         folder_name = os.path.basename(self.project.project_path)
 
         # Translate the folder name via Ollama
         translated = folder_name
         if self.client.is_available():
-            self.statusbar.showMessage("Translating folder name...")
-            QApplication.processEvents()
-            result = self.client.translate_name(folder_name, hint="game title")
+            result = self._run_blocking(
+                "Translating", "Translating folder name…",
+                self.client.translate_name, folder_name, hint="game title")
             if result and result != folder_name:
                 translated = result
-            self.statusbar.clearMessage()
 
         suggested = f"{translated} - WIP"
         suggested = re.sub(r'[\\/:*?"<>|]', '', suggested).strip()
@@ -1781,6 +1942,7 @@ class MainWindow(QMainWindow):
                 )
             self.setWindowTitle(f"{self.handler.display_name} Translator \u2014 {new_name}")
             self.image_panel.set_project(new_path, self.client)
+            self._add_recent_project(new_path, replace=old_path)
             self.statusbar.showMessage(f"Renamed folder to: {new_name}", 5000)
         except OSError as e:
             QMessageBox.warning(self, "Rename Failed",
@@ -1867,6 +2029,14 @@ class MainWindow(QMainWindow):
             save_dir = os.path.dirname(os.path.abspath(path))
             if self.handler.is_valid_project_dir(save_dir):
                 self.project.project_path = save_dir
+
+        # Saves from older versions use the legacy entry-ID scheme: remap
+        # them onto the current parser's IDs (no-op for current saves).
+        from ..state_migration import migrate_project
+        migration = migrate_project(self.project, parser=self.handler.parser,
+                                    state_path=path)
+        if migration.message:
+            QMessageBox.information(self, "Project Upgrade", migration.message)
 
         # RPG Maker MV/MZ-specific: merge plugin entries added after the state was saved
         if self.handler.has_plugin_system and self.project.project_path:
@@ -2047,12 +2217,59 @@ class MainWindow(QMainWindow):
             overrides["model"] = existing["model"]
         self._engine_overrides[engine_key] = overrides
 
+    def _call_in_worker(self, fn, *args, **kwargs):
+        """Run a blocking call on a worker thread and wait for it while a
+        local event loop keeps the UI painting.
+
+        For steps inside multi-step synchronous flows.  The caller should
+        show a (window-modal) progress dialog; ``self._busy`` is held for the
+        duration so project/engine changes are refused meanwhile.
+        Returns fn's result, or None if it raised.
+        """
+        result = {}
+        loop = QEventLoop(self)
+
+        def on_done(value):
+            result["value"] = value
+            loop.quit()
+
+        def on_error(msg):
+            log.warning("Background call %s failed: %s",
+                        getattr(fn, "__name__", fn), msg)
+            loop.quit()
+
+        was_busy = self._busy
+        self._busy = True
+        try:
+            run_in_thread(self, fn, *args, on_done=on_done,
+                          on_error=on_error, **kwargs)
+            loop.exec()
+        finally:
+            self._busy = was_busy
+        return result.get("value")
+
+    def _run_blocking(self, title: str, label: str, fn, *args, **kwargs):
+        """_call_in_worker with a modal busy dialog (no cancel)."""
+        progress = QProgressDialog(label, None, 0, 0, self)
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.show()
+        try:
+            return self._call_in_worker(fn, *args, **kwargs)
+        finally:
+            progress.close()
+            progress.deleteLater()
+
     def _ensure_ollama_ready(self):
         """Start Ollama if needed. Called on-demand before translation."""
         if self.client.is_cloud:
             return True
         if not self.client.is_available():
-            self.client.restart_server(self.engine.num_workers)
+            self._run_blocking(
+                "Starting Ollama", "Starting Ollama…",
+                self.client.restart_server, self.engine.num_workers)
         if not self.client.is_available():
             QMessageBox.warning(self, "Ollama", "Cannot connect to Ollama. Please start it manually.")
             return False
@@ -3795,6 +4012,9 @@ class MainWindow(QMainWindow):
             self._engine_overrides = cfg["engine_settings"]
         if isinstance(cfg.get("ui_state"), dict):
             self._ui_state = cfg["ui_state"]
+        if isinstance(cfg.get("recent_projects"), list):
+            self._recent_projects = self._merge_recent(
+                None, cfg["recent_projects"])
 
     def _save_settings(self):
         """Persist current settings to _settings.json."""
@@ -3830,6 +4050,7 @@ class MainWindow(QMainWindow):
             "ui_state": (self._capture_window_state()
                          if hasattr(self, "text_splitter")
                          else getattr(self, "_ui_state", {})),
+            "recent_projects": self._recent_projects,
         }
         # Atomic write: a crash mid-write must never leave a truncated file
         tmp = self._SETTINGS_FILE + ".tmp"
@@ -3839,6 +4060,91 @@ class MainWindow(QMainWindow):
             os.replace(tmp, self._SETTINGS_FILE)
         except OSError:
             pass  # Non-critical — settings just won't persist
+
+    # ── Recent projects ───────────────────────────────────────────
+
+    @staticmethod
+    def _merge_recent(new_path, existing, drop=()) -> list:
+        """Recent list with ``new_path`` first: normalized, de-duplicated
+        (case-insensitively on Windows) and capped at _MAX_RECENT_PROJECTS."""
+        result, seen = [], {os.path.normcase(os.path.normpath(os.path.abspath(d)))
+                            for d in drop if d}
+        for p in ([new_path] if new_path else []) + list(existing):
+            if not isinstance(p, str) or not p.strip():
+                continue
+            norm = os.path.normpath(os.path.abspath(p))
+            key = os.path.normcase(norm)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(norm)
+            if len(result) >= _MAX_RECENT_PROJECTS:
+                break
+        return result
+
+    def _existing_recent_projects(self) -> list:
+        """Recent folders that still exist (for display)."""
+        return [p for p in self._recent_projects if os.path.isdir(p)]
+
+    def _add_recent_project(self, path: str, replace: str = ""):
+        """Move ``path`` to the top of the recent list (``replace`` = old
+        path of a renamed folder) and persist it."""
+        if not path:
+            return
+        self._recent_projects = self._merge_recent(
+            path, self._recent_projects, drop=(replace,))
+        self._write_recent_projects()
+        self._refresh_recent_ui()
+
+    def _clear_recent_projects(self):
+        self._recent_projects = []
+        self._write_recent_projects()
+        self._refresh_recent_ui()
+
+    def _write_recent_projects(self):
+        """Persist only the recent list (other settings untouched on disk)."""
+        try:
+            with open(self._SETTINGS_FILE, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                cfg = {}
+        except FileNotFoundError:
+            cfg = {}
+        except (OSError, ValueError):
+            return  # Unreadable settings — never overwrite them from here
+        cfg["recent_projects"] = self._recent_projects
+        tmp = self._SETTINGS_FILE + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._SETTINGS_FILE)
+        except OSError:
+            pass
+
+    def _refresh_recent_ui(self):
+        """Rebuild the Open Recent submenu and the welcome page list."""
+        recent = self._existing_recent_projects()
+        menu = getattr(self, "recent_menu", None)
+        if menu is not None:
+            menu.clear()
+            for i, p in enumerate(recent):
+                name = (os.path.basename(p) or p).replace("&", "&&")
+                act = menu.addAction(
+                    f"&{i + 1} {name}" if i < 9 else f"1&0 {name}")
+                act.setToolTip(p)
+                act.setStatusTip(p)
+                act.triggered.connect(
+                    lambda _checked=False, path=p: self._open_recent_project(path))
+            if recent:
+                menu.addSeparator()
+            else:
+                menu.addAction("No recent projects").setEnabled(False)
+            clear = menu.addAction("Clear Recent")
+            clear.setEnabled(bool(self._recent_projects))
+            clear.triggered.connect(self._clear_recent_projects)
+        welcome = getattr(self, "_welcome", None)
+        if welcome is not None:
+            welcome.set_recent(recent)
 
     # ── Auto-save ──────────────────────────────────────────────────
 
@@ -4298,6 +4604,7 @@ class MainWindow(QMainWindow):
 
     # ── Word Wrap ──────────────────────────────────────────────────
 
+    @_undoable("Wrap Text to Lines")
     def _apply_wordwrap(self):
         """Apply word wrapping to all translated entries."""
         if not self.project.entries:
@@ -4568,6 +4875,7 @@ class MainWindow(QMainWindow):
     # Japanese speech/quote brackets that produce redundant "" in translations
     _JP_SPEECH_BRACKETS = set('\u300c\u300d\u300e\u300f')  # 「」『』
 
+    @_undoable("Clean Up Translations")
     def _cleanup_translations(self):
         """Run all automated post-processing fixes on translations."""
         if not self.project.entries:
@@ -4634,6 +4942,7 @@ class MainWindow(QMainWindow):
     # Extract actor ID from a namebox string like \n[1] or \N<\n[1]>
     _NAMEBOX_ACTOR_ID_RE = re.compile(r'\\[Nn]\[(\d+)\]')
 
+    @_undoable("Strip Duplicate Actor Codes")
     def _strip_duplicate_actor_codes(self):
         """Strip leading \\n[N] from translations where namebox has the same actor.
 
@@ -4740,6 +5049,7 @@ class MainWindow(QMainWindow):
 
     # ── Apply Glossary ─────────────────────────────────────────────
 
+    @_undoable("Apply Glossary")
     def _apply_glossary(self):
         """Find translated entries with glossary mismatches and fix via replacement.
 
@@ -4904,6 +5214,7 @@ class MainWindow(QMainWindow):
 
     # ── Consistency Pass ──────────────────────────────────────────
 
+    @_undoable("Reset All for Retranslation")
     def _reset_all_for_retranslation(self):
         """Mark all translated entries as untranslated for batch retranslation."""
         if not self.project.entries:
@@ -4927,11 +5238,12 @@ class MainWindow(QMainWindow):
             entry.status = "untranslated"
             entry.translation = ""
         self.trans_table.refresh()
-        self.event_viewer.refresh()
+        self.event_viewer.refresh_current_event()
         self.file_tree.load_project(self.project)
         self.statusBar().showMessage(
             f"Reset {len(translated)} entries for retranslation.", 5000)
 
+    @_undoable("Consistency Pass")
     def _consistency_pass(self):
         """Fix name variants, capitalization, and term inconsistencies."""
         if not self.project.entries:

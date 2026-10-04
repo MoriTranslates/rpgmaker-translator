@@ -81,6 +81,13 @@ Open a game folder. Hit Batch Translate. Get a playable translation. Supports 9 
 
 ## Download / Releases
 
+> **Upgrading from a pre-1.0 version?** Version 1.0 fixes ~200 bugs, including
+> several that could lose saved progress or damage game files — see
+> [CHANGELOG.md](CHANGELOG.md) for the full list. Your saved projects carry
+> over. The old code is kept on the `legacy/v2` branch (tag `v2-pre-overhaul`)
+> but is no longer maintained.
+
+
 **Windows (no Python needed):** grab `RPGMakerTranslator-<version>-win64.zip` from the
 [Releases page](https://github.com/MoriTranslates/rpgmaker-translator/releases/latest),
 extract it anywhere (not inside `Program Files`), and run `RPGMakerTranslator.exe`.
