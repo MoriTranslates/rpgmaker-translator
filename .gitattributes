@@ -1,0 +1,2 @@
+# Fake game fixture must stay byte-exact (reproducibility + export round-trip tests)
+tests/fixtures/fake_mv_game/** -text
