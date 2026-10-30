@@ -359,3 +359,4 @@ Releases up to and including v1.0.0 were published under the Business Source Lic
 ## More from MoriTranslates
 
 - **[AnimeArr](https://github.com/MoriTranslates/animearr)**: an anime-first *arr for your library (smart search, anime numbering, sub/dub-aware). Self-hosted, Docker.
+- **[Tastearr](https://github.com/MoriTranslates/tastearr)**: anime season picks that learn your taste, for Sonarr/Radarr/Plex users.
