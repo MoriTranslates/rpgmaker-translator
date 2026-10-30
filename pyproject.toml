@@ -12,7 +12,8 @@ build-backend = "setuptools.build_meta"
 name = "rpgmaker-translator"
 description = "Local/cloud LLM translation tool for RPG Maker and other Japanese game engines"
 readme = "README.md"
-license-files = ["LICENSE"]  # Business Source License 1.1 (not OSI) - see LICENSE
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "MoriTranslates" }]
 requires-python = ">=3.12"
 classifiers = [

@@ -43,7 +43,7 @@ def _write_version_info(version):
       StringStruct('FileDescription', 'RPG Maker Translator'),
       StringStruct('FileVersion', '{version}'),
       StringStruct('InternalName', '{APP_NAME}'),
-      StringStruct('LegalCopyright', 'Copyright (c) MoriTranslates - Business Source License 1.1'),
+      StringStruct('LegalCopyright', 'Copyright (c) MoriTranslates - PolyForm Noncommercial 1.0.0'),
       StringStruct('OriginalFilename', '{APP_NAME}.exe'),
       StringStruct('ProductName', 'RPG Maker Translator'),
       StringStruct('ProductVersion', '{version}')])]),
@@ -76,6 +76,7 @@ datas = [
     (os.path.join(ROOT, "assets"), "assets"),
     (os.path.join(ROOT, "translator", "resources"), os.path.join("translator", "resources")),
     (os.path.join(ROOT, "LICENSE"), "."),
+    (os.path.join(ROOT, "THIRD_PARTY_NOTICES.md"), "."),
 ]
 datas += _wordninja_data()
 # Spell checker: English dictionary only (the editor checks English output).

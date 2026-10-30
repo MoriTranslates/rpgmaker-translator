@@ -697,8 +697,8 @@ class MainWindow(QMainWindow):
             self, "About RPG Maker Translator",
             f"<b>RPG Maker Translator</b> v{__version__}<br><br>"
             "Local-LLM translation tool for RPG Maker and visual novel games.<br><br>"
-            "Licensed under the Business Source License 1.1 — free for "
-            "non-commercial use.<br>"
+            "Licensed under the PolyForm Noncommercial License 1.0.0 — free "
+            "for non-commercial use.<br>"
             '<a href="https://github.com/MoriTranslates/rpgmaker-translator">'
             "github.com/MoriTranslates/rpgmaker-translator</a>",
         )

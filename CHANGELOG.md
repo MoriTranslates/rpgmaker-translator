@@ -9,6 +9,12 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+### Changed
+
+- Licence: now PolyForm Noncommercial 1.0.0 (free for any non-commercial use; no commercial use).
+  v1.0.0 and earlier stay under the Business Source License 1.1. Added THIRD_PARTY_NOTICES.md with
+  DazedMTLTool's MIT licence.
+
 ## [1.0.0] - 2026-10-04
 
 First numbered release. Earlier builds were run from source only; from this

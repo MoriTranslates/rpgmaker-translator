@@ -336,4 +336,6 @@ All engines auto-detect when you open a game folder — no manual configuration 
 
 ## License
 
-[Business Source License 1.1](LICENSE) — free for personal and other non-commercial use (fan translation, education, research). Commercial use requires a license from MoriTranslates. See [LICENSE](LICENSE) for the full terms.
+[PolyForm Noncommercial 1.0.0](LICENSE) — free for any non-commercial use: personal use, fan translation, hobby projects, education and research. Commercial use (selling translations, games or services made with it) is not permitted without a separate agreement with MoriTranslates. Code ported from DazedMTLTool stays under its MIT License; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Releases up to and including v1.0.0 were published under the Business Source License 1.1.
