@@ -5,7 +5,7 @@
 <h1 align="center">RPG Maker Translator</h1>
 
 <p align="center">
-Translate RPG Maker MV/MZ/VX Ace/2000/2003, Ren'Py, TyranoScript, SRPG Studio, Kirikiri, and Crowd engine games using local or cloud LLMs.<br>
+Translate RPG Maker MV/MZ/VX Ace/2000/2003, Ren'Py, TyranoScript, SRPG Studio, Kirikiri, Wolf RPG, and Crowd engine games using local or cloud LLMs.<br>
 <b>Local LLM</b> (Ollama + Qwen 3.5 — free, private, no content filters) or <b>Cloud API</b> (OpenAI, Gemini, DeepSeek, Anthropic — experimental, pay-per-token).<br>
 Event-aware translation. Pronoun-aware. Glossary-driven. Batch translation with resume.<br>
 Per-engine settings, prompts, and model selection via the Engines tab.<br>
@@ -20,9 +20,21 @@ Cloud API engine ported from <a href="https://github.com/dazedanon/DazedMTLTool"
 
 ![Screenshot](screenshot.png)
 
+<details>
+<summary><b>More screenshots</b></summary>
+
+| | |
+|---|---|
+| ![Model picker](screenshots/model_picker.png) | ![Per-engine settings](screenshots/settings_engines.png) |
+| GPU-aware model picker on first launch | Per-engine context, batch, workers and model |
+| ![Translate menu](screenshots/menu_translate.png) | ![Options](screenshots/settings_options.png) |
+| Two-stage workflow: database first, then dialogue | Export and word-wrap options |
+
+</details>
+
 ## At a Glance
 
-Open a game folder. Hit Batch Translate. Get a playable translation. Supports 9 engines — auto-detected on open.
+Open a game folder. Hit Batch Translate. Get a playable translation. Supports 11 engines — auto-detected on open.
 
 | | |
 |---|---|
@@ -279,6 +291,8 @@ Per-engine overrides for Context, Batch Size, Workers, Word Wrap, and Model. A *
 | SRPG Studio | data.dts | Supported |
 | Kirikiri | .ks (KAG) + .xp3 archives | Supported |
 | Crowd | .sce | Experimental |
+| Wolf RPG Editor | .wolf / .dat | Experimental |
+| CSV Game | .x (CSV scripts) | Experimental |
 
 All engines auto-detect when you open a game folder — no manual configuration needed.
 
