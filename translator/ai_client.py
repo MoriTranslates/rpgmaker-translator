@@ -617,7 +617,7 @@ def _build_name_prompt(target_language: str = "English") -> str:
 class AIClient:
     """Unified translation client — local Ollama or cloud APIs (OpenAI, Gemini, DeepSeek, Anthropic)."""
 
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "qwen3:14b"):
+    def __init__(self, base_url: str = "http://localhost:11434", model: str = "qwen3.5:9b"):
         self.base_url = base_url.rstrip("/")
         self.model = model
         # Optional separate model used only for polish_batch / polish.

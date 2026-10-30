@@ -15,6 +15,11 @@ The release workflow publishes the section whose heading matches the pushed tag
   v1.0.0 and earlier stay under the Business Source License 1.1. Added THIRD_PARTY_NOTICES.md with
   DazedMTLTool's MIT licence.
 
+### Fixed
+
+- A fresh install now defaults to the recommended model, Qwen 3.5 9B. It used to default to Qwen3 14B,
+  which the model picker itself marks as too large for 12 GB cards.
+
 ## [1.0.0] - 2026-10-04
 
 First numbered release. Earlier builds were run from source only; from this
