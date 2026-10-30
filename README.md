@@ -64,6 +64,8 @@ Open a game folder. Hit Batch Translate. Get a playable translation. Supports 11
 - [Supported Formats & Languages](#supported-formats--languages)
 - [Troubleshooting](#troubleshooting)
 - [Acknowledgments](#acknowledgments)
+- [License](#license)
+- [More from MoriTranslates](#more-from-moritranslates)
 
 ---
 
@@ -353,3 +355,7 @@ All engines auto-detect when you open a game folder — no manual configuration 
 [PolyForm Noncommercial 1.0.0](LICENSE) — free for any non-commercial use: personal use, fan translation, hobby projects, education and research. Commercial use (selling translations, games or services made with it) is not permitted without a separate agreement with MoriTranslates. Code ported from DazedMTLTool stays under its MIT License; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Releases up to and including v1.0.0 were published under the Business Source License 1.1.
+
+## More from MoriTranslates
+
+- **[AnimeArr](https://github.com/MoriTranslates/animearr)**: an anime-first *arr for your library (smart search, anime numbering, sub/dub-aware). Self-hosted, Docker.
