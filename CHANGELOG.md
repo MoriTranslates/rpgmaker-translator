@@ -9,6 +9,11 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-30
+
+A small maintenance release: a better default model for new installs, the new licence, and updated
+dependencies.
+
 ### Changed
 
 - Licence: now PolyForm Noncommercial 1.0.0 (free for any non-commercial use; no commercial use).
@@ -19,6 +24,12 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 - A fresh install now defaults to the recommended model, Qwen 3.5 9B. It used to default to Qwen3 14B,
   which the model picker itself marks as too large for 12 GB cards.
+
+### Updated
+
+- Dependencies refreshed (openai, pydantic, certifi, PyQt6-sip, pyspellchecker and others) and
+  CI actions updated.
+- The README lists Wolf RPG Editor and CSV Game (both experimental) and has fresh screenshots.
 
 ## [1.0.0] - 2026-10-04
 
