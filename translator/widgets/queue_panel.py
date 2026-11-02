@@ -3,6 +3,7 @@
 import re
 import time
 from PyQt6.QtWidgets import (
+    QProgressBar,
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QLabel, QAbstractItemView, QPushButton, QComboBox,
 )
@@ -104,6 +105,13 @@ class QueuePanel(QWidget):
         self._summary_label = QLabel(self._IDLE_TEXT)
         self._summary_label.setStyleSheet("font-weight: bold;")
         header.addWidget(self._summary_label)
+        self._progress = QProgressBar()
+        self._progress.setObjectName("headerProgress")
+        self._progress.setTextVisible(False)
+        self._progress.setFixedSize(220, 8)
+        self._progress.hide()
+        header.addSpacing(10)
+        header.addWidget(self._progress)
         header.addStretch()
 
         # Expand / collapse all
@@ -359,6 +367,7 @@ class QueuePanel(QWidget):
         self._done_count = 0
         self._start_time = 0
         self._summary_label.setText(self._IDLE_TEXT)
+        self._progress.hide()
         self._eta_label.setText("")
         self._speed_label.setText("")
         self._stack.set_empty(True)
@@ -412,6 +421,9 @@ class QueuePanel(QWidget):
             f"Translating: {self._done_count}/{total} "
             f"({remaining} remaining, {n_events} events)"
         )
+        self._progress.setMaximum(total)
+        self._progress.setValue(self._done_count)
+        self._progress.show()
         if self._done_count > 0 and elapsed > 0:
             rate = elapsed / self._done_count
             eta = rate * remaining

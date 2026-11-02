@@ -554,23 +554,22 @@ class EventViewerPanel(QWidget):
         """Apply theme colors to a detail table row."""
         bg = theme.qcolor("field") if row % 2 == 0 else theme.qcolor("field_alt")
 
-        if entry.status == "untranslated":
-            fg = theme.qcolor("error")
-        elif entry.status == "reviewed":
-            fg = theme.qcolor("ok")
-        else:
-            fg = theme.qcolor("text_soft")
-
+        # Text stays readable; the status stripe and marker carry the state
+        colors = {2: theme.qcolor("text_soft"), 3: theme.qcolor("text")}
         for col in range(4):
             item = self._detail_table.item(row, col)
             if item:
                 item.setBackground(bg)
-                item.setForeground(fg)
+                item.setForeground(colors.get(col, theme.qcolor("text")))
 
-        # Speaker accent color
+        # Speaker in their own chip color (same as the main table)
         spk_item = self._detail_table.item(row, 1)
         if spk_item and spk_item.text():
-            spk_item.setForeground(theme.qcolor("accent"))
+            spk_item.setForeground(
+                QColor(theme.speaker_chip(spk_item.text())[1]))
+            font = spk_item.font()
+            font.setWeight(QFont.Weight.DemiBold)
+            spk_item.setFont(font)
 
         # Status icon color + text (status never relies on color alone)
         status_item = self._detail_table.item(row, 0)
