@@ -225,6 +225,14 @@ class RenPyParser:
 
     # ── Load project ──────────────────────────────────────────────────
 
+    def load_originals(self, project_dir: str) -> list[TranslationEntry]:
+        """Parse the game's ORIGINAL text, for merging a game update.
+
+        Each .rpy is read from game_original/ when it has a backup copy
+        (the live file holds English after an export), else live.
+        """
+        return self.load_project(project_dir, prefer_backup=True)
+
     def load_project(self, project_dir: str,
                      context_size: int = 3,
                      prefer_backup: bool = False) -> list[TranslationEntry]:
@@ -427,7 +435,7 @@ class RenPyParser:
             [(f, os.path.join(game_dir, f), os.path.join(backup_dir, f))
              for f in rpy_names], manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
 
         # Build translation map
         trans_map = {}

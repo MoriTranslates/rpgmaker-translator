@@ -409,16 +409,27 @@ def refresh_changed_originals(pairs, manifest: ExportManifest) -> list[str]:
     return refreshed
 
 
-def refreshed_note(refreshed: list[str]) -> str:
-    """User-facing note for files whose backup was re-baselined."""
+def refreshed_note(refreshed: list[str], merges_on_reopen: bool = False) -> str:
+    """User-facing note for files whose backup was re-baselined.
+
+    *merges_on_reopen*: the engine's parser has ``load_originals`` and the
+    main window merges new / changed lines when the project is resumed.
+    Other engines say honestly that the new lines are not added.
+    """
     if not refreshed:
         return ""
     shown = ", ".join(refreshed[:8])
     more = f" and {len(refreshed) - 8} more" if len(refreshed) > 8 else ""
-    return (f"{len(refreshed)} game file(s) changed since your first export "
+    head = (f"{len(refreshed)} game file(s) changed since your first export "
             f"(game update?): {shown}{more}. The backup was refreshed from "
-            f"the current files so the update is kept. Re-open the project "
-            f"to pick up any new or changed lines.")
+            f"the current files so the update is kept. ")
+    if merges_on_reopen:
+        return head + ("Re-open the project (and resume it) to add the new "
+                       "and changed lines; lines that did not change keep "
+                       "their translations.")
+    return head + ("New or changed lines in those files are NOT added to "
+                   "your project (this engine can't merge a game update "
+                   "yet): they stay untranslated in the game.")
 
 
 def tree_pairs(live_dir: str, backup_dir: str, suffixes: tuple[str, ...]):

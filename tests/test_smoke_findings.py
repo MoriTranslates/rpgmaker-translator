@@ -728,3 +728,119 @@ def test_ace_unreadable_file_is_a_load_warning(tmp_path):
     assert p.load_project(str(game))            # the good map still loads
     assert any(w.startswith("Map002.rvdata2") for w in p.load_warnings)
     assert any(w.startswith("CommonEvents.rvdata2") for w in p.load_warnings)
+
+
+# ── "Re-open to pick up new or changed lines" (FIXED) ────────────────
+#
+# The export note told users to re-open the project after a game update,
+# but a resume never re-read the game, and a fresh open read the live
+# files (already English).  Resuming now merges the game's ORIGINAL text
+# (from the backup the export refreshed) into the project by entry ID.
+
+def _proj(entries):
+    from translator.project_model import TranslationProject
+    return TranslationProject(project_path="", entries=entries)
+
+
+def test_merge_keeps_unchanged_adds_new_resets_changed():
+    proj = _proj([
+        _entry("a", "F", "dialog", "同じ", "Same", "reviewed"),
+        _entry("b", "F", "dialog", "古い", "Old", "translated"),
+        _entry("c", "F", "dialog", "残る", "Kept", "translated"),   # not in parse
+    ])
+    fresh = [_entry("a", "F", "dialog", "同じ", "", "untranslated"),
+             _entry("b", "F", "dialog", "新しい", "", "untranslated"),
+             _entry("d", "F", "dialog", "追加", "", "untranslated")]
+    stats = proj.merge_fresh_originals(fresh)
+    assert stats == {"status": "merged", "new": 1, "changed": 1, "unchanged": 1}
+    by = {e.id: e for e in proj.entries}
+    assert (by["a"].translation, by["a"].status) == ("Same", "reviewed")
+    assert (by["b"].original, by["b"].translation, by["b"].status) == \
+        ("新しい", "", "untranslated")
+    assert proj.migration_orphans[0]["translation"] == "Old"
+    assert by["c"].translation == "Kept"          # never removed
+    assert by["d"].status == "untranslated"
+
+
+def test_merge_refuses_when_most_translated_lines_would_change():
+    proj = _proj([_entry(str(i), "F", "dialog", f"原文{i}", f"EN{i}")
+                  for i in range(4)])
+    fresh = [_entry(str(i), "F", "dialog", f"English {i}", "", "untranslated")
+             for i in range(3)]
+    stats = proj.merge_fresh_originals(fresh)
+    assert stats["status"] == "low_match"
+    assert [e.translation for e in proj.entries] == ["EN0", "EN1", "EN2", "EN3"]
+    assert not proj.migration_orphans
+
+
+def test_mv_game_update_lines_are_merged_after_export(mv_game, mv_parser):
+    from translator.project_model import TranslationProject
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "reviewed"
+    mv_parser.save_project(mv_game, entries)
+    # game update: item 1 renamed, a new item added (live file replaced)
+    items_path = os.path.join(mv_game, "data", "Items.json")
+    with open(os.path.join(mv_game, "data_original", "Items.json"),
+              encoding="utf-8-sig") as f:
+        items = json.load(f)
+    items[1]["name"] = "ハイポーション"
+    items.append({"id": len(items), "name": "アップデート品",
+                  "description": "", "note": ""})
+    with open(items_path, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False)
+    with pytest.raises(OSError):                 # stale line is reported
+        mv_parser.save_project(mv_game, entries)
+    assert mv_parser.last_export_notes and \
+        "Re-open the project" in mv_parser.last_export_notes[0]
+    # resume: merge the refreshed originals
+    proj = TranslationProject(project_path=mv_game, entries=entries)
+    stats = proj.merge_fresh_originals(mv_parser.load_originals(mv_game))
+    assert stats["status"] == "merged" and stats["changed"] == 1 and stats["new"] == 1
+    by = {e.id: e for e in proj.entries}
+    assert by["Items.json/1/name"].original == "ハイポーション"
+    assert by["Items.json/1/name"].status == "untranslated"
+    assert by["Items.json/2/name"].status == "reviewed"     # unchanged kept
+    assert any(e.original == "アップデート品" for e in proj.entries)
+    # the next export is complete again
+    mv_parser.save_project(mv_game, proj.entries)
+
+
+def test_resume_shows_merged_game_update(qapp, monkeypatch, tmp_path, mv_game, mv_parser):
+    from translator.project_model import TranslationProject
+    from translator.widgets import main_window as mw
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "translated"
+    proj = TranslationProject(project_path=mv_game, project_type="rpgmaker_mv",
+                              entries=entries)
+    state = os.path.join(mv_game, "_translation_state.json")
+    proj.save_state(state)
+    # game updated before the first export: a new item in the live data
+    items_path = os.path.join(mv_game, "data", "Items.json")
+    with open(items_path, encoding="utf-8-sig") as f:
+        items = json.load(f)
+    items.append({"id": len(items), "name": "新アイテム", "description": "",
+                  "note": ""})
+    with open(items_path, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False)
+
+    settings = tmp_path / "_settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(mw.MainWindow, "_SETTINGS_FILE", str(settings))
+    monkeypatch.setattr(mw.AIClient, "is_available", lambda self: False)
+    monkeypatch.setattr(mw.AIClient, "list_models", lambda self: [])
+    shown = []
+    monkeypatch.setattr(mw.QMessageBox, "information",
+                        lambda _p, title, text, *a, **k: shown.append(title))
+    win = mw.MainWindow()
+    try:
+        assert win._restore_from_state(state)
+    finally:
+        win._closing = True
+        win._autosave_timer.stop()
+        win.hide()
+    assert "Game Update Merged" in shown
+    assert any(e.original == "新アイテム" for e in win.project.entries)
+    assert all(e.status == "translated" for e in win.project.entries
+               if e.original != "新アイテム")

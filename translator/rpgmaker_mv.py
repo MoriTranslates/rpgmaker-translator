@@ -323,7 +323,26 @@ class RPGMakerMVParser:
                 f"No 'data' folder found in {project_dir}. "
                 "Please select an RPG Maker MV/MZ project folder."
             )
+        return self._load_from(project_dir, data_dir)
 
+    def load_originals(self, project_dir: str) -> list:
+        """Parse the game's ORIGINAL text, for merging a game update.
+
+        After an export the live data/ holds English, so read data_original/
+        (which an export refreshes when the game was updated); before any
+        export, data/ itself is the original.  plugins.js is read from
+        plugins_original.js the same way by the plugin parser.
+        """
+        data_dir = self._find_data_dir(project_dir)
+        if not data_dir:
+            raise FileNotFoundError(
+                f"No 'data' folder found in {project_dir}.")
+        backup = data_dir + "_original"
+        return self._load_from(
+            project_dir, backup if os.path.isdir(backup) else data_dir)
+
+    def _load_from(self, project_dir: str, data_dir: str) -> list:
+        """Parse every entry, reading the data files from *data_dir*."""
         self.load_warnings = []
 
         # Build actor name lookup for \n[N] resolution in namebox
@@ -606,7 +625,7 @@ class RPGMakerMVParser:
                  for fn in sorted(candidates)], manifest)
             if refreshed:
                 self.last_export_notes.append(
-                    game_io.refreshed_note(refreshed))
+                    game_io.refreshed_note(refreshed, merges_on_reopen=True))
 
         errors = []
         skipped_lines: dict[str, int] = {}
@@ -2381,6 +2400,8 @@ class RPGMakerMVParser:
         """
         from collections import deque
 
+        self._nonevent_skipped = 0     # counted by _put_checked
+
         # Collect every command list with the scope prefix the parser used.
         # Done first: DB entries below may rename a troop, and the scope
         # must be the original (Japanese) name the entry IDs were built from.
@@ -2425,7 +2446,7 @@ class RPGMakerMVParser:
                 self._apply_translation(data, entry)
 
         if not scan_entries and not speaker_lookup:
-            return 0
+            return self._nonevent_skipped
 
         # ── Prepare each block entry: (orig_lines, trans_lines) ──
         # Each dialog / scroll / comment / choice entry is applied at the
@@ -2714,7 +2735,7 @@ class RPGMakerMVParser:
         for (scope, kind, *_rest), (field, payload) in positional.items():
             fallback.append((scope, field, payload))
         if not fallback:
-            return 0
+            return self._nonevent_skipped
         by_scope: dict = {}
         for scope, field, payload in fallback:
             lk = by_scope.setdefault(scope, {}).setdefault(field, {})
@@ -2746,7 +2767,7 @@ class RPGMakerMVParser:
                         else:
                             ol, tl = item
                             unapplied += tl != ol
-        return unapplied
+        return unapplied + self._nonevent_skipped
 
     @staticmethod
     def _apply_note_tag(item: dict, tag_name: str, value_idx: int,
@@ -2785,6 +2806,20 @@ class RPGMakerMVParser:
         except (ValueError, IndexError, KeyError) as exc:
             log.warning("Export skip — malformed entry ID %r: %s", entry.id, exc)
 
+    def _put_checked(self, container, key, entry) -> None:
+        """``container[key] = entry.translation`` -- only while the game
+        still holds the entry's original there.
+
+        Database / System entries are addressed by ID; after a game update
+        the text there can differ.  Then the game's new text is kept and
+        the skip is counted (``_nonevent_skipped``) so the export reports
+        it.  A translation equal to its original changes nothing.
+        """
+        if container[key] == entry.original:
+            container[key] = entry.translation
+        elif entry.translation != entry.original:
+            self._nonevent_skipped = getattr(self, "_nonevent_skipped", 0) + 1
+
     def _apply_translation_inner(self, data, entry, parts, filename):
         """Inner logic for _apply_translation (split out for safe int parsing)."""
         # Database entries: "Actors.json/1/name" (parts[1] must be numeric)
@@ -2801,13 +2836,14 @@ class RPGMakerMVParser:
                                                  entry.original,
                                                  entry.translation)
                         elif field_name in item:
-                            item[field_name] = entry.translation
+                            self._put_checked(item, field_name, entry)
                         break
 
         # System.json entries
         elif filename == "System.json":
             if entry.id == "System.json/gameTitle":
-                data["gameTitle"] = entry.translation
+                if "gameTitle" in data:
+                    self._put_checked(data, "gameTitle", entry)
             elif "terms/messages/" in entry.id:
                 key = parts[-1]
                 terms = data.get("terms", {})
@@ -2815,39 +2851,40 @@ class RPGMakerMVParser:
                 if isinstance(messages, list):
                     idx = int(key)
                     if 0 <= idx < len(messages):
-                        messages[idx] = entry.translation
+                        self._put_checked(messages, idx, entry)
                 elif isinstance(messages, dict):
                     if key in messages:
-                        messages[key] = entry.translation
+                        self._put_checked(messages, key, entry)
             elif "terms/commands/" in entry.id:
                 idx = int(parts[-1])
                 terms = data.get("terms", {})
                 commands = terms.get("commands", [])
                 if 0 <= idx < len(commands):
-                    commands[idx] = entry.translation
+                    self._put_checked(commands, idx, entry)
             elif "terms/params/" in entry.id:
                 idx = int(parts[-1])
                 terms = data.get("terms", {})
                 params = terms.get("params", [])
                 if 0 <= idx < len(params):
-                    params[idx] = entry.translation
+                    self._put_checked(params, idx, entry)
             elif "terms/basic/" in entry.id:
                 idx = int(parts[-1])
                 terms = data.get("terms", {})
                 basic = terms.get("basic", [])
                 if 0 <= idx < len(basic):
-                    basic[idx] = entry.translation
+                    self._put_checked(basic, idx, entry)
             # Type arrays: elements, skillTypes, weaponTypes, armorTypes, equipTypes
             elif entry.field in ("elements", "skillTypes", "weaponTypes",
                                  "armorTypes", "equipTypes"):
                 idx = int(parts[-1])
                 arr = data.get(entry.field, [])
                 if 0 <= idx < len(arr):
-                    arr[idx] = entry.translation
+                    self._put_checked(arr, idx, entry)
 
         # Map displayName
         elif "displayName" in entry.id and entry.field == "displayName":
-            data["displayName"] = entry.translation
+            if isinstance(data, dict) and "displayName" in data:
+                self._put_checked(data, "displayName", entry)
 
         # Change Name/Nickname/Profile (320/324/325) — single parameter replacement
         elif entry.field in ("name", "nickname", "profile") and "/change_" in entry.id:

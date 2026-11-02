@@ -1072,7 +1072,17 @@ class WolfRPGParser:
 
     # ── Loading ───────────────────────────────────────────────────────
 
-    def load_project(self, folder: str, context_size: int | None = None) -> list[TranslationEntry]:
+    def load_originals(self, folder: str) -> list[TranslationEntry]:
+        """Parse the game's ORIGINAL text, for merging a game update.
+
+        After an export the live BasicData/ and MapData/ hold English, so
+        read the backup (refreshed by the export when the game was
+        updated); before any export the live files are the original.
+        """
+        return self.load_project(folder, from_backup=True)
+
+    def load_project(self, folder: str, context_size: int | None = None,
+                     from_backup: bool = False) -> list[TranslationEntry]:
         """Load all translatable strings from a Wolf RPG game."""
         if context_size is not None:
             self.context_size = context_size
@@ -1100,8 +1110,12 @@ class WolfRPGParser:
                 f'{WOLF3_UNSUPPORTED} (Detected from {marker}.)')
             return []
 
+        src = self.data_dir
+        if from_backup and self._backup_dir_for(self.data_dir).is_dir():
+            src = self._backup_dir_for(self.data_dir)
+
         # Parse maps
-        map_dir = self.data_dir / 'MapData'
+        map_dir = src / 'MapData'
         if map_dir.is_dir():
             for mps_file in sorted(map_dir.glob('*.mps')):
                 try:
@@ -1114,7 +1128,7 @@ class WolfRPGParser:
                     self.load_warnings.append(f'MapData/{mps_file.name}: {e}')
 
         # Parse common events
-        basic_dir = self.data_dir / 'BasicData'
+        basic_dir = src / 'BasicData'
         ce_path = basic_dir / 'CommonEvent.dat' if basic_dir.is_dir() else None
         if ce_path and ce_path.is_file():
             try:
@@ -1402,7 +1416,7 @@ class WolfRPGParser:
         refreshed = game_io.refresh_changed_originals(
             self._data_file_pairs(backup_dir), manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
 
         # Re-read maps, common events and DB structure from backup for
         # idempotent re-export

@@ -260,6 +260,23 @@ class RPGMakerAceParser:
                 f"No 'Data' folder found in {project_dir}.\n"
                 "Please select an RPG Maker VX Ace project folder."
             )
+        return self._load_from(data_dir)
+
+    def load_originals(self, project_dir: str) -> list:
+        """Parse the game's ORIGINAL text, for merging a game update.
+
+        After an export the live Data/ holds English, so read Data_original/
+        (refreshed by the export when the game was updated); before any
+        export, Data/ itself is the original.
+        """
+        data_dir = self._find_data_dir(project_dir)
+        if not data_dir:
+            raise FileNotFoundError(f"No 'Data' folder found in {project_dir}.")
+        backup = data_dir + "_original"
+        return self._load_from(backup if os.path.isdir(backup) else data_dir)
+
+    def _load_from(self, data_dir: str) -> list:
+        """Parse every entry, reading the .rvdata2 files from *data_dir*."""
         self.load_warnings = []
 
         self._actor_names = self._load_actor_names(data_dir)
@@ -314,7 +331,7 @@ class RPGMakerAceParser:
             [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
              for fn in sorted(all_files)], manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
 
         problems: list[str] = []
         skipped: dict[str, int] = {}

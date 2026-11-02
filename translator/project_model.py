@@ -165,6 +165,65 @@ class TranslationProject:
         project._build_index()
         return project
 
+    def merge_fresh_originals(self, fresh_entries: list) -> dict:
+        """Merge a fresh parse of the game's ORIGINAL text (game update).
+
+        By entry ID:
+        * same original (and namebox) — the project's entry is kept as is:
+          translation, status (reviewed!) and context untouched;
+        * new ID — the fresh entry is added (untranslated);
+        * changed original — the entry takes the new original and becomes
+          untranslated; its old translation is kept in
+          ``migration_orphans`` so nothing is silently lost.
+        Entries the fresh parse doesn't produce are never removed (parse
+        options or an unreadable file must not delete the user's work).
+
+        Safety: when more than half of the translated / reviewed entries
+        would change, the parse most likely read the wrong files (e.g. a
+        translated game without its backup).  Nothing is merged then and
+        ``status`` is ``"low_match"``.
+
+        Returns ``{"status", "new", "changed", "unchanged"}``.
+        """
+        self._ensure_index()
+        stats = {"status": "merged", "new": 0, "changed": 0, "unchanged": 0}
+        by_id = {e.id: e for e in self.entries}
+        changed, new = [], []
+        for f in fresh_entries:
+            old = by_id.get(f.id)
+            if old is None:
+                new.append(f)
+            elif (old.original == f.original
+                  and (old.namebox or "") == (f.namebox or "")):
+                stats["unchanged"] += 1
+            else:
+                changed.append((old, f))
+        with_work = sum(1 for e in self.entries
+                        if e.translation and e.status in ("translated", "reviewed"))
+        changed_work = sum(1 for old, _f in changed
+                           if old.translation
+                           and old.status in ("translated", "reviewed"))
+        if with_work and changed_work > with_work / 2:
+            stats["status"] = "low_match"
+            stats["changed"] = len(changed)
+            return stats
+        for old, f in changed:
+            if old.translation:
+                self.migration_orphans.append(
+                    {**asdict(old), "reason": "original changed (game update)"})
+            old.original = f.original
+            old.namebox = f.namebox
+            old.has_face = f.has_face
+            old.context = f.context
+            old.translation = ""
+            old.status = "untranslated"
+        self.entries.extend(new)
+        stats["new"] = len(new)
+        stats["changed"] = len(changed)
+        if new:
+            self._build_index()
+        return stats
+
     def import_translations(self, old_project: "TranslationProject") -> dict:
         """Import translations from an older version of the same project.
 

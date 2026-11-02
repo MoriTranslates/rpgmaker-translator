@@ -2111,6 +2111,10 @@ class MainWindow(QMainWindow):
         if self.handler.has_plugin_system and self.project.project_path:
             self._merge_new_plugin_entries()
 
+        # Game updated since the state was saved: add new lines, reset
+        # changed ones; unchanged lines keep their translation and status.
+        self._merge_game_update()
+
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries(self.project.entries)
         self.event_viewer.set_entries(self.project.entries)
@@ -2149,6 +2153,50 @@ class MainWindow(QMainWindow):
         self._backfill_db_glossary()
         self._last_save_path = path
         return True
+
+    def _merge_game_update(self) -> dict | None:
+        """Merge the game's current ORIGINAL text into the resumed project.
+
+        Engines whose parser has ``load_originals`` (MV/MZ, VX Ace, Wolf,
+        Ren'Py) re-read the originals -- from the backup an export keeps
+        (and refreshes after a game update), else from the game itself --
+        and merge them by entry ID.  Returns the merge stats, or None when
+        nothing was checked.
+        """
+        from ..project_model import ID_SCHEME
+        parser = self.handler.parser
+        path = self.project.project_path
+        if (not path or not os.path.isdir(path)
+                or not hasattr(parser, "load_originals")
+                or getattr(self.project, "id_scheme", ID_SCHEME) < ID_SCHEME):
+            return None
+        try:
+            fresh = parser.load_originals(path)
+        except Exception as exc:  # noqa: BLE001 -- resume must still work
+            # Harmless to skip: the project stays exactly as saved; the
+            # next resume tries again.  Logged so it isn't invisible.
+            log.warning("Could not re-read the game to merge updates: %s", exc)
+            return None
+        stats = self.project.merge_fresh_originals(fresh)
+        if stats["status"] == "low_match":
+            QMessageBox.warning(
+                self, "Game Text Not Merged",
+                f"{stats['changed']} lines of the game no longer match this "
+                "project — most of its translated lines would change, so "
+                "this is probably not the game (or not the backup) the "
+                "project was made from. Nothing was changed.")
+        elif stats["new"] or stats["changed"]:
+            msg = (f"The game changed since this project was saved "
+                   f"(game update?).\n\n"
+                   f"• {stats['new']} new line(s) added (untranslated)\n"
+                   f"• {stats['changed']} changed line(s) reset to "
+                   f"untranslated\n• {stats['unchanged']} unchanged line(s) "
+                   f"kept their translation and status")
+            if stats["changed"]:
+                msg += ("\n\nThe old translations of changed lines are kept "
+                        "in the save file under \"migration_orphans\".")
+            QMessageBox.information(self, "Game Update Merged", msg)
+        return stats
 
     def _merge_new_plugin_entries(self) -> int:
         """Extract plugin + System.json entries and merge any missing from project.
