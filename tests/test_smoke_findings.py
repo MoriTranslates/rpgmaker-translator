@@ -1364,3 +1364,24 @@ def test_crowd_resume_merge_reads_backup(tmp_path):
     proj = TranslationProject(project_path=str(tmp_path), entries=entries)
     stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
     assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
+
+
+def test_mv_patch_zip_reports_lines_it_could_not_place(mv_game, mv_parser, tmp_path):
+    """The install package used to drop such lines silently."""
+    import zipfile
+    path = _set_page(mv_game, [(401, "古い台詞"), (401, "")])
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "translated"
+    _set_page(mv_game, [(401, "新しい台詞"), (401, "")])     # changed meanwhile
+    zip_path = tmp_path / "patch.zip"
+    skipped = mv_parser.export_patch_zip(mv_game, entries, str(zip_path))
+    assert skipped == {"Map001.json": 1}
+    with zipfile.ZipFile(zip_path) as zf:
+        packed = json.loads(zf.read("_translation/data/Map001.json"))
+        items = json.loads(zf.read("_translation/data/Items.json"))
+    texts = [c["parameters"][0] for c in packed["events"][1]["pages"][0]["list"]
+             if c["code"] == 401]
+    assert texts[0] == "新しい台詞"
+    assert items[1]["name"].startswith("EN ")              # the rest is included
+    assert os.path.exists(path)

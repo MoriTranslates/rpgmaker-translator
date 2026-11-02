@@ -58,13 +58,20 @@ Found by testing on copies of real games:
 - **RPG Maker MV/MZ: messages kept in one Show Text command are exported.** Games translated or
   edited by other tools often keep a whole message, line breaks included, in one command. Those
   translations were silently skipped, while the export still said "Export Complete".
-- **Translations are never written over text that changed.** After a game update or a hand edit,
-  a line whose text changed keeps the game's new text, for every RPG Maker engine, Wolf RPG and
-  Ren'Py, and the export says "Export Incomplete" with the files and how many lines.
-- **Re-opening a project after a game update now really picks up the changes** (RPG Maker MV/MZ,
-  VX Ace, Wolf RPG, Ren'Py). New lines are added, changed lines go back to untranslated (their old
-  translation is kept in the save file), and everything else keeps its translation and Reviewed
-  status. Other engines now say plainly that they can't do this yet.
+- **Translations are never written over text that changed, in every engine.** After a game update
+  or a hand edit, a line whose text changed keeps the game's new text, and the export says "Export
+  Incomplete" with the files and how many lines. Before, the old translation replaced the new line
+  in every engine: positions shifted in RPG Maker 2000/2003, VX Ace, Wolf RPG, Ren'Py, Kirikiri,
+  TyranoScript, CSV games and Crowd, and database names in MV/MZ.
+- **Re-opening a project after a game update now really picks up the changes**, for every engine.
+  New lines are added, changed lines go back to untranslated (their old translation is kept in the
+  save file), and everything else keeps its translation and Reviewed status.
+- **The install package (patch zip) says when lines are missing.** Lines it couldn't place are
+  listed as "Install Package Incomplete" instead of being left out silently.
+- **SRPG Studio:** two identical lines with different translations each keep their own
+  translation (both used to get the last one).
+- **RPG Maker VX Ace:** a blank line at the start of a message stays at the start (it used to move
+  to the bottom, even when nothing was translated).
 - **An interrupted Restore Originals can't leave the game without its data folder any more.** The
   folder is put back automatically the next time the game is opened, exported or restored.
 - **Wolf RPG Editor 3.x games are recognised (including `GamePro.exe`) and refused** with a clear

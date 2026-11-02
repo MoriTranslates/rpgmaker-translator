@@ -712,6 +712,10 @@ class RPGMakerMVParser:
             README.txt
 
         End users extract into the game folder and run install.bat.
+
+        Returns ``{file: count}`` of translations that were NOT put in the
+        package because the game text at their place no longer matches
+        their original (empty when everything was included).
         """
         data_dir = self._find_data_dir(project_dir)
         if not data_dir:
@@ -752,6 +756,7 @@ class RPGMakerMVParser:
             # Stored under _translation/ so extracting the zip doesn't
             # immediately overwrite game files — install.bat handles the swap
             data_file_count = 0
+            skipped_lines: dict[str, int] = {}
             for filename in sorted(os.listdir(source_dir)):
                 source_path = os.path.join(source_dir, filename)
                 if not os.path.isfile(source_path):
@@ -764,9 +769,11 @@ class RPGMakerMVParser:
 
                 file_entries = by_file.get(filename, [])
                 if file_entries or global_speakers:
-                    self._apply_translations_fast(
+                    n_skipped = self._apply_translations_fast(
                         data, file_entries,
                         global_speakers=global_speakers)
+                    if n_skipped:
+                        skipped_lines[filename] = n_skipped
 
                 # Switch locale so name input shows Latin alphabet
                 if filename == "System.json" and isinstance(data, dict):
@@ -864,6 +871,8 @@ class RPGMakerMVParser:
                 "  Run uninstall.bat\n"
             )
             zf.writestr("README.txt", readme)
+        self.last_patch_skipped = skipped_lines
+        return skipped_lines
 
     def export_game_folder_as_patch(self, game_path: str, zip_path: str,
                                     game_title: str = "") -> dict:

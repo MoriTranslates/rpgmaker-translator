@@ -5913,10 +5913,23 @@ class MainWindow(QMainWindow):
                             r'<WordWrap>', '', e.translation, flags=re.IGNORECASE)
                     export_entries.append(e)
 
-            self.parser.export_patch_zip(
+            skipped = self.parser.export_patch_zip(
                 self.project.project_path, export_entries,
                 path, game_title=game_title,
                 inject_wordwrap=self.plugin_analyzer.should_inject_plugin())
+            if skipped:
+                # Never report a complete package when lines were left out
+                shown = "\n".join(f"  {fn}: {n} line(s)"
+                                  for fn, n in sorted(skipped.items()))
+                QMessageBox.warning(
+                    self, "Install Package Incomplete",
+                    f"Saved to:\n{path}\n\n"
+                    f"{sum(skipped.values())} translated line(s) were NOT "
+                    f"included because the game's text at their place "
+                    f"changed (game update?):\n{shown}\n\n"
+                    "Re-open the project to pick up the new lines, then "
+                    "create the package again.")
+                return
             QMessageBox.information(
                 self, "Install Package Created",
                 f"Saved to:\n{path}\n\n"
