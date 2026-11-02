@@ -958,3 +958,23 @@ def test_renpy_export_skips_line_whose_original_changed(tmp_path):
     assert "script.rpy: 1 translated line(s) not written" in str(ei.value)
     text = live.read_text(encoding="utf-8")
     assert '    e "新しい台詞"\n' in text and '    e "EN 同じ台詞"\n' in text
+
+
+def test_ace_blank_line_in_message_stays_in_place(tmp_path):
+    """A message whose first 401 line is empty kept moving the blank line
+    to the bottom, even on a no-op export (Liz: 6 maps)."""
+    from translator.rpgmaker_ace import RPGMakerAceParser
+    game, live = _ace_one_map_game(tmp_path, ["", "必要な堕落度: 0"])
+    raw = live.read_bytes()
+    p = RPGMakerAceParser()
+    entries = p.load_project(str(game))
+    for e in entries:
+        e.translation, e.status = e.original, "translated"
+    p.save_project(str(game), entries)
+    assert rmc.plain(rmc.load(live.read_bytes())) == rmc.plain(rmc.load(raw))
+    for e in entries:
+        e.translation = "Required corruption: 0"
+    p.save_project(str(game), entries)
+    texts = [str(c.attributes["@parameters"][0]) for c in _ace_cmds(live)
+             if c.attributes["@code"] == 401]
+    assert texts == ["", "Required corruption: 0"]

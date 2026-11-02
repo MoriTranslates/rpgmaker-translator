@@ -107,6 +107,27 @@ def _block_has_text(line_cmds: list) -> bool:
     return False
 
 
+def _keep_blank_slots(line_cmds: list, trans_lines: list) -> list:
+    """Put translated lines back where the block's non-empty lines were.
+
+    The parser drops empty 401/405 lines from the text, so a block like
+    ``["", "Text"]`` became "Text"; writing lines from the top then moved
+    the blank line to the bottom of the message box (even when exporting
+    the original text).  When the translation has exactly as many lines as
+    the block had non-empty lines, keep the blank lines where they were.
+    Otherwise the lines are returned unchanged (filled from the top).
+    """
+    texts = [_str((_attr(c, "parameters") or [""])[0])
+             if (_attr(c, "parameters") or []) else "" for c in line_cmds]
+    slots = [k for k, t in enumerate(texts) if t]
+    if len(slots) == len(texts) or len(trans_lines) != len(slots):
+        return trans_lines
+    out = [""] * len(texts)
+    for k, slot in enumerate(slots):
+        out[slot] = trans_lines[k]
+    return out
+
+
 def _block_text(line_cmds: list, namebox: bool = True) -> tuple[str, str]:
     """``(text, namebox)`` exactly as the parser extracts a 401/405 block.
 
@@ -992,7 +1013,8 @@ class RPGMakerAceParser:
                         translated = entry.namebox + "\n" + translated
 
                     # Split translation into same number of 401 lines
-                    trans_lines = translated.split("\n")
+                    trans_lines = _keep_blank_slots(
+                        cmd_list[start_401:j], translated.split("\n"))
 
                     # Pad or trim to match original line count
                     while len(trans_lines) < orig_count:
@@ -1037,7 +1059,8 @@ class RPGMakerAceParser:
                         continue
 
                 if entry and entry.translation:
-                    trans_lines = entry.translation.split("\n")
+                    trans_lines = _keep_blank_slots(
+                        cmd_list[start_405:j], entry.translation.split("\n"))
                     while len(trans_lines) < orig_count:
                         trans_lines.append("")
                     if len(trans_lines) > orig_count:

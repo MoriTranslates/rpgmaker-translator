@@ -49,6 +49,35 @@ translations in the wrong place or overwrite your review work. All of them are f
 - **Kirikiri:** bytes the app can't decode are kept as they are instead of becoming `?`.
 - Wolf RPG export no longer fails when a `Data.wolf.bak` already exists.
 
+Found by testing on copies of real games:
+
+- **RPG Maker VX Ace: exporting no longer scrambles the game data.** The `.rvdata2` writer numbered
+  objects differently from Ruby, so after any translated line the game's internal links pointed at
+  the wrong objects (event commands turned into move routes or numbers). On a real game this hit
+  most maps. Exports, the script plugins and the window scaler now write files the way Ruby does.
+- **RPG Maker MV/MZ: messages kept in one Show Text command are exported.** Games translated or
+  edited by other tools often keep a whole message, line breaks included, in one command. Those
+  translations were silently skipped, while the export still said "Export Complete".
+- **Translations are never written over text that changed.** After a game update or a hand edit,
+  a line whose text changed keeps the game's new text, for every RPG Maker engine, Wolf RPG and
+  Ren'Py, and the export says "Export Incomplete" with the files and how many lines.
+- **Re-opening a project after a game update now really picks up the changes** (RPG Maker MV/MZ,
+  VX Ace, Wolf RPG, Ren'Py). New lines are added, changed lines go back to untranslated (their old
+  translation is kept in the save file), and everything else keeps its translation and Reviewed
+  status. Other engines now say plainly that they can't do this yet.
+- **An interrupted Restore Originals can't leave the game without its data folder any more.** The
+  folder is put back automatically the next time the game is opened, exported or restored.
+- **Wolf RPG Editor 3.x games are recognised (including `GamePro.exe`) and refused** with a clear
+  message instead of being opened with garbled text and exported into broken files.
+- **Files that can't be read are listed when you open a project**, instead of their text silently
+  missing.
+- **Ren'Py:** scripts in subfolders of `game/` are translated, lines ending in `with …` or
+  `nointeract` are no longer skipped, a backslash in a translation shows up in the game, and a
+  character name containing `\"` is no longer cut short.
+- **RPG Maker MZ:** plugin settings that are fixed choices or font names are no longer offered for
+  translation (translating them broke the plugin).
+- **Wolf RPG:** file paths with spaces or brackets are no longer offered for translation.
+
 ### Changed
 
 - Bulk grammar polish only polishes lines that aren't marked Reviewed.
