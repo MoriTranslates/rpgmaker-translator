@@ -1,96 +1,150 @@
-"""Start page shown while no project is open (instead of an empty table)."""
+"""Start page shown while no project is open (instead of an empty table).
+
+The logo sits on the ink background under a soft candle glow; below it are
+the two ways in (open a folder, or drop one anywhere on the page), recent
+projects, the four steps and the supported engines as small badges.
+"""
 
 import html
 import os
 
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtCore import QPointF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPixmap, QRadialGradient
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-    QListWidget, QListWidgetItem, QApplication,
+    QApplication, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
 from . import theme
 
-_ENGINES = (
-    "RPG Maker MV / MZ · VX Ace · 2000/2003 · Wolf RPG · "
-    "TyranoScript · Kirikiri · Ren'Py · SRPG Studio · Crowd"
-)
+try:
+    from ..resource_paths import resource_path
+except ImportError:  # pragma: no cover
+    resource_path = theme.resource_path
+
+_ENGINES = ("RPG Maker MV / MZ", "VX Ace", "2000 / 2003", "Wolf RPG",
+            "TyranoScript", "Kirikiri", "Ren'Py", "SRPG Studio", "Crowd")
 
 _STEPS = (
-    ("1", "Open the game folder",
-     "The engine is detected automatically and all Japanese text is extracted."),
-    ("2", "Translate",
-     "Use the Translation Wizard, or run each step yourself from the "
-     "Translate menu (database first, then dialogue)."),
-    ("3", "Review",
-     "Fix lines in the editor or the Event Viewer. Progress saves "
-     "automatically."),
-    ("4", "Apply to game",
-     "Game › Apply Translation to Game writes the English text back. "
-     "The original files are backed up first."),
+    ("1", "Open", "Pick or drop the game folder; its text is extracted."),
+    ("2", "Translate", "Run the wizard, or each step from the bar."),
+    ("3", "Review", "Fix lines in the editor; progress saves itself."),
+    ("4", "Apply", "Write the English into the game. Originals are backed up."),
 )
 
 # Recent list: rows visible before it scrolls
-_RECENT_VISIBLE_ROWS = 5
+_RECENT_VISIBLE_ROWS = 4
 _RECENT_ROW_HEIGHT = 40
-_RECENT_PATH_WIDTH = 540  # px — longer paths are elided in the middle
+_RECENT_PATH_WIDTH = 480  # px — longer paths are elided in the middle
+_LOGO_WIDTH = 520
+
+
+class _DropZone(QFrame):
+    """Dashed target; clicking it opens the folder picker too."""
+
+    def __init__(self, on_click, parent=None):
+        super().__init__(parent)
+        self.setObjectName("dropZone")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._on_click = on_click
+        row = QHBoxLayout(self)
+        row.setContentsMargins(18, 14, 18, 14)
+        row.setSpacing(12)
+        row.addStretch()
+        self.icon = QLabel()
+        theme.bind_icon(lambda ic: self.icon.setPixmap(ic.pixmap(26, 26)),
+                        "folder-down", "accent")
+        row.addWidget(self.icon)
+        text = QLabel("<b>Drop a game folder here</b><br>"
+                      "<span>or click to browse — the engine is detected "
+                      "automatically</span>")
+        text.setObjectName("dropText")
+        text.setTextFormat(Qt.TextFormat.RichText)
+        row.addWidget(text)
+        row.addStretch()
+
+    def set_hover(self, on: bool):
+        self.setProperty("hover", on)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._on_click()
+        super().mouseReleaseEvent(event)
 
 
 class WelcomePage(QWidget):
-    """Friendly empty state with the two ways to get started."""
+    """Friendly start page with the ways to get started."""
 
     recent_selected = pyqtSignal(str)  # folder path of a recent project
+    folder_dropped = pyqtSignal(str)   # folder dragged onto the page
 
     def __init__(self, open_action, load_action, parent=None):
         super().__init__(parent)
+        self.setObjectName("welcomePage")
+        self.setAcceptDrops(True)
         self._recent: list[str] = []
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 24, 24, 24)
-        outer.addStretch(2)
+        self._logo_src = QPixmap(resource_path("assets", "logo_banner.png"))
 
-        card = QFrame()
-        card.setObjectName("welcomeCard")
-        card.setMaximumWidth(640)
-        col = QVBoxLayout(card)
-        col.setContentsMargins(32, 28, 32, 28)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 12, 24, 24)
+        outer.addStretch(1)
+
+        col = QVBoxLayout()
         col.setSpacing(10)
 
+        self._logo = QLabel()
+        self._logo.setObjectName("welcomeLogo")
+        self._logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        col.addWidget(self._logo, 0, Qt.AlignmentFlag.AlignHCenter)
+
         self._title = QLabel("RPG Maker Translator")
+        self._title.setObjectName("welcomeTitle")
         self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         col.addWidget(self._title)
 
         self._subtitle = QLabel(
-            "Translate Japanese games to English with a local LLM.")
+            "Play Japanese games in English — translated on your own PC, "
+            "by a local AI.")
+        self._subtitle.setObjectName("welcomeTagline")
         self._subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._subtitle.setWordWrap(True)
         col.addWidget(self._subtitle)
-        col.addSpacing(12)
+        col.addSpacing(8)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(10)
         buttons.addStretch()
         self.open_btn = QPushButton("Open Game Folder…")
         self.open_btn.setToolTip("Pick a game folder to start (Ctrl+O)")
-        self.open_btn.setMinimumHeight(34)
+        self.open_btn.setMinimumHeight(38)
         theme.make_primary(self.open_btn)
+        theme.bind_icon(self.open_btn.setIcon, "folder-open", "on_accent")
         self.open_btn.clicked.connect(open_action.trigger)
         buttons.addWidget(self.open_btn)
         self.load_btn = QPushButton("Load Saved State…")
         self.load_btn.setToolTip(
             "Continue from a _translation_state.json file (Ctrl+L)")
-        self.load_btn.setMinimumHeight(34)
+        self.load_btn.setMinimumHeight(38)
+        theme.bind_icon(self.load_btn.setIcon, "upload")
         self.load_btn.clicked.connect(load_action.trigger)
         buttons.addWidget(self.load_btn)
         buttons.addStretch()
         col.addLayout(buttons)
-        col.addSpacing(16)
+        col.addSpacing(6)
+
+        self._drop = _DropZone(open_action.trigger)
+        col.addWidget(self._drop)
 
         # ── Recent projects (hidden while the list is empty) ──
         self._recent_box = QWidget()
+        self._recent_box.setObjectName("welcomeRecent")
         recent_col = QVBoxLayout(self._recent_box)
-        recent_col.setContentsMargins(0, 0, 0, 8)
+        recent_col.setContentsMargins(0, 6, 0, 0)
         recent_col.setSpacing(4)
         self._recent_header = QLabel("Recent projects")
+        self._recent_header.setObjectName("sectionLabel")
         recent_col.addWidget(self._recent_header)
         self.recent_list = QListWidget()
         self.recent_list.setObjectName("recentList")
@@ -104,36 +158,108 @@ class WelcomePage(QWidget):
         col.addWidget(self._recent_box)
         self._recent_box.setVisible(False)
 
+        # ── The four steps, side by side ──
+        col.addSpacing(10)
+        steps = QHBoxLayout()
+        steps.setSpacing(10)
         self._step_labels = []
         for num, head, body in _STEPS:
-            row = QHBoxLayout()
-            row.setSpacing(12)
+            card = QFrame()
+            card.setObjectName("stepCard")
+            box = QVBoxLayout(card)
+            box.setContentsMargins(12, 10, 12, 10)
+            box.setSpacing(4)
+            top = QHBoxLayout()
+            top.setSpacing(8)
             badge = QLabel(num)
+            badge.setObjectName("stepBadge")
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            badge.setFixedSize(24, 24)
-            row.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
-            text = QLabel(f"<b>{head}</b><br>{body}")
+            badge.setFixedSize(22, 22)
+            top.addWidget(badge)
+            name = QLabel(head)
+            name.setObjectName("stepName")
+            top.addWidget(name, 1)
+            box.addLayout(top)
+            text = QLabel(body)
+            text.setObjectName("hint")
             text.setWordWrap(True)
-            text.setTextFormat(Qt.TextFormat.RichText)
-            row.addWidget(text, 1)
-            col.addLayout(row)
+            box.addWidget(text)
+            box.addStretch()
+            steps.addWidget(card, 1)
             self._step_labels.append((badge, text))
+        col.addLayout(steps)
 
-        col.addSpacing(12)
-        self._engines = QLabel("Supported: " + _ENGINES)
-        self._engines.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._engines.setWordWrap(True)
-        col.addWidget(self._engines)
+        # ── Supported engines as badges ──
+        col.addSpacing(8)
+        engines = QHBoxLayout()
+        engines.setSpacing(6)
+        engines.addStretch()
+        for name in _ENGINES:
+            chip = QLabel(name)
+            chip.setObjectName("engineChip")
+            engines.addWidget(chip)
+        engines.addStretch()
+        col.addLayout(engines)
 
+        holder = QWidget()
+        holder.setObjectName("welcomeHolder")
+        holder.setLayout(col)
+        holder.setMaximumWidth(760)
         center = QHBoxLayout()
         center.addStretch()
-        center.addWidget(card, 10)
+        center.addWidget(holder, 10)
         center.addStretch()
         outer.addLayout(center)
-        outer.addStretch(3)
+        outer.addStretch(2)
 
-        self._card = card
         self.apply_theme()
+
+    # ── Background glow ──────────────────────────────────────────
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), theme.qcolor("window"))
+        mid = self._logo.mapTo(self, self._logo.rect().center())
+        center = QPointF(self.width() / 2, mid.y() + 10)
+        radius = max(self.width(), self.height()) * 0.42
+        grad = QRadialGradient(center, radius)
+        glow = QColor(theme.c("glow"))
+        clear = QColor(glow)
+        clear.setAlpha(0)
+        glow.setAlpha(235)
+        grad.setColorAt(0.0, glow)
+        grad.setColorAt(0.45, QColor(glow.red(), glow.green(), glow.blue(), 90))
+        grad.setColorAt(1.0, clear)
+        painter.fillRect(self.rect(), grad)
+        painter.end()
+
+    # ── Drag and drop a game folder ──────────────────────────────
+
+    @staticmethod
+    def _dropped_folder(event) -> str:
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        for url in urls:
+            path = url.toLocalFile()
+            if os.path.isfile(path):   # dropped Game.exe → its folder
+                path = os.path.dirname(path)
+            if path and os.path.isdir(path):
+                return path
+        return ""
+
+    def dragEnterEvent(self, event):
+        if self._dropped_folder(event):
+            self._drop.set_hover(True)
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self._drop.set_hover(False)
+
+    def dropEvent(self, event):
+        self._drop.set_hover(False)
+        path = self._dropped_folder(event)
+        if path:
+            event.acceptProposedAction()
+            self.folder_dropped.emit(path)
 
     # ── Recent projects ──────────────────────────────────────────
 
@@ -178,28 +304,68 @@ class WelcomePage(QWidget):
     # ── Theme ────────────────────────────────────────────────────
 
     def apply_theme(self):
-        self._card.setStyleSheet(
-            f"QFrame#welcomeCard {{ background-color: {theme.c('panel')}; "
-            f"border: 1px solid {theme.c('border')}; border-radius: 8px; }}")
-        self._title.setStyleSheet("font-size: 18pt; font-weight: bold;")
-        self._subtitle.setStyleSheet(
-            f"font-size: 11pt; color: {theme.c('text_muted')};")
-        self._engines.setStyleSheet(theme.hint_css() + " font-size: 8pt;")
-        self._recent_header.setStyleSheet(
-            f"font-weight: bold; color: {theme.c('text_soft')};")
-        self.recent_list.setStyleSheet(
-            f"QListWidget#recentList {{ background: transparent; "
-            f"border: none; outline: none; }}"
-            f"QListWidget#recentList::item {{ border-radius: 4px; }}"
-            f"QListWidget#recentList::item:hover {{ "
-            f"background: {theme.c('button')}; }}"
-            f"QListWidget#recentList::item:selected {{ "
-            f"background: {theme.c('selection')}; }}")
-        for badge, text in self._step_labels:
-            badge.setStyleSheet(
-                f"background-color: {theme.c('border')}; "
-                f"color: {theme.c('accent')}; border-radius: 12px; "
-                "font-weight: bold;")
-            text.setStyleSheet(f"color: {theme.c('text_soft')};")
+        if not self._logo_src.isNull():
+            dpr = self.devicePixelRatioF() or 1.0
+            pm = self._logo_src.scaledToWidth(
+                int(_LOGO_WIDTH * dpr),
+                Qt.TransformationMode.SmoothTransformation)
+            pm.setDevicePixelRatio(dpr)
+            self._logo.setPixmap(pm)
+            self._title.setVisible(False)   # the logo already says it
+        t = theme.colors()
+        # Light mode: the night-sky logo sits on an ink card of its own
+        logo_bg = ("transparent" if theme.is_dark()
+                   else t["window"] if self._logo_src.isNull() else "#0f1424")
+        self.setStyleSheet(f"""
+            QWidget#welcomeHolder, QWidget#welcomeRecent {{
+                background: transparent;
+            }}
+            QLabel#welcomeLogo {{
+                background: {logo_bg}; border-radius: 14px; padding: 6px;
+            }}
+            QLabel#welcomeTitle {{ font-size: 20pt; font-weight: 700; }}
+            QLabel#welcomeTagline {{
+                font-size: 12pt; color: {t['text_soft']};
+            }}
+            QFrame#dropZone {{
+                border: 2px dashed {t['border_strong']};
+                border-radius: 12px;
+                background-color: {t['panel']};
+            }}
+            QFrame#dropZone:hover, QFrame#dropZone[hover="true"] {{
+                border-color: {t['accent']};
+                background-color: {t['accent_soft']};
+            }}
+            QLabel#dropText {{ color: {t['text_soft']}; }}
+            QLabel#sectionLabel {{
+                font-weight: 600; color: {t['text_muted']};
+            }}
+            QFrame#stepCard {{
+                background-color: {t['panel']};
+                border: 1px solid {t['border']};
+                border-radius: 10px;
+            }}
+            QLabel#stepBadge {{
+                background-color: {t['accent_soft']}; color: {t['accent']};
+                border-radius: 11px; font-weight: 700;
+            }}
+            QLabel#stepName {{ font-weight: 600; }}
+            QLabel#engineChip {{
+                background-color: {t['raised']}; color: {t['text_muted']};
+                border: 1px solid {t['border']}; border-radius: 10px;
+                padding: 2px 9px; font-size: 8.5pt;
+            }}
+            QListWidget#recentList {{
+                background: transparent; border: none; outline: none;
+            }}
+            QListWidget#recentList::item {{ border-radius: 6px; }}
+            QListWidget#recentList::item:hover {{
+                background: {t['button']};
+            }}
+            QListWidget#recentList::item:selected {{
+                background: {t['selection']};
+            }}
+        """)
         if self._recent:
             self.set_recent(self._recent)  # path color comes from the theme
+        self.update()

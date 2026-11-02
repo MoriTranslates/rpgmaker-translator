@@ -284,6 +284,7 @@ class MainWindow(QMainWindow):
         """Start page shown until a project is opened (needs menu actions)."""
         self._welcome = WelcomePage(self.open_action, self.load_action)
         self._welcome.recent_selected.connect(self._open_recent_project)
+        self._welcome.folder_dropped.connect(self._open_recent_project)
         self._stack.addWidget(self._welcome)
         self._refresh_recent_ui()
         self._show_workspace(False)
