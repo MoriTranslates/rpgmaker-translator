@@ -56,6 +56,7 @@ from .queue_panel import QueuePanel
 from .event_viewer import EventViewerPanel
 from .model_suggestion_dialog import ModelSuggestionDialog
 from .pipeline_bar import PipelineBar
+from .project_header import ProjectHeader
 from .background_task import run_in_thread, running_count, wait_all
 from . import theme
 from .welcome_page import WelcomePage
@@ -238,7 +239,16 @@ class MainWindow(QMainWindow):
         text_tab.setCollapsible(1, False)
         text_tab.setSizes([260, 1140])
         self.text_splitter = text_tab
-        self.tabs.addTab(text_tab, "Text Translation")
+        # Slim project header (title, engine, progress) over the workspace
+        self.project_header = ProjectHeader()
+        self.file_tree.stats_changed.connect(self._update_project_header)
+        text_page = QWidget()
+        text_page_layout = QVBoxLayout(text_page)
+        text_page_layout.setContentsMargins(0, 0, 0, 0)
+        text_page_layout.setSpacing(0)
+        text_page_layout.addWidget(self.project_header)
+        text_page_layout.addWidget(text_tab, 1)
+        self.tabs.addTab(text_page, "Text Translation")
 
         # Tab 2: Image Translation
         self.image_panel = ImagePanel()
@@ -2165,6 +2175,27 @@ class MainWindow(QMainWindow):
                     self.pipeline_bar.mark_done("db")
                 if dlg_done:
                     self.pipeline_bar.mark_done("dialogue")
+
+    def _update_project_header(self, project=None):
+        """Title, engine badge and progress for the header over the table."""
+        project = project or self.project
+        entries = project.entries if project else []
+        title = ""
+        for e in entries:
+            if e.id == "System.json/gameTitle":
+                title = (e.translation or e.original or "").strip()
+                break
+        folder = os.path.basename(
+            (getattr(project, "project_path", "") or "").rstrip("\\/"))
+        self.project_header.set_project(
+            title or folder or "Untitled project",
+            getattr(self.handler, "display_name", ""),
+            folder if title and folder != title else "")
+        total = len(entries)
+        translated = sum(1 for e in entries
+                         if e.status in ("translated", "reviewed"))
+        reviewed = sum(1 for e in entries if e.status == "reviewed")
+        self.project_header.set_progress(translated, reviewed, total)
 
     def _sync_project_type(self, ptype: str):
         """Update project type on client, handler, and system prompt."""

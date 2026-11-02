@@ -27,6 +27,7 @@ class FileTreeWidget(QTreeWidget):
 
     file_selected = pyqtSignal(str)   # Emits filename when clicked
     all_selected = pyqtSignal()       # Emits when "All Files" is clicked
+    stats_changed = pyqtSignal(object)  # project, after counts are (re)built
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -146,6 +147,7 @@ class FileTreeWidget(QTreeWidget):
             self._update_item_stats(self.invisibleRootItem(), project)
         self._update_icons(self.invisibleRootItem())
         self.setUpdatesEnabled(True)
+        self.stats_changed.emit(project)
 
     def apply_theme(self):
         """Re-color progress badges and icons after a dark/light switch."""
@@ -221,6 +223,7 @@ class FileTreeWidget(QTreeWidget):
     def refresh_stats(self, project: TranslationProject):
         """Update progress counts without rebuilding the tree."""
         self._update_item_stats(self.invisibleRootItem(), project)
+        self.stats_changed.emit(project)
 
     def _update_item_stats(self, item, project: TranslationProject) -> tuple:
         """Recursively update stat labels. Returns (translated, total) sum for children."""
