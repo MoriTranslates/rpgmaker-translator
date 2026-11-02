@@ -30,6 +30,17 @@ _DEFAULT_KEY = b"crowd script yeah !"
 _DEFAULT_MOD = 18  # decryption uses mod 18 (excludes the trailing '!')
 
 
+_UNDECODABLE_RE = re.compile('[\ufffd\udc80-\udcff]+')
+
+
+def _same_text(a: str, b: str) -> bool:
+    """Equal, treating undecodable bytes alike (load decodes with
+    "replace", export with surrogateescape)."""
+    if a == b:
+        return True
+    return _UNDECODABLE_RE.sub('\ufffd', a) == _UNDECODABLE_RE.sub('\ufffd', b)
+
+
 def decrypt_sce(data: bytes, key: bytes = _DEFAULT_KEY,
                 mod: int = _DEFAULT_MOD) -> bytearray:
     """Decrypt a Crowd .sce file."""
@@ -143,7 +154,16 @@ class CrowdParser:
         self._key: bytes = _DEFAULT_KEY
         self._mod: int = _DEFAULT_MOD
 
-    def load_project(self, project_dir: str, context_size: int | None = None) -> list[TranslationEntry]:
+    def load_originals(self, project_dir: str) -> list[TranslationEntry]:
+        """Parse the game's ORIGINAL text, for merging a game update.
+
+        Each .sce is read from sce_original/ when an export backed it up
+        (the live file holds English then), else the live file.
+        """
+        return self.load_project(project_dir, from_backup=True)
+
+    def load_project(self, project_dir: str, context_size: int | None = None,
+                     from_backup: bool = False) -> list[TranslationEntry]:
         """Parse all .sce files in the project directory."""
         if context_size is not None:
             self.context_size = context_size
@@ -160,7 +180,12 @@ class CrowdParser:
         all_entries = []
         for sce_path in sce_files:
             log.info("Loading Crowd script: %s", sce_path)
-            with open(sce_path, "rb") as f:
+            src_path = sce_path
+            bak = os.path.join(project_dir, "sce_original",
+                               os.path.basename(sce_path))
+            if from_backup and os.path.isfile(bak):
+                src_path = bak
+            with open(src_path, "rb") as f:
                 enc_data = f.read()
 
             dec_data = decrypt_sce(enc_data, self._key, self._mod)
@@ -189,8 +214,10 @@ class CrowdParser:
               os.path.join(backup_dir, os.path.basename(p)))
              for p in sce_files], manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
         problems: list[str] = []
+        # file -> translations not written because the game text changed
+        changed_lines: dict[str, int] = {}
 
         # Detect the key here too: export may run after restoring a saved
         # state without load_project. Prefer the pristine backup copy.
@@ -225,10 +252,22 @@ class CrowdParser:
             # byte-for-byte instead of becoming '?' on re-encode.
             text = dec_data.decode("cp932", errors="surrogateescape")
 
+            # Entries are addressed by (field, line number): re-parse the
+            # source like load did and only write entries whose original is
+            # still there; a changed line keeps the game's text (reported).
+            fresh = {e.id: e.original
+                     for e in self._parse_script(text, sce_name)}
+
             # Build translation map: (field, line_number) -> entry
             trans_map = {}
             for entry in file_entries:
                 if entry.translation and entry.status in ("translated", "reviewed"):
+                    now = fresh.get(entry.id)
+                    if now is None or not _same_text(now, entry.original):
+                        if entry.translation != entry.original:
+                            changed_lines[sce_name] = (
+                                changed_lines.get(sce_name, 0) + 1)
+                        continue
                     # Entry ID format: "filename/type/line_num"
                     parts = entry.id.split("/")
                     if len(parts) >= 3:
@@ -258,7 +297,7 @@ class CrowdParser:
             except (OSError, ValueError) as exc:
                 problems.append(f"{sce_name} ({exc})")
         manifest.finish()
-        game_io.raise_if_problems(problems)
+        game_io.raise_export_problems(problems, changed_lines)
 
     def restore_originals(self, project_dir: str):
         """Restore original .sce from backup."""

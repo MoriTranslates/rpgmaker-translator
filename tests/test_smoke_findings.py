@@ -1314,3 +1314,53 @@ def test_csv_resume_merge_reads_backup(tmp_path):
     proj = TranslationProject(project_path=str(tmp_path), entries=entries)
     stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
     assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
+
+
+def _crowd_sce(lines):
+    from translator import crowd
+    body = "$ main $" + "".join(
+        f"  {i} w00000{i + 1}a@!アリス@n{t}" for i, t in enumerate(lines))
+    body += f"  {len(lines)} CF 1-2 "
+    return bytes(crowd.encrypt_sce(body.encode("cp932")))
+
+
+def _crowd_texts(path):
+    """Decrypted script text of a .sce file."""
+    from translator import crowd
+    return bytes(crowd.decrypt_sce(path.read_bytes())).decode("cp932", "replace")
+
+
+def test_crowd_export_skips_line_whose_original_changed(tmp_path):
+    from translator import crowd, game_io
+    sce = tmp_path / "game.sce"
+    sce.write_bytes(_crowd_sce(["古い台詞", "同じ台詞"]))
+    p = crowd.CrowdParser()
+    entries = p.load_project(str(tmp_path))
+    assert len(entries) == 2
+    for e in entries:
+        e.translation, e.status = "EN line", "reviewed"
+    p.save_project(str(tmp_path), entries)
+    update = _crowd_sce(["新しい台詞", "同じ台詞"])
+    sce.write_bytes(update)
+    (tmp_path / "sce_original" / "game.sce").write_bytes(update)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(tmp_path), entries)
+    assert "game.sce: 1 translated line(s) not written" in str(ei.value)
+    text = _crowd_texts(sce)
+    assert "新しい台詞" in text and "EN line" in text
+
+
+def test_crowd_resume_merge_reads_backup(tmp_path):
+    from translator import crowd
+    from translator.project_model import TranslationProject
+    (tmp_path / "game.sce").write_bytes(_crowd_sce(["一つ目", "二つ目", "三つ目"]))
+    p = crowd.CrowdParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN", "reviewed"
+    p.save_project(str(tmp_path), entries)
+    (tmp_path / "sce_original" / "game.sce").write_bytes(
+        _crowd_sce(["新しい一つ目", "二つ目", "三つ目"]))
+    proj = TranslationProject(project_path=str(tmp_path), entries=entries)
+    stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
+    assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
