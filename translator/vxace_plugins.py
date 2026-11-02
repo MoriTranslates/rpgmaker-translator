@@ -18,7 +18,6 @@ import zlib
 log = logging.getLogger(__name__)
 
 try:
-    import rubymarshal.reader
     from translator import ruby_marshal
     from rubymarshal.classes import RubyString
     HAS_RUBYMARSHAL = True
@@ -671,7 +670,7 @@ def inject_plugins(scripts_path: str,
     try:
         with open(scripts_path, "rb") as f:
             original_bytes = f.read()
-        scripts = rubymarshal.reader.loads(original_bytes)
+        scripts = ruby_marshal.loads(original_bytes)
     except Exception as e:
         log.error("Failed to read Scripts.rvdata2: %s", e)
         return []
@@ -728,7 +727,7 @@ def remove_plugins(scripts_path: str) -> bool:
         return False
     try:
         with open(scripts_path, "rb") as f:
-            scripts = rubymarshal.reader.load(f)
+            scripts = ruby_marshal.loads(f.read())
         kept = [s for s in scripts if _TAG not in str(s[1])]
         if len(kept) == len(scripts):
             return False
@@ -749,7 +748,7 @@ def list_injected(scripts_path: str) -> list[str]:
         return []
     try:
         with open(scripts_path, "rb") as f:
-            scripts = rubymarshal.reader.load(f)
+            scripts = ruby_marshal.loads(f.read())
         return [str(s[1]) for s in scripts if _TAG in str(s[1])]
     except Exception:
         return []

@@ -14,7 +14,6 @@ import zlib
 log = logging.getLogger(__name__)
 
 try:
-    import rubymarshal.reader
     from translator import ruby_marshal
     from rubymarshal.classes import RubyString
     HAS_RUBYMARSHAL = True
@@ -209,7 +208,7 @@ def detect_resolution(scripts_path: str) -> tuple[int, int]:
 
     try:
         with open(scripts_path, "rb") as f:
-            scripts = rubymarshal.reader.load(f)
+            scripts = ruby_marshal.loads(f.read())
     except Exception:
         return 544, 416
 
@@ -232,7 +231,7 @@ def is_already_injected(scripts_path: str) -> bool:
         return False
     try:
         with open(scripts_path, "rb") as f:
-            scripts = rubymarshal.reader.load(f)
+            scripts = ruby_marshal.loads(f.read())
         for s in scripts:
             if SCRIPT_NAME in str(s[1]):
                 return True
@@ -263,7 +262,7 @@ def inject_scaler(scripts_path: str, default_scale: float = 2.0) -> bool:
     try:
         with open(scripts_path, "rb") as f:
             original_bytes = f.read()
-        scripts = rubymarshal.reader.loads(original_bytes)
+        scripts = ruby_marshal.loads(original_bytes)
     except Exception as e:
         log.error("Failed to read Scripts.rvdata2: %s", e)
         return False
@@ -325,7 +324,7 @@ def remove_scaler(scripts_path: str) -> bool:
         return False
     try:
         with open(scripts_path, "rb") as f:
-            scripts = rubymarshal.reader.load(f)
+            scripts = ruby_marshal.loads(f.read())
         scripts = [s for s in scripts if SCRIPT_NAME not in str(s[1])]
         # Serialise first, then replace atomically: a failed write
         # never leaves a truncated Scripts.rvdata2 (game won't boot).
