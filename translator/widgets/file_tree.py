@@ -144,12 +144,33 @@ class FileTreeWidget(QTreeWidget):
 
         if project.entries:
             self._update_item_stats(self.invisibleRootItem(), project)
+        self._update_icons(self.invisibleRootItem())
         self.setUpdatesEnabled(True)
 
     def apply_theme(self):
-        """Re-color progress badges after a dark/light switch."""
+        """Re-color progress badges and icons after a dark/light switch."""
         if self._project is not None and self._project.entries:
             self._update_item_stats(self.invisibleRootItem(), self._project)
+        self._update_icons(self.invisibleRootItem())
+
+    def _update_icons(self, parent: QTreeWidgetItem):
+        for i in range(parent.childCount()):
+            item = parent.child(i)
+            name = item.text(0)
+            if item.data(0, Qt.ItemDataRole.UserRole) == "__ALL__":
+                ic = theme.icon("layers", "accent")
+            elif item.childCount():
+                ic = theme.icon("folder", "text_muted")
+            elif name.startswith("Map"):
+                ic = theme.icon("map", "text_muted")
+            elif name.endswith(".json"):
+                ic = theme.icon("file-json", "text_muted")
+            elif name.endswith(".js"):
+                ic = theme.icon("file-code", "text_muted")
+            else:
+                ic = theme.icon("file-text", "text_muted")
+            item.setIcon(0, ic)
+            self._update_icons(item)
 
     @staticmethod
     def _set_progress(item: QTreeWidgetItem, translated: int, total: int):

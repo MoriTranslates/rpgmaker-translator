@@ -251,6 +251,9 @@ class MainWindow(QMainWindow):
         # Tab 4: Translation Queue
         self.queue_panel = QueuePanel()
         self.tabs.addTab(self.queue_panel, "Translation Queue")
+        for i, name in enumerate(("languages", "image", "messages-square",
+                                  "list-ordered")):
+            theme.bind_icon(lambda ic, i=i: self.tabs.setTabIcon(i, ic), name)
 
         # Pipeline progress bar (below toolbar, above tabs)
         self.pipeline_bar = PipelineBar()
@@ -281,8 +284,41 @@ class MainWindow(QMainWindow):
             self._refresh_recent_ui()
         self._stack.setCurrentWidget(self.tabs if show else self._welcome)
 
+    # Menu/toolbar action → Lucide icon (settings_action sits on the menubar
+    # itself, where an icon would replace its text, so it has none)
+    _ACTION_ICONS = {
+        "open_action": "folder-open", "save_action": "save",
+        "save_as_action": "save-all", "load_action": "upload",
+        "close_action": "x", "rename_action": "pencil",
+        "import_action": "import", "import_folder_action": "folder",
+        "scan_plugin_edits_action": "puzzle",
+        "batch_db_action": "database",
+        "batch_dialogue_action": "message-square-text",
+        "cleanup_action": "sparkles", "wordwrap_action": "wrap-text",
+        "find_replace_action": "search", "undo_bulk_action": "undo-2",
+        "batch_action": "layers", "batch_actor_action": "users",
+        "strip_actor_codes_action": "eraser", "polish_action": "spell-check",
+        "consistency_action": "list-checks", "reset_all_action": "rotate-ccw",
+        "translate_images_action": "image",
+        "edit_glossary_action": "book-open", "load_vocab_action": "file-down",
+        "export_vocab_action": "file-up", "scan_glossary_action": "scan-search",
+        "scan_project_glossary_action": "scan-search",
+        "apply_glossary_action": "wand-sparkles",
+        "export_action": "gamepad-2", "restore_action": "history",
+        "open_rpgmaker_action": "external-link",
+        "txt_export_action": "file-text", "create_patch_action": "share-2",
+        "export_zip_action": "package",
+        "export_folder_zip_action": "folder-archive",
+    }
+
     def _polish_actions(self):
-        """Make menu help discoverable: tooltips on hover + status-bar tips."""
+        """Icons on menu actions; tooltips on hover + status-bar tips."""
+        for attr, name in self._ACTION_ICONS.items():
+            action = getattr(self, attr, None)
+            if action is not None:
+                theme.bind_icon(action.setIcon, name)
+        theme.bind_icon(self.stop_action.setIcon, "circle-stop", "error")
+        theme.bind_icon(self.recent_menu.menuAction().setIcon, "clock")
         for menu in self.menuBar().findChildren(QMenu):
             menu.setToolTipsVisible(True)
         for action in self.findChildren(QAction):
@@ -706,7 +742,8 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self):
         """Build a slim toolbar with quick-access controls."""
         toolbar = QToolBar("Quick Actions")
-        toolbar.setIconSize(QSize(20, 20))
+        toolbar.setIconSize(QSize(16, 16))
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 

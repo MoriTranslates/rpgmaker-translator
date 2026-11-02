@@ -8,7 +8,9 @@ widgets that paint per-item colors re-read ``qcolor()`` when they refresh.
 
 import os
 
-from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtCore import QByteArray, Qt
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
+from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import QApplication
 
 try:
@@ -475,6 +477,64 @@ def icon_path(name: str) -> str:
     return path.replace("\\", "/") if os.path.isfile(path) else ""
 
 
+# ── Icons (Lucide, tinted to the theme) ───────────────────────────
+
+_icon_cache: dict = {}
+_bound_icons: list = []   # (setter, name, token) re-tinted on theme switch
+
+
+def _tinted_pixmap(name: str, hexcolor: str, px: int) -> QPixmap:
+    path = resource_path("assets", "icons", "lucide", name + ".svg")
+    try:
+        with open(path, encoding="utf-8") as f:
+            svg = f.read().replace("currentColor", hexcolor)
+    except OSError:
+        return QPixmap()
+    pm = QPixmap(px, px)
+    pm.fill(Qt.GlobalColor.transparent)
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    painter = QPainter(pm)
+    renderer.render(painter)
+    painter.end()
+    return pm
+
+
+def icon(name: str, token: str = "text_soft") -> QIcon:
+    """A Lucide icon tinted with a theme token (dimmed when disabled)."""
+    key = (name, token, is_dark())
+    cached = _icon_cache.get(key)
+    if cached is None:
+        cached = QIcon()
+        for px in (32, 64):
+            cached.addPixmap(_tinted_pixmap(name, c(token), px),
+                             QIcon.Mode.Normal)
+            cached.addPixmap(_tinted_pixmap(name, c("text_dim"), px),
+                             QIcon.Mode.Disabled)
+        _icon_cache[key] = cached
+    return cached
+
+
+def bind_icon(setter, name: str, token: str = "text_soft"):
+    """Apply an icon now and again after every theme switch.
+
+    ``setter`` takes a QIcon, e.g. ``action.setIcon`` or
+    ``lambda ic: tabs.setTabIcon(0, ic)``.
+    """
+    setter(icon(name, token))
+    _bound_icons.append((setter, name, token))
+
+
+def _retint_icons():
+    alive = []
+    for setter, name, token in _bound_icons:
+        try:
+            setter(icon(name, token))
+        except RuntimeError:    # the widget was deleted
+            continue
+        alive.append((setter, name, token))
+    _bound_icons[:] = alive
+
+
 def stylesheet() -> str:
     css = _STYLESHEET.format(**colors())
     check = icon_path("check-dark.svg" if is_dark() else "check-light.svg")
@@ -491,6 +551,7 @@ def apply(dark: bool, app: QApplication | None = None):
         return
     app.setPalette(qpalette())
     app.setStyleSheet(stylesheet())
+    _retint_icons()
 
 
 def make_primary(button):
