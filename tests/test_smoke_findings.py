@@ -1171,3 +1171,77 @@ def test_tyrano_resume_merge_reads_backup(tmp_path):
     stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
     assert stats["status"] == "merged" and stats["changed"] == 1 and stats["new"] == 0
     assert sum(e.status == "reviewed" for e in proj.entries) == len(proj.entries) - 1
+
+
+def _srpg_dts(texts):
+    """Unencrypted data.dts whose project blob holds *texts* (UTF-16 strings)."""
+    import struct
+    from translator import srpgstudio as sr
+    blob = b"".join(b"\x01\x02\x03\x04" + struct.pack("<I", len((t + "\x00").encode("utf-16-le")))
+                    + (t + "\x00").encode("utf-16-le") for t in texts) + b"END!"
+    head = (sr._SDTS_MAGIC + struct.pack("<IIII", 0, 1000, 0, 0)
+            + struct.pack("<I", 0) + b"\x00" * (4 * sr._SECTION_COUNT))
+    head += b"\x00" * (sr._HEADER_SIZE - len(head))
+    return head + blob
+
+
+def _srpg_texts(path):
+    """Strings in a data.dts built by _srpg_dts (reads its exact layout)."""
+    import struct
+    from translator import srpgstudio as sr
+    blob = path.read_bytes()[sr._HEADER_SIZE:]
+    out, pos = [], 0
+    while blob[pos:pos + 4] == b"\x01\x02\x03\x04":
+        n = struct.unpack_from("<I", blob, pos + 4)[0]
+        out.append(blob[pos + 8:pos + 8 + n].decode("utf-16-le").rstrip("\x00"))
+        pos += 8 + n
+    return out
+
+
+def test_srpg_duplicate_lines_keep_their_own_translation(tmp_path):
+    """Two identical strings with different translations each keep theirs
+    (the text-keyed map gave both the last one)."""
+    from translator.srpgstudio import SRPGStudioParser
+    (tmp_path / "data.dts").write_bytes(_srpg_dts(["はい", "はい"]))
+    p = SRPGStudioParser()
+    entries = p.load_project(str(tmp_path))
+    assert [e.original for e in entries] == ["はい", "はい"]
+    entries[0].translation, entries[0].status = "Yes", "translated"
+    entries[1].translation, entries[1].status = "Sure", "reviewed"
+    p.save_project(str(tmp_path), entries)
+    got = _srpg_texts(tmp_path / "data.dts")
+    assert got == ["Yes", "Sure"]
+
+
+def test_srpg_export_reports_line_whose_original_is_gone(tmp_path):
+    from translator import game_io
+    from translator.srpgstudio import SRPGStudioParser
+    (tmp_path / "data.dts").write_bytes(_srpg_dts(["古い台詞", "同じ台詞"]))
+    p = SRPGStudioParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN " + e.original, "reviewed"
+    p.save_project(str(tmp_path), entries)
+    update = _srpg_dts(["新しい台詞", "同じ台詞"])
+    (tmp_path / "data.dts").write_bytes(update)
+    (tmp_path / "data_original.dts").write_bytes(update)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(tmp_path), entries)
+    assert "data.dts: 1 translated line(s) not written" in str(ei.value)
+    got = _srpg_texts(tmp_path / "data.dts")
+    assert got == ["新しい台詞", "EN 同じ台詞"]
+
+
+def test_srpg_resume_merge_reads_backup(tmp_path):
+    from translator.srpgstudio import SRPGStudioParser
+    from translator.project_model import TranslationProject
+    (tmp_path / "data.dts").write_bytes(_srpg_dts(["一つ目", "二つ目", "三つ目"]))
+    p = SRPGStudioParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN", "reviewed"
+    p.save_project(str(tmp_path), entries)
+    (tmp_path / "data_original.dts").write_bytes(_srpg_dts(["新しい一つ目", "二つ目", "三つ目"]))
+    proj = TranslationProject(project_path=str(tmp_path), entries=entries)
+    stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
+    assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}

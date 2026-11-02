@@ -235,7 +235,16 @@ class SRPGStudioParser:
 
     # ── Public interface (matches RPGMakerMVParser) ───────────
 
-    def load_project(self, project_dir: str) -> list[TranslationEntry]:
+    def load_originals(self, project_dir: str) -> list[TranslationEntry]:
+        """Parse the game's ORIGINAL text, for merging a game update.
+
+        Reads data_original.dts when an export made it (data.dts holds
+        English then; the export refreshes the backup after an update).
+        """
+        return self.load_project(project_dir, from_backup=True)
+
+    def load_project(self, project_dir: str,
+                     from_backup: bool = False) -> list[TranslationEntry]:
         """Load all translatable entries from an SRPG Studio project.
 
         Args:
@@ -251,6 +260,9 @@ class SRPGStudioParser:
                 "Please select an SRPG Studio game folder."
             )
 
+        backup_path = os.path.join(project_dir, "data_original.dts")
+        if from_backup and os.path.isfile(backup_path):
+            dts_path = backup_path
         blob, header = self._extract_project_blob(dts_path)
         strings = self._scan_strings(blob)
 
@@ -323,7 +335,7 @@ class SRPGStudioParser:
         refreshed = game_io.refresh_changed_originals(
             [("data.dts", dts_path, backup_path)], manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
         # Backup on first export (atomic copy)
         if game_io.backup_file_once(dts_path, backup_path):
             manifest.save()
@@ -336,15 +348,24 @@ class SRPGStudioParser:
         # Scan original blob for string positions
         original_strings = self._scan_strings(blob)
 
-        # Build translation lookup: original text → translated text
-        # Use a list of (original, translation) to handle duplicates correctly
-        translations = {}
+        # Entries are addressed by string index ("SRPG/00042/dialogue").
+        # Each is written at its own index while that string still holds
+        # its original; otherwise (game update shifted or changed it) at
+        # the first unclaimed string with the same text; otherwise it is
+        # not written and reported -- never placed on different text.
+        by_index: dict[int, tuple[str, str]] = {}
+        unindexed: list[tuple[str, str]] = []
         for e in entries:
             if e.translation and e.status in ("translated", "reviewed"):
-                translations[e.original] = e.translation
+                idx = self._entry_index(e.id)
+                if idx is None:
+                    unindexed.append((e.original, e.translation))
+                else:
+                    by_index[idx] = (e.original, e.translation)
 
         # Sequential streaming rewrite
-        patched = self._patch_blob(blob, original_strings, translations)
+        patched, not_written = self._patch_blob_positional(
+            blob, original_strings, by_index, unindexed)
 
         # Re-encrypt if the original was encrypted
         if header["is_encrypted"]:
@@ -363,6 +384,65 @@ class SRPGStudioParser:
 
         log.info("Exported translations to %s (%d bytes patched)",
                  dts_path, len(patched))
+        game_io.raise_export_problems(
+            [], {"data.dts": not_written} if not_written else {})
+
+    @staticmethod
+    def _entry_index(entry_id: str):
+        """String index from an ID like "SRPG/00042/dialogue", else None."""
+        parts = entry_id.split("/")
+        if len(parts) >= 2 and parts[0] == "SRPG" and parts[1].isdigit():
+            return int(parts[1])
+        return None
+
+    @staticmethod
+    def _patch_blob_positional(blob: bytes,
+                               strings: list[tuple[int, int, str]],
+                               by_index: dict[int, tuple[str, str]],
+                               unindexed: list[tuple[str, str]] = ()
+                               ) -> tuple[bytes, int]:
+        """Rewrite the blob, placing each translation at its own string.
+
+        Returns ``(patched_blob, not_written)`` where *not_written* counts
+        translations whose original text is no longer in the blob (a
+        translation equal to its original changes nothing: not counted).
+        """
+        chosen: dict[int, str] = {}           # string index -> translation
+        leftovers: list[tuple[str, str]] = list(unindexed)
+        for idx, (orig, trans) in by_index.items():
+            if 0 <= idx < len(strings) and strings[idx][2] == orig:
+                chosen[idx] = trans
+            else:
+                leftovers.append((orig, trans))
+        # Text fallback, first unclaimed string with the same original
+        free: dict[str, list[int]] = {}
+        for k, (_o, _l, text) in enumerate(strings):
+            if k not in chosen:
+                free.setdefault(text, []).append(k)
+        not_written = 0
+        for orig, trans in leftovers:
+            slots = free.get(orig)
+            if slots:
+                chosen[slots.pop(0)] = trans
+            elif trans != orig:
+                not_written += 1
+
+        parts = []
+        pos = 0
+        for k, (offset, byte_len, _text) in enumerate(strings):
+            if offset > pos:
+                parts.append(blob[pos:offset])
+            translation = chosen.get(k)
+            if translation:
+                new_encoded = (translation + "\x00").encode("utf-16-le")
+                parts.append(struct.pack("<I", len(new_encoded)))
+                parts.append(new_encoded)
+            else:
+                parts.append(blob[offset:offset + 4 + byte_len])
+            pos = offset + 4 + byte_len
+        if pos < len(blob):
+            parts.append(blob[pos:])
+        return b"".join(parts), not_written
 
     @staticmethod
     def _patch_blob(blob: bytes,
