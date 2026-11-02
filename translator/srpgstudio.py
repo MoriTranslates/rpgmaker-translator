@@ -26,14 +26,13 @@ Translation approach:
 import logging
 import os
 import re
-import shutil
 import struct
 from typing import Optional
 
 from Crypto.Cipher import ARC4
 from Crypto.Hash import MD5
 
-from . import JAPANESE_RE
+from . import JAPANESE_RE, game_io
 from .project_model import TranslationEntry
 
 log = logging.getLogger(__name__)
@@ -313,9 +312,15 @@ class SRPGStudioParser:
         dts_path = os.path.join(project_dir, "data.dts")
         backup_path = os.path.join(project_dir, "data_original.dts")
 
-        # Backup on first export
-        if not os.path.isfile(backup_path):
-            shutil.copy2(dts_path, backup_path)
+        manifest = game_io.ExportManifest(backup_path + ".manifest.json")
+        self.last_export_notes: list[str] = []
+        refreshed = game_io.refresh_changed_originals(
+            [("data.dts", dts_path, backup_path)], manifest)
+        if refreshed:
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+        # Backup on first export (atomic copy)
+        if game_io.backup_file_once(dts_path, backup_path):
+            manifest.save()
             log.info("Created backup: %s", backup_path)
 
         # Always read from backup for idempotent re-export
@@ -344,10 +349,11 @@ class SRPGStudioParser:
         with open(source_path, "rb") as f:
             pre_project = f.read(header["project_offset"])
 
-        # Write the new data.dts
-        with open(dts_path, "wb") as f:
-            f.write(pre_project)
-            f.write(patched)
+        # Write the new data.dts (temp file + replace: a crash or full
+        # disk never leaves a truncated file holding all game data)
+        game_io.atomic_write_bytes(dts_path, pre_project + patched)
+        manifest.record("data.dts", dts_path)
+        manifest.save()
 
         log.info("Exported translations to %s (%d bytes patched)",
                  dts_path, len(patched))
@@ -400,5 +406,5 @@ class SRPGStudioParser:
         if not os.path.isfile(backup_path):
             raise FileNotFoundError("No backup found (data_original.dts)")
 
-        shutil.copy2(backup_path, dts_path)
+        game_io.atomic_copy(backup_path, dts_path)
         log.info("Restored original data.dts from backup")

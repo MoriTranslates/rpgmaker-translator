@@ -16,7 +16,7 @@ import os
 import re
 from pathlib import Path
 
-from . import JAPANESE_RE
+from . import JAPANESE_RE, game_io
 from .project_model import TranslationEntry
 
 # Inline tags that appear WITHIN dialogue text — must be preserved
@@ -130,14 +130,22 @@ class TyranoScriptParser:
         """
         scenario_dir = self._find_scenario_dir(project_dir)
         if not scenario_dir:
-            return
+            raise FileNotFoundError(
+                f"No data/scenario folder found in {project_dir} -- nothing "
+                "was exported.")
 
-        # Create backup on first export
+        # Create backup on first export (atomic: temp dir + rename)
         original_dir = os.path.join(
             os.path.dirname(scenario_dir), "scenario_original")
-        if not os.path.isdir(original_dir):
-            import shutil
-            shutil.copytree(scenario_dir, original_dir)
+        manifest = game_io.ExportManifest(original_dir + ".manifest.json")
+        if game_io.backup_tree_once(scenario_dir, original_dir):
+            manifest.save()
+        self.last_export_notes: list[str] = []
+        refreshed = game_io.refresh_changed_originals(
+            game_io.tree_pairs(scenario_dir, original_dir, (".ks",)), manifest)
+        if refreshed:
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+        problems: list[str] = []
 
         # Build eval_var replacement map: 'original_jp' -> 'translated_en'
         # These are used to replace string values in [eval] and [if/elsif]
@@ -244,14 +252,20 @@ class TyranoScriptParser:
 
                     new_lines.append(line)
 
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            with open(dst, "w", encoding="utf-8") as f:
-                f.writelines(new_lines)
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                game_io.atomic_write_text(dst, "".join(new_lines))
+                manifest.record(file_key, dst)
+            except OSError as exc:
+                problems.append(f"{file_key} ({exc})")
+
+        manifest.save()
 
         # Export system files
         self._export_lang_js(project_dir, entries)
         self._export_config_title(project_dir, entries)
         self._patch_game_fonts(project_dir)
+        game_io.raise_if_problems(problems)
 
     @staticmethod
     def _patch_game_fonts(project_dir: str):
@@ -330,17 +344,9 @@ class TyranoScriptParser:
                 "No scenario_original/ backup exists. "
                 "Export to game first to create one.")
 
-        # Swap: move current aside, copy backup in, roll back on failure
-        temp_dir = scenario_dir + "_restoring"
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        os.rename(scenario_dir, temp_dir)
-        try:
-            shutil.copytree(original_dir, scenario_dir)
-        except Exception:
-            os.rename(temp_dir, scenario_dir)
-            raise
-        shutil.rmtree(temp_dir)
+        # Copy the backup aside first, then swap; a failure leaves the
+        # live folder untouched.
+        game_io.restore_tree(original_dir, scenario_dir)
 
         bak_files = []
         for base in (project_dir, os.path.join(project_dir, "extracted")):
@@ -687,7 +693,7 @@ class TyranoScriptParser:
                     rf'("{re.escape(key)}"\s*:\s*)"([^"]*)"',
                     lambda m, lit=literal: m.group(1) + lit,
                     text)
-            Path(lang_path).write_text(text, encoding="utf-8")
+            game_io.atomic_write_text(lang_path, text)
             break
 
     def _export_config_title(self, project_dir: str, entries: list[TranslationEntry]):
@@ -728,7 +734,7 @@ class TyranoScriptParser:
             proj_title = re.sub(r'\s*ver?\s*[\d.]+\s*$', '',
                                 title, flags=re.IGNORECASE)
             text = old_id_re.sub(lambda _m: f";projectID={proj_title}", text)
-        Path(config_path).write_text(text, encoding="utf-8")
+        game_io.atomic_write_text(config_path, text)
 
     def _extract_lang_js(self, game_root: str) -> list[TranslationEntry]:
         """Extract translatable strings from tyrano/lang.js."""

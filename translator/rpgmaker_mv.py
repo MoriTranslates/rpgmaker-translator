@@ -17,6 +17,7 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
+from . import game_io
 from .project_model import TranslationEntry
 
 # RPG Maker event command codes that contain translatable text
@@ -530,11 +531,13 @@ class RPGMakerMVParser:
             )
 
         # Back up originals on first export
-        self._backup_data_dir(data_dir)
+        backup_dir = data_dir + "_original"
+        manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
+        if self._backup_data_dir(data_dir):
+            manifest.save()
 
         # Always read from the backup (original Japanese) so that
         # re-exports after inline edits still find the original text to match.
-        backup_dir = data_dir + "_original"
         source_dir = backup_dir if os.path.isdir(backup_dir) else data_dir
 
         # Build global speaker name lookup (one translation applies to all files)
@@ -559,6 +562,18 @@ class RPGMakerMVParser:
             for fn in os.listdir(d):
                 if _is_parsed_data_file(fn):
                     candidates.add(fn)
+
+        # A game update after the first export must not be rolled back by
+        # re-exporting from the old backup: any live file that is neither
+        # the original nor what we last wrote re-baselines the backup.
+        self.last_export_notes = []
+        if source_dir == backup_dir:
+            refreshed = game_io.refresh_changed_originals(
+                [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
+                 for fn in sorted(candidates)], manifest)
+            if refreshed:
+                self.last_export_notes.append(
+                    game_io.refreshed_note(refreshed))
 
         errors = []
         for filename in sorted(candidates):
@@ -591,9 +606,12 @@ class RPGMakerMVParser:
                 out_path = os.path.join(data_dir, filename)
                 self._atomic_write_text(
                     out_path, json.dumps(data, ensure_ascii=False, indent=2))
+                manifest.record(filename, out_path)
             except (OSError, ValueError) as exc:
                 log.warning("Export failed for %s: %s", filename, exc)
                 errors.append(f"{filename}: {exc}")
+
+        manifest.save()
 
         # Export plugin translations (plugins.js is outside data/)
         try:
@@ -609,13 +627,10 @@ class RPGMakerMVParser:
             log.warning("Export failed for gamefont.css: %s", exc)
             errors.append(f"gamefont.css: {exc}")
 
-        if errors:
-            shown = "\n".join(errors[:20])
-            more = f"\n... and {len(errors) - 20} more" if len(errors) > 20 else ""
-            raise OSError(
-                f"Export finished with errors — {len(errors)} file(s) "
-                f"could not be written (is the game running?):\n"
-                f"{shown}{more}")
+        game_io.raise_if_problems(
+            errors,
+            f"Export finished with errors — {len(errors)} file(s) could not "
+            f"be written (is the game running?):")
 
     @staticmethod
     def _atomic_write_text(path: str, text: str):
@@ -1122,25 +1137,42 @@ class RPGMakerMVParser:
         return "\r\n".join(lines) + "\r\n"
 
     @staticmethod
-    def _backup_data_dir(data_dir: str):
-        """Copy the data/ folder to data_original/ if no backup exists yet."""
+    def _backup_data_dir(data_dir: str) -> bool:
+        """Copy the data/ folder to data_original/ if no backup exists yet.
+
+        Copies to a temp dir and renames when complete, so an interrupted
+        copy is never mistaken for a full backup on the next export.
+        Returns True when a new backup was made.
+        """
+        return game_io.backup_tree_once(data_dir, data_dir + "_original")
+
+    def restore_originals(self, project_dir: str) -> bool:
+        """Restore data/ (and plugins.js / gamefont.css) from backup.
+
+        Copy-then-swap: a failed restore leaves the live data/ untouched.
+        Returns True if plugins.js was restored too.
+        """
+        data_dir = self._find_data_dir(project_dir)
+        if not data_dir:
+            raise FileNotFoundError(
+                f"Could not find the game's data/ folder in {project_dir}.")
         backup_dir = data_dir + "_original"
-        if os.path.isdir(backup_dir):
-            return  # Already backed up
-        # Copy to a temp dir and rename when complete, so an interrupted
-        # copy is never mistaken for a full backup on the next export.
-        tmp_dir = backup_dir + ".tmp"
-        try:
-            if os.path.isdir(tmp_dir):
-                shutil.rmtree(tmp_dir)
-            shutil.copytree(data_dir, tmp_dir)
-            os.rename(tmp_dir, backup_dir)
-        except OSError as exc:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            raise OSError(
-                f"Could not back up {data_dir} — is the game running?\n\n"
-                f"Close the game and try again.\n({exc})"
-            ) from exc
+        if not os.path.isdir(backup_dir):
+            raise FileNotFoundError(
+                "No data_original/ backup exists. Export to game first to "
+                "create one.")
+        game_io.restore_tree(backup_dir, data_dir)
+        plugins_restored = False
+        plugins_path = self._find_plugins_file(project_dir)
+        if plugins_path:
+            backup_path = os.path.join(
+                os.path.dirname(plugins_path),
+                os.path.basename(plugins_path).replace(
+                    "plugins.", "plugins_original."))
+            if os.path.isfile(backup_path):
+                game_io.atomic_copy(backup_path, plugins_path)
+                plugins_restored = True
+        return plugins_restored
 
     @staticmethod
     def _swap_gamefont(project_dir: str, font_name: str = "Consolas"):

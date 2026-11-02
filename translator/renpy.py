@@ -3,8 +3,8 @@
 import logging
 import os
 import re
-import shutil
 
+from translator import game_io
 from translator.project_model import TranslationEntry
 
 log = logging.getLogger(__name__)
@@ -74,6 +74,13 @@ RENPY_TAG_RE = re.compile(
     r'\{/?(?:i|b|u|s|plain|color|size|font|alpha|cps|nw|fast|w|p|vspace|image|space|art)'
     r'(?:=[^}]*)?\}')
 
+# Ren'Py [variable] interpolation, e.g. [player] or [mc.name!c].  A
+# doubled "[[" is an escaped literal bracket, not an interpolation.
+RENPY_INTERP_RE = re.compile(r'(?<!\[)\[(?!\[)[^\[\]\n]+\]')
+
+# Everything _escape_rpy must leave alone in a translation
+_RENPY_TOKEN_RE = re.compile(r'\[\[|\{\{|\[[^\[\]\n]*\]|\{[^{}\n]*\}|\[|\{')
+
 # Game title in options.rpy
 _TITLE_RE = re.compile(
     r'define\s+config\.name\s*=\s*_?\(\s*"([^"]*)"\s*\)')
@@ -118,15 +125,30 @@ def _classify_line(line: str):
     return None, None
 
 
-def _escape_rpy(text: str) -> str:
-    """Escape bare double quotes for a Ren'Py string literal.
+def _escape_rpy(text: str, original: str = "") -> str:
+    """Escape a translation for a Ren'Py string literal.
 
-    Originals are captured raw (an already-escaped \\" stays as is), so
-    only unescaped quotes are touched; backslashes are never doubled.
-    Real newlines become the \\n escape so the literal stays on one line.
+    * Bare double quotes are escaped (an already-escaped \\" stays as is;
+      backslashes are never doubled).
+    * Real newlines become the \\n escape so the literal stays on one line.
+    * ``[`` and ``{`` start an interpolation / text tag in Ren'Py; an
+      unknown one ("[sighs]", "{laughs}") raises an error in-game when the
+      line is shown.  They are doubled (``[[`` / ``{{``) unless the token is
+      a known text tag, already escaped, or was present in *original*
+      (e.g. ``[player]`` or ``{w=0.5}`` carried over from the source).
     """
     text = text.replace("\r\n", "\n").replace("\n", "\\n")
-    return re.sub(r'(?<!\\)"', r'\\"', text)
+    text = re.sub(r'(?<!\\)"', r'\\"', text)
+    keep = set(RENPY_TAG_RE.findall(original or ""))
+    keep.update(RENPY_INTERP_RE.findall(original or ""))
+    keep.update(m.group(0) for m in re.finditer(r'\{[^{}\n]*\}', original or ""))
+
+    def _fix(m):
+        tok = m.group(0)
+        if tok in ("[[", "{{") or tok in keep or RENPY_TAG_RE.fullmatch(tok):
+            return tok
+        return tok[0] * 2 + tok[1:]
+    return _RENPY_TOKEN_RE.sub(_fix, text)
 
 
 # ── Parser ────────────────────────────────────────────────────────────
@@ -337,15 +359,18 @@ class RenPyParser:
         game_dir = os.path.join(project_dir, "game")
         backup_dir = os.path.join(project_dir, "game_original")
 
-        # Create backup on first export
-        if not os.path.exists(backup_dir):
-            os.makedirs(backup_dir, exist_ok=True)
-            for fname in os.listdir(game_dir):
-                if fname.endswith(".rpy"):
-                    src = os.path.join(game_dir, fname)
-                    dst = os.path.join(backup_dir, fname)
-                    shutil.copy2(src, dst)
-            log.info("Backed up .rpy files to game_original/")
+        # Create backup on first export (built under a temp name and
+        # renamed when complete, so a partial copy is never trusted)
+        manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
+        rpy_names = sorted(f for f in os.listdir(game_dir) if f.endswith(".rpy"))
+        if game_io.backup_tree_once(game_dir, backup_dir, only=rpy_names):
+            manifest.save()
+        self.last_export_notes: list[str] = []
+        refreshed = game_io.refresh_changed_originals(
+            [(f, os.path.join(game_dir, f), os.path.join(backup_dir, f))
+             for f in rpy_names], manifest)
+        if refreshed:
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
 
         # Build translation map
         trans_map = {}
@@ -358,18 +383,24 @@ class RenPyParser:
 
         # Process each .rpy file
         exported = 0
-        for fname in sorted(os.listdir(game_dir)):
-            if not fname.endswith(".rpy"):
-                continue
+        problems: list[str] = []
+        for fname in rpy_names:
             # Read from backup (idempotent re-export)
             source = os.path.join(backup_dir, fname)
             if not os.path.isfile(source):
                 source = os.path.join(game_dir, fname)
             target = os.path.join(game_dir, fname)
-            count = self._export_file(source, target, fname, trans_map)
+            try:
+                count = self._export_file(source, target, fname, trans_map)
+                manifest.record(fname, target)
+            except OSError as exc:
+                problems.append(f"{fname} ({exc})")
+                continue
             exported += count
 
+        manifest.save()
         log.info("Exported %d translations to .rpy files", exported)
+        game_io.raise_if_problems(problems)
 
     def _export_file(self, source_path: str, target_path: str,
                      fname: str, trans_map: dict) -> int:
@@ -396,7 +427,8 @@ class RenPyParser:
                 entry = trans_map.get(f"{fname}/define/{m.group(1)}")
                 if entry:
                     output_lines[line_idx] = raw_line.replace(
-                        f'"{m.group(2)}"', f'"{_escape_rpy(entry.translation)}"', 1)
+                        f'"{m.group(2)}"',
+                        f'"{_escape_rpy(entry.translation, entry.original)}"', 1)
                     changed = True
                 continue
 
@@ -410,7 +442,7 @@ class RenPyParser:
             if not entry:
                 continue
 
-            escaped = _escape_rpy(entry.translation)
+            escaped = _escape_rpy(entry.translation, entry.original)
             indent = m.group(1)
             if kind == "choice":
                 condition = m.group(3) or ""
@@ -423,13 +455,12 @@ class RenPyParser:
             changed = True
 
         if changed:
-            with open(target_path, "w", encoding="utf-8") as f:
-                f.writelines(output_lines)
+            game_io.atomic_write_text(target_path, "".join(output_lines))
         elif (os.path.normcase(os.path.abspath(source_path)) !=
               os.path.normcase(os.path.abspath(target_path))):
             # No translations (or all reverted) — restore pristine backup so
             # stale English from a previous export doesn't linger.
-            shutil.copy2(source_path, target_path)
+            game_io.atomic_copy(source_path, target_path)
 
         return sum(1 for eid in trans_map
                    if eid.startswith(f"{fname}/"))
@@ -448,6 +479,6 @@ class RenPyParser:
             if fname.endswith(".rpy"):
                 src = os.path.join(backup_dir, fname)
                 dst = os.path.join(game_dir, fname)
-                shutil.copy2(src, dst)
+                game_io.atomic_copy(src, dst)
                 restored += 1
         log.info("Restored %d original .rpy files", restored)

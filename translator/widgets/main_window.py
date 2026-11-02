@@ -23,6 +23,7 @@ from PyQt6.QtGui import QAction, QPalette, QColor, QKeySequence, QShortcut
 
 from ..version import __version__
 from ..resource_paths import app_dir
+from ..game_io import PartialExportError
 from ..ai_client import AIClient, build_system_prompt
 from ..rpgmaker_mv import RPGMakerMVParser
 from ..tyranoscript import TyranoScriptParser
@@ -3137,12 +3138,19 @@ class MainWindow(QMainWindow):
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             self.statusbar.showMessage("Writing translations to game files…")
             self.statusbar.repaint()  # paint now; no input re-entrancy
+            partial = None
             try:
                 self.handler.save_project(
                     self.project.project_path, self.project.entries)
+            except PartialExportError as exc:
+                # Some files were written, some were not: carry on with the
+                # post-export steps but never report "Export Complete".
+                partial = exc
             finally:
                 QApplication.restoreOverrideCursor()
                 self.statusbar.clearMessage()
+            notes = list(getattr(self.handler.parser, "last_export_notes",
+                                 None) or [])
 
             # MV/MZ post-export: plugin injection
             plugin_msg = ""
@@ -3176,9 +3184,19 @@ class MainWindow(QMainWindow):
                 if easyrpg_msg:
                     plugin_msg += "\n" + easyrpg_msg
 
+            note_msg = ("\n\n" + "\n\n".join(notes)) if notes else ""
+            if partial is not None:
+                QMessageBox.warning(
+                    self, "Export Incomplete",
+                    "Some files were NOT exported, so parts of the game are "
+                    "still untranslated or show older text:\n\n"
+                    f"{partial}\n\nFix the problem (close the game, free "
+                    "disk space…) and export again." + plugin_msg + note_msg)
+                return
             QMessageBox.information(
                 self, "Export Complete",
                 self.handler.get_export_message(len(translated)) + plugin_msg
+                + note_msg
             )
             if not self._wizard_active:
                 self.pipeline_bar.mark_done("export")
@@ -3295,32 +3313,10 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            import shutil
-            # Atomic swap: rename current → temp, copy backup → data, delete temp
-            temp_dir = data_dir + "_restoring"
-            # Clean up leftover temp dir from a previously interrupted restore
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-            os.rename(data_dir, temp_dir)
-            try:
-                shutil.copytree(backup_dir, data_dir)
-            except Exception:
-                # Copy failed — restore the original data dir
-                os.rename(temp_dir, data_dir)
-                raise
-            shutil.rmtree(temp_dir)
-
-            # RPG Maker: also restore plugins.js if backup exists
-            plugins_restored = False
-            plugins_path = self.parser._find_plugins_file(self.project.project_path)
-            if plugins_path:
-                backup_path = os.path.join(
-                    os.path.dirname(plugins_path),
-                    os.path.basename(plugins_path).replace("plugins.", "plugins_original.")
-                )
-                if os.path.isfile(backup_path):
-                    shutil.copy2(backup_path, plugins_path)
-                    plugins_restored = True
+            # Copy the backup aside first, then swap it in: a failed copy
+            # leaves the live data/ folder exactly as it was.
+            plugins_restored = self.parser.restore_originals(
+                self.project.project_path)
 
             # Clean up injected word wrap plugin
             self.parser.remove_wordwrap_plugin(self.project.project_path)

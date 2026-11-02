@@ -10,7 +10,7 @@ import time
 import requests
 
 from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
-from .renpy import RENPY_TAG_RE
+from .renpy import RENPY_INTERP_RE, RENPY_TAG_RE
 
 log = logging.getLogger(__name__)
 
@@ -1320,8 +1320,11 @@ class AIClient:
         r'(?:' + TYRANO_CODE_RE.pattern + r')( ?)',
         re.IGNORECASE,
     )
+    # Ren'Py: text tags AND [variable] interpolations are protected -- a
+    # translated "[player]" would break the substitution in-game.
     _EXTRACT_RE_RENPY = re.compile(
-        r'(?:' + RENPY_TAG_RE.pattern + r')( ?)',
+        r'(?:' + RENPY_TAG_RE.pattern + r'|' + RENPY_INTERP_RE.pattern
+        + r')( ?)',
     )
 
     def _extract_codes(self, text: str) -> tuple:
@@ -1735,6 +1738,12 @@ class AIClient:
                 except (requests.RequestException, ConnectionError, ValueError) as exc:
                     log.debug("Japanese-retry failed, keeping original: %s", exc)
 
+            # A placeholder the model invented or mangled beyond
+            # normalisation would be written into the game as "«CODE7»".
+            # Same rule as translate_batch(): reject, never ship it.
+            if _PLACEHOLDER_RE.search(result):
+                raise ValueError(
+                    "LLM output contains an unknown «CODE» placeholder")
             return result
         except (ConnectionError, ValueError):
             raise  # keep subclass (ServerUnreachable / RateLimited) intact

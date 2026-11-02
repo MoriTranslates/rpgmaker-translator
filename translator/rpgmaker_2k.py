@@ -3,10 +3,9 @@
 import logging
 import os
 import re
-import shutil
 from dataclasses import dataclass
 
-from translator import JAPANESE_RE
+from translator import JAPANESE_RE, game_io
 from translator.project_model import TranslationEntry
 
 log = logging.getLogger(__name__)
@@ -575,39 +574,61 @@ class RPGMaker2KParser:
     def save_project(self, project_dir: str,
                      entries: list[TranslationEntry]):
         """Write translations back into LCF binary files."""
-        # Create backups
         ldb_path = os.path.join(project_dir, "RPG_RT.ldb")
         ldb_backup = _backup_path(ldb_path)
-        if not os.path.exists(ldb_backup):
-            shutil.copy2(ldb_path, ldb_backup)
+        manifest = game_io.ExportManifest(
+            os.path.join(project_dir, "RPG_RT_original.manifest.json"))
+        map_names = [fname for fname in sorted(os.listdir(project_dir))
+                     if fname.lower().endswith('.lmu')
+                     and not _is_backup_name(fname)]
+        lcf_files = ["RPG_RT.ldb"] + map_names
+        self.last_export_notes: list[str] = []
 
-        # Build translation map from entries
+        # A game update after the first export must not be rolled back.
+        refreshed = game_io.refresh_changed_originals(
+            [(f, os.path.join(project_dir, f),
+              _backup_path(os.path.join(project_dir, f))) for f in lcf_files],
+            manifest)
+        if refreshed:
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+
+        # Create backups (atomic: an interrupted copy never becomes the
+        # "original" every later export reads from)
+        if game_io.backup_file_once(ldb_path, ldb_backup):
+            manifest.save()
+
+        # Build translation map from entries.  An empty map still exports:
+        # every file is then reset from its backup, so reverting all
+        # translations really removes the English from the game.
         trans_map = {}
         for e in entries:
             if e.translation and e.status in ("translated", "reviewed"):
                 trans_map[e.id] = e.translation
 
-        if not trans_map:
-            log.warning("No translations to export")
-            return
-
+        problems: list[str] = []
         # Export database
         source_ldb = ldb_backup if os.path.isfile(ldb_backup) else ldb_path
-        self._export_ldb(source_ldb, ldb_path, trans_map)
+        try:
+            self._export_ldb(source_ldb, ldb_path, trans_map)
+            manifest.record("RPG_RT.ldb", ldb_path)
+        except Exception as e:
+            log.error("Failed to export RPG_RT.ldb: %s", e)
+            problems.append(f"RPG_RT.ldb ({e})")
 
         # Export maps
-        for fname in sorted(os.listdir(project_dir)):
-            if not fname.lower().endswith('.lmu') or _is_backup_name(fname):
-                continue
+        for fname in map_names:
             fpath = os.path.join(project_dir, fname)
             backup = _backup_path(fpath)
-            if not os.path.exists(backup):
-                shutil.copy2(fpath, backup)
-            source = backup if os.path.isfile(backup) else fpath
             try:
+                game_io.backup_file_once(fpath, backup)
+                source = backup if os.path.isfile(backup) else fpath
                 self._export_map(source, fpath, fname, trans_map)
+                manifest.record(fname, fpath)
             except Exception as e:
                 log.error("Failed to export %s: %s", fname, e)
+                problems.append(f"{fname} ({e})")
+        manifest.save()
+        game_io.raise_if_problems(problems)
 
     def _export_ldb(self, source_path: str, target_path: str,
                     trans_map: dict):
@@ -676,9 +697,11 @@ class RPGMaker2KParser:
             out = bytearray()
             out += _write_header(header)
             out += _write_chunks(db_chunks, terminate=False)
-            with open(target_path, 'wb') as f:
-                f.write(out)
+            game_io.atomic_write_bytes(target_path, bytes(out))
             log.info("Exported translations to %s", target_path)
+        elif os.path.abspath(source_path) != os.path.abspath(target_path):
+            # Nothing translated: put the original back (no stale English)
+            game_io.atomic_copy(source_path, target_path)
 
     def _export_map(self, source_path: str, target_path: str,
                     fname: str, trans_map: dict):
@@ -689,6 +712,8 @@ class RPGMaker2KParser:
         map_chunks, _ = _parse_chunks(data, pos, len(data))
 
         if MAP_EVENTS not in map_chunks:
+            if os.path.abspath(source_path) != os.path.abspath(target_path):
+                game_io.atomic_copy(source_path, target_path)
             return
 
         events = _parse_array(map_chunks[MAP_EVENTS])
@@ -726,8 +751,10 @@ class RPGMaker2KParser:
             out = bytearray()
             out += _write_header(header)
             out += _write_chunks(map_chunks, terminate=False)
-            with open(target_path, 'wb') as f:
-                f.write(out)
+            game_io.atomic_write_bytes(target_path, bytes(out))
+        elif os.path.abspath(source_path) != os.path.abspath(target_path):
+            # Nothing translated (any more): reset from the backup
+            game_io.atomic_copy(source_path, target_path)
 
     def _apply_command_translations(
         self, commands: list[EventCommand], prefix: str,
@@ -843,6 +870,6 @@ class RPGMaker2KParser:
             backup = _backup_path(os.path.join(project_dir, fname))
             if os.path.isfile(backup):
                 target = os.path.join(project_dir, fname)
-                shutil.copy2(backup, target)
+                game_io.atomic_copy(backup, target)
                 restored += 1
         log.info("Restored %d original files", restored)

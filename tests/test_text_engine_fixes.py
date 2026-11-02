@@ -227,7 +227,10 @@ def test_csv_does_not_overwrite_non_english_adjacent_column(tmp_path):
     assert entries and all(not e.translation for e in entries)
     for e in entries:
         e.translation, e.status = "X", "translated"
-    parser.save_project(str(tmp_path), entries)
+    # The skipped file is reported, never silently counted as exported.
+    from translator.game_io import PartialExportError
+    with pytest.raises(PartialExportError, match="s.x"):
+        parser.save_project(str(tmp_path), entries)
     assert _read(str(tmp_path / "data" / "s.x")) == text
 
 
