@@ -9,6 +9,36 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-01
+
+A visual overhaul. Nothing about how translation works has changed; the app just looks and reads
+like a modern tool now, with a palette taken from the logo ("candlelit study": ink navy, parchment
+and candle amber) in both dark and light themes.
+
+### Changed
+
+- New look throughout: Lucide icons on menus, tabs and the file tree; flat tabs; no more boxed
+  group frames; readable type and contrast (WCAG AA for text).
+- One workflow bar: the old toolbar and pipeline strip are merged into a single stepper with a
+  clear "Next" button. "Apply to Game" becomes the main button once export is the only step left.
+- Main screen: the table now takes the full height, with the editor in a collapsible side pane.
+  Ctrl+Enter in the English box saves and jumps to the next untranslated line.
+- Rows show their status as a coloured stripe plus a shape (ring, dot, tick) instead of full-row
+  colour fills, so they are calmer and readable for colour-blind users. English is shown larger
+  than Japanese, File and Event are merged into one compact "Where" column, and dialogue lines
+  show the speaker as a coloured name tag.
+- One search box with filter pills replaces the row of dropdowns and checkboxes.
+- New project header: game title, engine and translated / reviewed progress.
+- Welcome page: logo, drop-a-folder area, step cards, engine badges and recent projects.
+- Event Viewer and Translation Queue use the same side-editor layout and icons; empty tabs now
+  explain themselves instead of showing a blank pane.
+- Settings → Options is grouped into sections, each option with a one-line explanation.
+- The GPU panel shows VRAM and GPU use as slim bars with the reading beside them.
+
+### Fixed
+
+- Large projects scroll and filter more smoothly (speaker names and display text are cached).
+
 ## [1.0.1] - 2026-10-30
 
 A small maintenance release: a better default model for new installs, the new licence, and updated

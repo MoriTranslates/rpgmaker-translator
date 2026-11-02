@@ -25,10 +25,14 @@ Cloud API engine ported from <a href="https://github.com/dazedanon/DazedMTLTool"
 
 | | |
 |---|---|
-| ![Model picker](screenshots/model_picker.png) | ![Per-engine settings](screenshots/settings_engines.png) |
-| GPU-aware model picker on first launch | Per-engine context, batch, workers and model |
-| ![Translate menu](screenshots/menu_translate.png) | ![Options](screenshots/settings_options.png) |
-| Two-stage workflow: database first, then dialogue | Export and word-wrap options |
+| ![Welcome](screenshots/welcome.png) | ![Light theme](screenshots/main_light.png) |
+| Drop a game folder to start | Parchment light theme |
+| ![Event Viewer](screenshots/event_viewer.png) | ![Translation queue](screenshots/queue.png) |
+| Scene-by-scene review with speaker names | Live translation queue |
+| ![Model picker](screenshots/model_picker.png) | ![Options](screenshots/settings_options.png) |
+| GPU-aware model picker on first launch | Options, each with a plain-English explanation |
+| ![Per-engine settings](screenshots/settings_engines.png) | |
+| Per-engine context, batch, workers and model | |
 
 </details>
 
@@ -270,7 +274,7 @@ Project entries override general entries for the same JP term.
 | Workers | 2 | Parallel events translated at once. More workers = more events in parallel. 2-3 for 12GB GPUs running 9-14B models, 4+ for cloud APIs |
 | Batch size | 5 | Lines per request within an event. Batches never cross event boundaries — a 4-line event sends 4, a 25-line event with batch=10 sends 10/10/5 |
 | Translation history | 10 | Recent translations sent as assistant messages |
-| Dark mode | On | Catppuccin dark theme |
+| Dark mode | On | "Candlelit" dark theme (off = parchment light theme) |
 
 ### Engines Tab
 
