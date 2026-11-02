@@ -9,6 +9,64 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-02
+
+A safety release. Two independent code reviews found ways the app could damage game folders, put
+translations in the wrong place or overwrite your review work. All of them are fixed here.
+
+### Fixed
+
+- **Wolf RPG: Restore Originals could delete your save files.** For games that keep `BasicData/`
+  and `MapData/` in the main folder, backup and restore now only touch those two folders, never
+  the whole game folder.
+- **No more half-written game files.** Every engine now writes game files, backups and the
+  VX Ace script patches safely. A crash, a full disk or a locked file leaves the old file in
+  place instead of a broken one, and an interrupted first backup is never treated as complete.
+  A failed Restore Originals leaves the game as it was.
+- **Game updates are no longer rolled back.** If you update a game after your first export, the
+  next export notices the changed files, refreshes the backup from them and tells you to re-open
+  the project for any new lines. It used to copy the old files back over the update.
+- **RPG Maker MV/MZ: translations land on the right line.** Dialogue, scrolling text, comments
+  and choices are written to the exact event and position they came from. Before, a line that
+  appears in several events could get its translation in the wrong event and stay Japanese in
+  the one you translated.
+- **Reverted lines no longer stay in English** in VX Ace, 2000/2003, Wolf RPG and Crowd games.
+- **"Export Complete" only when it really is.** If some files could not be written, you now see
+  "Export Incomplete" with the list of files, for every engine.
+- **Your reviewed lines are left alone.** Automatic clean-up, code repair and bulk grammar polish
+  no longer change, clear or re-translate lines you marked Reviewed, and polish no longer turns
+  Reviewed lines back into Translated. If you edit a line while the AI is still working on it,
+  your edit wins.
+- **Translator notes:** a scene-break line (`---`, `***`, `━━━`, `＊＊＊`…) no longer cuts off the
+  rest of a translation.
+- **Ren'Py:** `[player]`-style variables are protected from the AI, and stray `[` or `{` in a
+  translation are escaped, so the game no longer crashes when that line is shown. Translations
+  with a leftover `«CODE»` placeholder are rejected instead of written into the game.
+- **Crowd:** curly quotes from the AI no longer turn into `"` characters that can break scripts.
+- **CSV games:** a column of numbers or sound IDs next to the text is no longer mistaken for the
+  English column and overwritten. The file is skipped and the export says so.
+- **SRPG Studio:** numbers in the game data are no longer offered as text to translate.
+- **Kirikiri:** bytes the app can't decode are kept as they are instead of becoming `?`.
+- Wolf RPG export no longer fails when a `Data.wolf.bak` already exists.
+
+### Changed
+
+- Bulk grammar polish only polishes lines that aren't marked Reviewed.
+- RPG Maker 2000/2003 export asks before adding EasyRPG Player to the game folder.
+- Writing translations to the game no longer freezes the window on large games.
+
+### Security
+
+- The app no longer force-kills every Ollama on your PC without asking. It only restarts the
+  Ollama it started itself; restarting someone else's needs your OK. A remote Ollama that is down
+  is reported instead of restarting a local one.
+- EasyRPG Player is downloaded only with your consent, and checked against a pinned SHA-256 hash
+  before it is used (the cached copy is re-checked too).
+- "Open in RPG Maker" no longer runs a shell command, so folder names containing `&` can't run
+  other commands.
+- SECURITY.md now describes what is actually sent to cloud providers, that API keys are stored in
+  plain text in `_settings.json` next to the app, and what the app downloads.
+
 ## [1.1.0] - 2026-11-01
 
 A visual overhaul. Nothing about how translation works has changed; the app just looks and reads
