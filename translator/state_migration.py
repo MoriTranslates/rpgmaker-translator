@@ -38,7 +38,7 @@ import shutil
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 
-from .project_model import ID_SCHEME, TranslationProject
+from .project_model import ID_SCHEME, TranslationProject, ids_outdated
 
 log = logging.getLogger(__name__)
 
@@ -327,7 +327,9 @@ def migrate_project(project: TranslationProject, parser=None,
     if getattr(project, "id_scheme", ID_SCHEME) >= ID_SCHEME:
         return MigrationResult(status="current")
     engine = _engine_for(project.project_type)
-    if engine is None:
+    if engine is None or not ids_outdated(project.project_type,
+                                          project.id_scheme):
+        # This engine's IDs did not change since the saved scheme
         project.id_scheme = ID_SCHEME
         return MigrationResult(status="not_needed")
 

@@ -14,8 +14,24 @@ from typing import Optional
 #                    skipped dialogue from aliases starting "pass"/"return".
 #   2              — per-kind MV/MZ counters independent of extraction,
 #                    narrower bare \N[n] namebox detection, Ren'Py fix.
+#   3              — Ren'Py say lines ending in `with ...`, `nointeract` or
+#                    `id ...` are dialogue now, so later lines of a label
+#                    are numbered differently.  Other engines: unchanged.
 # Older states are remapped on load by translator/state_migration.py.
-ID_SCHEME = 2
+ID_SCHEME = 3
+
+# Last scheme in which each engine's event IDs changed
+_IDS_CHANGED_IN = {"rpgmaker_mv": 2, "rpgmaker_mz": 2, "rpgmaker": 2,
+                   "renpy": 3}
+
+
+def ids_outdated(project_type: str, scheme: int) -> bool:
+    """Were *project_type*'s entry IDs renumbered after *scheme*?
+
+    Only then do old IDs point at different entries and need remapping;
+    other engines' IDs never changed, whatever the scheme number says.
+    """
+    return scheme < _IDS_CHANGED_IN.get(project_type, 0)
 
 
 @dataclass
@@ -252,7 +268,8 @@ class TranslationProject:
         # IDs point at different entries now.  Remap them structurally
         # (event + kind + text + order) onto this project's entries.
         remap = {}
-        if getattr(old_project, "id_scheme", ID_SCHEME) < ID_SCHEME:
+        if ids_outdated(self.project_type,
+                        getattr(old_project, "id_scheme", ID_SCHEME)):
             from .state_migration import remap_by_structure
             remap = remap_by_structure(
                 list(old_by_id.values()), self.entries, self.project_type)
@@ -330,7 +347,8 @@ class TranslationProject:
         # A project still on an old ID scheme (migration skipped) numbers
         # event entries differently from the donor parse: never ID-match
         # those, it would attach English to the wrong line.
-        legacy_ids = getattr(self, "id_scheme", ID_SCHEME) < ID_SCHEME
+        legacy_ids = ids_outdated(self.project_type,
+                                  getattr(self, "id_scheme", ID_SCHEME))
 
         stats = {"imported": 0, "by_text": 0, "identical": 0,
                  "skipped": 0, "new": 0}

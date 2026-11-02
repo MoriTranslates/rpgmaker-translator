@@ -9,6 +9,7 @@ import shutil
 import pytest
 
 from conftest import FAKE_MV_GAME
+from translator.project_model import ID_SCHEME
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -331,7 +332,7 @@ def test_migration_remaps_translations(jp_game, tmp_path):
     res = migrate_project(proj, parser=_parser(), state_path=state)
 
     assert res.status == "migrated"
-    assert proj.id_scheme == 2
+    assert proj.id_scheme == ID_SCHEME
     assert res.migrated == len(LEGACY_MV)
     assert res.unmatched == 1
     assert res.namebox_merged == 1
@@ -361,7 +362,7 @@ def test_migration_remaps_translations(jp_game, tmp_path):
     # Non-event entries untouched
     assert by_id["Actors.json/1/name"].translation == "Alice"
     # Pre-migration backup written next to the state
-    assert os.path.basename(res.backup_path) == "_translation_state.pre-v2.json"
+    assert os.path.basename(res.backup_path) == f"_translation_state.pre-v{ID_SCHEME}.json"
     with open(res.backup_path, encoding="utf-8") as f:
         assert "id_scheme" not in json.load(f)
 
@@ -417,7 +418,7 @@ def test_migration_is_idempotent(jp_game, tmp_path):
     proj.save_state(state)
 
     again = TranslationProject.load_state(state)
-    assert again.id_scheme == 2
+    assert again.id_scheme == ID_SCHEME
     before = [(e.id, e.translation, e.status) for e in again.entries]
     res = migrate_project(again, parser=_parser(), state_path=state)
     assert res.status == "current" and res.message == ""
@@ -455,7 +456,7 @@ def test_unaffected_engine_is_just_stamped():
     proj = TranslationProject(project_type="tyranoscript")
     proj.id_scheme = 1
     assert migrate_project(proj).status == "not_needed"
-    assert proj.id_scheme == 2
+    assert proj.id_scheme == ID_SCHEME
 
 
 def test_legacy_patch_remapped_on_import(jp_game, tmp_path):
@@ -482,7 +483,7 @@ def test_current_patch_roundtrips_scheme(jp_game, tmp_path):
     proj.entries[0].translation, proj.entries[0].status = "x", "translated"
     zip_path = str(tmp_path / "p.zip")
     proj.export_patch(zip_path)
-    assert TranslationProject.import_patch(zip_path).id_scheme == 2
+    assert TranslationProject.import_patch(zip_path).id_scheme == ID_SCHEME
 
 
 def test_renpy_legacy_state_migrated_and_exported(renpy_game, tmp_path):

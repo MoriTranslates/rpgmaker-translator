@@ -190,7 +190,12 @@ def _escape_rpy(text: str, original: str = "") -> str:
     """
     text = text.replace("\r\n", "\n").replace("\n", "\\n")
     text = _escape_backslashes(text, original)
-    text = re.sub(r'(?<!\\)"', r'\\"', text)
+    # Escape bare quotes by walking escape pairs: after the step above every
+    # backslash starts a pair, so a quote that isn't the second half of one
+    # would end the literal.  (A lookbehind got `\\"` wrong: there the
+    # backslash is escaped, not the quote.)
+    text = re.sub(r'\\.|"', lambda m: '\\"' if m.group(0) == '"' else m.group(0),
+                  text, flags=re.S)
     keep = set(RENPY_TAG_RE.findall(original or ""))
     keep.update(RENPY_INTERP_RE.findall(original or ""))
     keep.update(m.group(0) for m in re.finditer(r'\{[^{}\n]*\}', original or ""))
@@ -460,6 +465,11 @@ class RenPyParser:
                 count = self._export_file(source, target, fname, trans_map)
                 if self._changed_lines:
                     changed_lines[fname] = self._changed_lines
+                if self._unsafe_lines:
+                    problems.append(
+                        f"{fname}: {self._unsafe_lines} translation(s) not "
+                        f"written -- they would break the script line "
+                        f"(unbalanced quote or backslash)")
                 manifest.record(fname, target)
             except OSError as exc:
                 problems.append(f"{fname} ({exc})")
@@ -480,13 +490,25 @@ class RenPyParser:
         """
         lines = _read_rpy(source_path, lines=True)
         self._changed_lines = 0
+        self._unsafe_lines = 0
+        visited: set[str] = set()
 
         def still_there(entry, text):
+            visited.add(entry.id)
             if text == entry.original:
                 return True
             if entry.translation != entry.original:
                 self._changed_lines += 1
             return False
+
+        def safe(new_line, kind, escaped):
+            """The rewritten line must parse as the same kind of line with
+            exactly the escaped text, or it would break the script."""
+            k2, m2 = _classify_line(new_line.rstrip("\n"))
+            if k2 != kind or m2 is None:
+                return False
+            got = m2.group(3) if kind == "dialog" else m2.group(2)
+            return got == escaped
 
         current_label = "start"
         dialogue_index = 0
@@ -507,10 +529,14 @@ class RenPyParser:
                     continue
                 entry = trans_map.get(f"{fname}/define/{m.group(1)}")
                 if entry and still_there(entry, m.group(2)):
-                    output_lines[line_idx] = raw_line.replace(
-                        f'"{m.group(2)}"',
-                        f'"{_escape_rpy(entry.translation, entry.original)}"', 1)
-                    changed = True
+                    escaped = _escape_rpy(entry.translation, entry.original)
+                    new_line = raw_line.replace(
+                        f'"{m.group(2)}"', f'"{escaped}"', 1)
+                    if safe(new_line.strip(), "define", escaped):
+                        output_lines[line_idx] = new_line
+                        changed = True
+                    elif entry.translation != entry.original:
+                        self._unsafe_lines += 1
                 continue
 
             if kind is None:
@@ -535,8 +561,18 @@ class RenPyParser:
                 new_line = f'{indent}{m.group(2)} "{escaped}"{m.group(4) or ""}\n'
             else:
                 new_line = f'{indent}"{escaped}"{m.group(3) or ""}\n'
+            if not safe(new_line, kind, escaped):
+                if entry.translation != entry.original:
+                    self._unsafe_lines += 1
+                continue
             output_lines[line_idx] = new_line
             changed = True
+
+        # Entries whose label / line no longer exists were never placed
+        for eid, entry in trans_map.items():
+            if (eid.startswith(f"{fname}/") and eid not in visited
+                    and entry.translation != entry.original):
+                self._changed_lines += 1
 
         if changed:
             game_io.atomic_write_text(target_path, "".join(output_lines))

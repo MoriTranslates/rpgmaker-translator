@@ -193,7 +193,6 @@ def test_ace_removed_block_is_reported(tmp_path):
         p.save_project(str(game), entries)
 
 
-@pytest.mark.xfail(strict=True, reason="round 2: fix pending")
 def test_renpy_removed_label_is_reported(tmp_path):
     from translator import game_io
     from translator.renpy import RenPyParser
@@ -225,7 +224,6 @@ def test_marshal_invalid_utf8_string_round_trips():
 # 10. Ren'Py: a translation with an escaped backslash right before a quote
 #     ("C:\\" then '"') leaves the quote unescaped -> the script line no
 #     longer parses (Ren'Py refuses to start).
-@pytest.mark.xfail(strict=True, reason="round 2: fix pending")
 def test_renpy_backslash_before_quote_keeps_line_valid():
     from translator.renpy import _escape_rpy, _DIALOGUE_RE
     out = _escape_rpy('Path C:\\\\"x', "")
@@ -252,3 +250,68 @@ def test_scripts_with_invalid_utf8_string_can_take_plugins(tmp_path):
     assert vxace_plugins.inject_plugins(str(path), ["mouse"])
     assert vxace_plugins.remove_plugins(str(path))
     assert path.read_bytes() == blob
+
+
+def _renpy_tail_game(tmp_path):
+    game = tmp_path / "RenGame"
+    (game / "renpy").mkdir(parents=True)
+    (game / "game").mkdir()
+    (game / "game" / "script.rpy").write_bytes(
+        ('label start:\n'
+         '    e "こんにちは" with dissolve\n'
+         '    e "元気？"\n'
+         '    e "さようなら"\n').encode("utf-8"))
+    return game
+
+
+def test_renpy_scheme2_project_is_migrated_by_text(tmp_path):
+    """Fix 1: a project saved with ID scheme 2 (tail lines skipped) is
+    re-keyed by text on load, so its reviewed lines keep their work."""
+    from translator.project_model import ID_SCHEME
+    from translator.renpy import RenPyParser
+    from translator.state_migration import migrate_project
+    game = _renpy_tail_game(tmp_path)
+    old = [_entry("script.rpy/start/dialog_0", "script.rpy", "dialog",
+                  "元気？", "How are you?", "reviewed"),
+           _entry("script.rpy/start/dialog_1", "script.rpy", "dialog",
+                  "さようなら", "Goodbye", "reviewed")]
+    proj = TranslationProject(project_path=str(game), project_type="renpy",
+                              entries=old)
+    proj.id_scheme = 2
+    res = migrate_project(proj, parser=RenPyParser())
+    assert res.status == "migrated" and proj.id_scheme == ID_SCHEME
+    by = {e.id: e for e in proj.entries}
+    assert (by["script.rpy/start/dialog_1"].translation,
+            by["script.rpy/start/dialog_1"].status) == ("How are you?", "reviewed")
+    assert by["script.rpy/start/dialog_2"].translation == "Goodbye"
+    assert by["script.rpy/start/dialog_0"].status == "untranslated"   # tail line
+
+
+def test_mv_scheme2_project_is_not_remigrated(mv_game, mv_parser):
+    """MV IDs did not change in scheme 3: a scheme-2 project is just
+    stamped, never re-matched."""
+    from translator.project_model import ID_SCHEME
+    from translator.state_migration import migrate_project
+    entries = mv_parser.load_project(mv_game)
+    proj = TranslationProject(project_path=mv_game, project_type="rpgmaker_mv",
+                              entries=entries)
+    proj.id_scheme = 2
+    assert migrate_project(proj, parser=mv_parser).status == "not_needed"
+    assert proj.id_scheme == ID_SCHEME and proj.entries is entries
+
+
+def test_renpy_export_refuses_a_line_that_would_break(tmp_path, monkeypatch):
+    """Safety net: whatever the escaper returns, a line that would not
+    parse back is not written and the export says so."""
+    from translator import game_io, renpy
+    game = _renpy_tail_game(tmp_path)
+    p = renpy.RenPyParser()
+    entries = p.load_project(str(game))
+    for e in entries:
+        e.translation, e.status = "EN", "translated"
+    monkeypatch.setattr(renpy, "_escape_rpy", lambda t, o="": 'broken " quote')
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(game), entries)
+    assert "would break the script line" in str(ei.value)
+    text = (game / "game" / "script.rpy").read_text(encoding="utf-8")
+    assert 'broken " quote' not in text

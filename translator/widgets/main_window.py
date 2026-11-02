@@ -2163,12 +2163,14 @@ class MainWindow(QMainWindow):
         and merge them by entry ID.  Returns the merge stats, or None when
         nothing was checked.
         """
-        from ..project_model import ID_SCHEME
+        from ..project_model import ID_SCHEME, ids_outdated
         parser = self.handler.parser
         path = self.project.project_path
         if (not path or not os.path.isdir(path)
                 or not hasattr(parser, "load_originals")
-                or getattr(self.project, "id_scheme", ID_SCHEME) < ID_SCHEME):
+                or ids_outdated(self.project.project_type,
+                                getattr(self.project, "id_scheme", ID_SCHEME))):
+            # (a project whose IDs still need migrating is never merged)
             return None
         try:
             fresh = parser.load_originals(path)
