@@ -2,10 +2,11 @@
 (2026-11-01) of v1.1.0 @ c2958bd.
 
 Convention:
-  * ``test_repro_*``  — asserts the CURRENT (buggy) behaviour. PASS = bug reproduced.
-  * ``test_refute_*`` — asserts the behaviour Gemini said does NOT happen.
-                        PASS = Gemini's claim is false.
-No production code is modified.
+  * ``test_fixed_*``     — was a ``test_repro_*`` that reproduced a confirmed
+                           bug; now asserts the FIXED behaviour (v1.1.1).
+  * ``test_refute_*``    — asserts the behaviour Gemini said does NOT happen.
+                           PASS = Gemini's claim is false.
+  * ``test_by_design_*`` — confirmed behaviour that is intended.
 """
 
 import json

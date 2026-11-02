@@ -3158,20 +3158,25 @@ class MainWindow(QMainWindow):
             # Sync font setting to parser before export
             if hasattr(self.parser, 'game_font'):
                 self.parser.game_font = self._game_font
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            self.statusbar.showMessage("Writing translations to game files…")
-            self.statusbar.repaint()  # paint now; no input re-entrancy
+            # Write on a worker thread so the window keeps painting on big
+            # games.  The worker gets a snapshot copy of the entries, so a
+            # translation run finishing meanwhile can't change them mid-write.
+            import copy
+            snapshot = [copy.copy(e) for e in self.project.entries]
             partial = None
-            try:
-                self.handler.save_project(
-                    self.project.project_path, self.project.entries)
-            except PartialExportError as exc:
+            outcome = self._run_blocking(
+                "Apply Translation to Game",
+                "Writing translations to game files…",
+                self._export_worker, self.handler,
+                self.project.project_path, snapshot)
+            if outcome is None:
+                raise RuntimeError("The export did not finish.")
+            if outcome[0] == "partial":
                 # Some files were written, some were not: carry on with the
                 # post-export steps but never report "Export Complete".
-                partial = exc
-            finally:
-                QApplication.restoreOverrideCursor()
-                self.statusbar.clearMessage()
+                partial = outcome[1]
+            elif outcome[0] == "error":
+                raise outcome[1]
             notes = list(getattr(self.handler.parser, "last_export_notes",
                                  None) or [])
 
@@ -3225,6 +3230,18 @@ class MainWindow(QMainWindow):
                 self.pipeline_bar.mark_done("export")
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", str(e))
+
+    @staticmethod
+    def _export_worker(handler, project_path, entries):
+        """Run an export off the UI thread; return (kind, exception)."""
+        try:
+            handler.save_project(project_path, entries)
+        except PartialExportError as exc:
+            return ("partial", exc)
+        except Exception as exc:  # noqa: BLE001 -- shown to the user
+            log.exception("Export failed")
+            return ("error", exc)
+        return ("ok", None)
 
     # ── EasyRPG Player auto-download ─────────────────────────────
 

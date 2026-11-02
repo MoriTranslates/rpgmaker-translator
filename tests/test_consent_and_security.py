@@ -173,3 +173,46 @@ def test_easyrpg_poisoned_cache_is_not_used(window, monkeypatch, tmp_path):
     game.mkdir()
     window._ensure_easyrpg_player(str(game))
     assert not (game / "Player.exe").exists()
+
+
+# ── Export result reporting ──────────────────────────────────────────
+
+def _export_with(window, monkeypatch, tmp_path, save_impl):
+    from translator.project_model import TranslationEntry, TranslationProject
+    from translator.widgets import main_window as mw
+    e = TranslationEntry(id="a", file="Map001.json", field="dialog",
+                         original="はい", translation="Yes", status="translated")
+    window.project = TranslationProject(project_path=str(tmp_path), entries=[e])
+    window._closing = False
+    shown = []
+    monkeypatch.setattr(mw.QDialog, "exec",
+                        lambda self: mw.QDialog.DialogCode.Accepted)
+    for kind in ("information", "warning", "critical"):
+        monkeypatch.setattr(mw.QMessageBox, kind,
+                            lambda *a, _k=kind, **kw: shown.append((_k, a[1], a[2])))
+    monkeypatch.setattr(window.handler, "save_project", save_impl)
+    monkeypatch.setattr(window.handler, "has_plugin_system", False)
+    window._export_to_game()
+    window._closing = True
+    return shown
+
+
+def test_partial_export_is_never_reported_complete(window, monkeypatch, tmp_path):
+    from translator.game_io import PartialExportError
+
+    def partial(path, entries):
+        raise PartialExportError(["Map002.json (locked)"])
+    shown = _export_with(window, monkeypatch, tmp_path, partial)
+    titles = [t for _k, t, _m in shown]
+    assert "Export Incomplete" in titles and "Export Complete" not in titles
+    assert any("Map002.json" in m for _k, _t, m in shown)
+
+
+def test_successful_export_reports_complete_and_uses_a_snapshot(window, monkeypatch, tmp_path):
+    seen = {}
+
+    def ok(path, entries):
+        seen["same_objects"] = entries[0] is window.project.entries[0]
+    shown = _export_with(window, monkeypatch, tmp_path, ok)
+    assert [t for _k, t, _m in shown] == ["Export Complete"]
+    assert seen["same_objects"] is False
