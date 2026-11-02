@@ -86,7 +86,6 @@ def test_merge_shifted_ids_keep_translation_of_unchanged_text():
 
 # 4. Wolf: the loose "message ends with the original" check accepts a
 #    changed line, writes a half-Japanese message and does not count it.
-@pytest.mark.xfail(strict=True, reason="round 2: fix pending")
 def test_wolf_changed_message_ending_with_old_original_is_skipped():
     from translator import wolfrpg
     p = wolfrpg.WolfRPGParser()
@@ -101,7 +100,6 @@ def test_wolf_changed_message_ending_with_old_original_is_skipped():
 
 
 # 5. MV patch zip ignores the skipped-line count: "complete" with lines unwritten.
-@pytest.mark.xfail(strict=True, reason="round 2: fix pending")
 def test_mv_patch_zip_reports_skipped_lines(mv_game, mv_parser, tmp_path):
     from translator import game_io
     path = os.path.join(mv_game, "data", "Map001.json")
@@ -174,7 +172,6 @@ def test_ace_new_map_from_update_is_merged_and_survives_restore(tmp_path):
 # 8. Ace / Ren'Py: a translation whose position no longer exists (block or
 #    label removed by an update) is neither written nor counted -> the export
 #    claims to be complete.
-@pytest.mark.xfail(strict=True, reason="round 2: fix pending")
 def test_ace_removed_block_is_reported(tmp_path):
     from translator import game_io
     from test_smoke_findings import _ace_map, _ace_one_map_game
@@ -541,3 +538,58 @@ def test_renpy_refresh_backups_then_originals_see_the_update(tmp_path):
     s.write_bytes('label start:\n    "新しい"\n'.encode("utf-8"))      # update
     assert p.refresh_backups(str(game)) == ["script.rpy"]
     assert {e.original for e in p.load_originals(str(game))} == {"新しい"}
+
+
+# ── Lines whose place no longer exists are counted (fix 10) ──────────
+
+def test_mv_deleted_db_row_and_note_tag_are_reported(mv_game, mv_parser):
+    from translator import game_io
+    entries = [
+        _entry("Items.json/99/name", "Items.json", "name", "消えた品", "Gone"),
+        _entry("Items.json/1/note/Tag/0", "Items.json", "note_tag:Tag",
+               "消えたタグ", "Gone tag"),
+    ]
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert "Items.json: 2 translated line(s) not written" in str(ei.value)
+
+
+def test_mv_normal_export_counts_nothing(mv_game, mv_parser):
+    """Guard against false alarms: a plain export of every entry is complete."""
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "translated"
+    mv_parser.save_project(mv_game, entries)
+    assert mv_parser.last_export_notes == []
+
+
+def test_wolf_message_whose_command_is_gone_is_counted():
+    from types import SimpleNamespace as NS
+    from translator import wolfrpg
+    p = wolfrpg.WolfRPGParser()
+    p._visited_keys = set()
+    cmds = [NS(code=wolfrpg.CMD_MESSAGE, string_args=["残る"])]
+    tr = {"M/Ev1/p0/msg0": "Stays", "M/Ev1/p0/msg5": "Removed"}
+    orig = {"M/Ev1/p0/msg0": "残る", "M/Ev1/p0/msg5": "消えた"}
+    p._apply_commands(cmds, "M/Ev1/p0", tr, orig, "M", {})
+    assert p._visited_keys == {"M/Ev1/p0/msg0"}       # msg5 never looked at
+
+
+def test_rm2k_removed_message_is_reported(tmp_path):
+    from test_smoke_findings import _rm2k_map
+    from translator import game_io
+    from translator import rpgmaker_2k as rm
+    (tmp_path / "RPG_RT.ldb").write_bytes(rm._write_header("LcfDataBase"))
+    (tmp_path / "RPG_RT.lmt").write_bytes(b"")
+    live = tmp_path / "Map0001.lmu"
+    live.write_bytes(_rm2k_map("台詞", "はい"))
+    p = rm.RPGMaker2KParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN", "reviewed"
+    # an extra entry whose message no longer exists in the event
+    entries.append(_entry("Map0001.lmu/Ev1(EV)/p1/dialog_7", "Map0001.lmu",
+                          "dialog", "消えた", "Gone"))
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(tmp_path), entries)
+    assert "Map0001.lmu: 1 translated line(s) not written" in str(ei.value)

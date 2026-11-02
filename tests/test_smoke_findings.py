@@ -1427,8 +1427,11 @@ def test_mv_patch_zip_reports_lines_it_could_not_place(mv_game, mv_parser, tmp_p
         e.translation, e.status = "EN " + e.id, "translated"
     _set_page(mv_game, [(401, "新しい台詞"), (401, "")])     # changed meanwhile
     zip_path = tmp_path / "patch.zip"
-    skipped = mv_parser.export_patch_zip(mv_game, entries, str(zip_path))
-    assert skipped == {"Map001.json": 1}
+    from translator import game_io
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.export_patch_zip(mv_game, entries, str(zip_path))
+    assert "Map001.json: 1 translated line(s) not written" in str(ei.value)
+    assert mv_parser.last_patch_skipped == {"Map001.json": 1}
     with zipfile.ZipFile(zip_path) as zf:
         packed = json.loads(zf.read("_translation/data/Map001.json"))
         items = json.loads(zf.read("_translation/data/Items.json"))

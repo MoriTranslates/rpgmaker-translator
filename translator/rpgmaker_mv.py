@@ -720,9 +720,13 @@ class RPGMakerMVParser:
 
         End users extract into the game folder and run install.bat.
 
-        Returns ``{file: count}`` of translations that were NOT put in the
-        package because the game text at their place no longer matches
-        their original (empty when everything was included).
+        A game update since the last export is put into the backup first
+        (the export's own rule), so the package never ships old game files
+        that would roll the player's game back.
+
+        Raises ``PartialExportError`` -- after the package is written --
+        when translations were left out because the game text at their
+        place changed or no longer exists.
         """
         data_dir = self._find_data_dir(project_dir)
         if not data_dir:
@@ -730,6 +734,8 @@ class RPGMakerMVParser:
                 f"Could not find data/ directory in:\n{project_dir}"
             )
 
+        # A game update since the last export goes into the backup first
+        self.refresh_backups(project_dir)
         # Use backup (original JP) as source, same as save_project
         backup_dir = data_dir + "_original"
         source_dir = backup_dir if os.path.isdir(backup_dir) else data_dir
@@ -879,7 +885,7 @@ class RPGMakerMVParser:
             )
             zf.writestr("README.txt", readme)
         self.last_patch_skipped = skipped_lines
-        return skipped_lines
+        game_io.raise_export_problems([], skipped_lines)
 
     def export_game_folder_as_patch(self, game_path: str, zip_path: str,
                                     game_title: str = "") -> dict:
@@ -2822,7 +2828,8 @@ class RPGMakerMVParser:
         """
         note = item.get("note", "")
         if not note:
-            return
+            return False
+        replaced = [False]
 
         def _replace(m):
             if m.group(1) != tag_name:
@@ -2833,20 +2840,29 @@ class RPGMakerMVParser:
                 safe = (translation.replace(',', '、')
                         .replace('<', '').replace('>', ''))
                 vals[value_idx] = safe
+                replaced[0] = True
             return f"<{tag_name}:{','.join(vals)}>"
 
         item["note"] = re.sub(
             r'<([A-Za-z_]\w*):([^>]+)>', _replace, note)
+        return replaced[0]
 
     def _apply_translation(self, data, entry: TranslationEntry):
         """Apply a single translation back into the loaded JSON data."""
         parts = entry.id.split("/")
         filename = parts[0]
 
+        # Every branch that writes (or finds the place but counts a changed
+        # text) sets _placed; anything else found no place for the entry
+        # (row / event / command removed by a game update): count it, so
+        # the export is never reported complete.
+        self._placed = False
         try:
             self._apply_translation_inner(data, entry, parts, filename)
         except (ValueError, IndexError, KeyError) as exc:
             log.warning("Export skip — malformed entry ID %r: %s", entry.id, exc)
+        if not self._placed and entry.translation != entry.original:
+            self._nonevent_skipped = getattr(self, "_nonevent_skipped", 0) + 1
 
     def _put_checked(self, container, key, entry) -> None:
         """``container[key] = entry.translation`` -- only while the game
@@ -2857,6 +2873,7 @@ class RPGMakerMVParser:
         the skip is counted (``_nonevent_skipped``) so the export reports
         it.  A translation equal to its original changes nothing.
         """
+        self._placed = True          # found its place (written or counted)
         if container[key] == entry.original:
             container[key] = entry.translation
         elif entry.translation != entry.original:
@@ -2873,10 +2890,11 @@ class RPGMakerMVParser:
                     if item and isinstance(item, dict) and item.get("id") == item_id:
                         if field_name == "note" and len(parts) >= 5:
                             # Note tag: "File/id/note/TagName/valueIndex"
-                            self._apply_note_tag(item, parts[3],
-                                                 int(parts[4]),
-                                                 entry.original,
-                                                 entry.translation)
+                            if self._apply_note_tag(item, parts[3],
+                                                    int(parts[4]),
+                                                    entry.original,
+                                                    entry.translation):
+                                self._placed = True
                         elif field_name in item:
                             self._put_checked(item, field_name, entry)
                         break
@@ -3021,6 +3039,7 @@ class RPGMakerMVParser:
             return False
 
         if self._walk_event_commands(data, process_commands):
+            self._placed = True
             return
         log.warning("Export: single param code %d[%d] not matched — original %r",
                     code, param_idx, original[:60])
@@ -3056,6 +3075,7 @@ class RPGMakerMVParser:
             return False
 
         if self._walk_event_commands(data, process_commands):
+            self._placed = True
             return
         log.warning("Export: MZ plugin %s/%s not matched — original %r",
                     plugin_name, param_key, original[:60])
@@ -3081,6 +3101,7 @@ class RPGMakerMVParser:
             return False
 
         if self._walk_event_commands(data, process_commands):
+            self._placed = True
             return
         log.warning("Export: control var string not matched — original %r",
                     original[:60])
@@ -3119,6 +3140,7 @@ class RPGMakerMVParser:
             return False
 
         if self._walk_event_commands(data, process_commands):
+            self._placed = True
             return
         log.warning("Export: script string not matched — original %r",
                     original[:60])

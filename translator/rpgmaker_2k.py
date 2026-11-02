@@ -626,6 +626,7 @@ class RPGMaker2KParser:
                 trans_map[e.id] = e.translation
                 self._orig_map[e.id] = e.original
         self._trans_map = trans_map
+        self._visited_ids: set = set()
 
         problems: list[str] = []
         # file -> translations not written because the game text changed
@@ -658,6 +659,15 @@ class RPGMaker2KParser:
             if self._changed:
                 changed_lines[fname] = self._changed
         manifest.finish()
+        # Entries whose place no longer exists (event / message removed by
+        # a game update) were never looked at: not written, so count them.
+        # Files that failed to export are already reported as problems.
+        failed = {p.split(" (", 1)[0] for p in problems}
+        for eid, trans in trans_map.items():
+            fname = eid.split("/", 1)[0]
+            if (eid not in self._visited_ids and fname not in failed
+                    and trans != self._orig_map.get(eid)):
+                changed_lines[fname] = changed_lines.get(fname, 0) + 1
         game_io.raise_export_problems(problems, changed_lines)
 
     def _orig_ok(self, entry_id: str, current: str) -> bool:
@@ -669,6 +679,7 @@ class RPGMaker2KParser:
         so the export is reported as incomplete.  Without a recorded
         original (direct callers) nothing is checked.
         """
+        self.__dict__.setdefault("_visited_ids", set()).add(entry_id)
         orig = getattr(self, "_orig_map", {}).get(entry_id)
         if orig is None or current == orig:
             return True

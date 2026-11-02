@@ -1433,11 +1433,15 @@ class WolfRPGParser:
         # Build lookup: field → translation (+ the cleaned original it came from)
         translations = {}
         originals = {}
+        key_file = {}
         for entry in entries:
             if entry.translation and entry.status in ('translated', 'reviewed'):
                 key = f'{entry.file}/{entry.field}'
                 translations[key] = entry.translation
                 originals[key] = entry.original
+                key_file[key] = entry.file
+        # keys whose place was found (written, or counted as changed)
+        self._visited_keys: set[str] = set()
         skipped: list[str] = list(self._reload_problems(translations))
         written: list[Path] = []
         # file -> translations not written because the game text changed
@@ -1516,6 +1520,9 @@ class WolfRPGParser:
                     db, backup_dat, live_dat, db_trans, db_orig)
                 if self._db_changed:
                     changed[f'{db.name}.dat'] = self._db_changed
+                if not reason:
+                    self._visited_keys.update(
+                        f'{file_name}/{k}' for k in self._db_visited)
             except OSError as exc:
                 reason = str(exc)
             if reason:
@@ -1544,6 +1551,23 @@ class WolfRPGParser:
         if wolf_file.is_file():
             os.replace(wolf_file, self.game_dir / 'Data.wolf.bak')
 
+        # Entries whose place no longer exists (event, command or database
+        # row removed by a game update) were never written: count them.
+        # Files that could not be re-read are already reported above.
+        unreadable = {prefix.rstrip('/') for _label, prefix
+                      in getattr(self, '_reload_failures', [])}
+        loaded_dbs = {f'Database/{db.name}' for db in self.databases}
+        for key, trans in translations.items():
+            if key in self._visited_keys or trans == originals.get(key):
+                continue
+            file = key_file.get(key, '')
+            if file in unreadable or (file.startswith('Database/')
+                                      and file not in loaded_dbs):
+                continue
+            label = (file.split('/', 1)[1] + '.mps' if file.startswith('MapData/')
+                     else 'CommonEvent.dat' if file == 'CommonEvents'
+                     else file.split('/')[-1] + '.dat')
+            changed[label] = changed.get(label, 0) + 1
         game_io.raise_export_problems(skipped, changed)
 
     def _apply_commands(self, commands, key_prefix: str, translations: dict,
@@ -1560,15 +1584,16 @@ class WolfRPGParser:
         modified = False
 
         def still_there(key, raw, message=False):
+            getattr(self, "_visited_keys", set()).add(key)
             orig = originals.get(key)
             if orig is None:
                 return True
             if message:
-                # Older projects cleaned messages differently; the original
-                # still being the tail of the message is good enough
-                # (_rebuild_message keeps whatever precedes it).
-                ok = (self._clean_message(raw) == orig
-                      or raw.rstrip().endswith(orig))
+                # Exactly what the parser extracts: the message minus its
+                # speaker / face prefix.  (A looser "ends with" check let an
+                # updated line that merely ended with the old text through,
+                # and wrote half-Japanese, half-English messages.)
+                ok = self._clean_message(raw) == orig
             else:
                 ok = raw == orig
             if not ok and translations[key] != orig:
@@ -1616,6 +1641,7 @@ class WolfRPGParser:
         Returns None on success, or a short reason string if skipped.
         """
         self._db_changed = 0
+        self._db_visited: set[str] = set()
         data = bytearray(src_path.read_bytes())
 
         # Handle encryption the same way as load
@@ -1673,6 +1699,8 @@ class WolfRPGParser:
                     str_offset = reader.pos  # offset of length prefix
                     text = reader.read_string()
                     key = f'Type{type_idx}/Data{data_idx}/F{si}'
+                    if key in translations:
+                        self._db_visited.add(key)
                     orig = (originals or {}).get(key)
                     if (key in translations and orig is not None
                             and text != orig):
@@ -1747,7 +1775,7 @@ class WolfRPGParser:
                 except Exception:
                     log.warning("Skip map %s on reload", mps.name, exc_info=True)
                     self._reload_failures.append(
-                        (f'MapData/{mps.name}', f'MapData/{mps.name}/'))
+                        (f'MapData/{mps.name}', f'MapData/{mps.stem}/'))  # keys use the stem
 
         # Reload common events (same BasicData/ layout as load_project)
         _reset_proj_key()

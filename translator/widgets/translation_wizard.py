@@ -913,18 +913,19 @@ class TranslationWizard(QDialog):
                 os.path.dirname(project_path),
                 f"{folder_name} - Translation Patch.zip",
             )
-            skipped = parser.export_patch_zip(project_path, translated, zip_path)
+            from ..game_io import PartialExportError
+            try:
+                parser.export_patch_zip(project_path, translated, zip_path)
+                done = f"Done — patch saved to {zip_path}"
+            except PartialExportError as partial:
+                done = (f"Patch saved to {zip_path}, but INCOMPLETE: "
+                        f"{len(partial.problems)} file(s) are missing lines "
+                        f"because the game's text changed — re-open the "
+                        f"project and create the patch again.")
 
             self.progress_bar.setRange(0, 1)
             self.progress_bar.setValue(1)
-            if skipped:
-                self.detail_label.setText(
-                    f"Patch saved to {zip_path}, but INCOMPLETE: "
-                    f"{sum(skipped.values())} translated line(s) were left "
-                    f"out because the game's text changed — re-open the "
-                    f"project and create the patch again.")
-            else:
-                self.detail_label.setText(f"Done — patch saved to {zip_path}")
+            self.detail_label.setText(done)
 
         except Exception as exc:
             log.exception("Patch zip failed in wizard")

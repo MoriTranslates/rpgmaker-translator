@@ -887,6 +887,7 @@ class RPGMakerAceParser:
         A translation equal to its original changes nothing, so it is
         never counted.
         """
+        self.__dict__.setdefault("_visited", set()).add(entry.id)
         if _str(current) == entry.original:
             return True
         if entry.translation != entry.original:
@@ -900,6 +901,7 @@ class RPGMakerAceParser:
         text at their position no longer matches their original.
         """
         self._skipped = 0
+        self._visited: set = set()
         # Build lookup: entry_id → translation
         trans_map = {e.id: e for e in entries
                      if e.translation and e.status in ("translated", "reviewed")}
@@ -916,6 +918,11 @@ class RPGMakerAceParser:
             self._apply_system(data, filename, trans_map)
         elif filename in DATABASE_FILES:
             self._apply_database(data, filename, trans_map)
+        # Entries whose place no longer exists (block, event, row removed
+        # by a game update) were never looked at: not written either.
+        self._skipped += sum(1 for e in trans_map.values()
+                             if e.id not in self._visited
+                             and e.translation != e.original)
         return self._skipped
 
     def _apply_database(self, data, filename: str, trans_map: dict):
