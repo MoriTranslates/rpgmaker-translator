@@ -521,3 +521,101 @@ def test_install_bat_keeps_files_the_package_does_not_have(mv_game, mv_parser,
                        .read_text(encoding="utf-8-sig"))
     assert not items[1]["name"].startswith("EN ")
     assert not (player / "data_original").exists()
+
+
+# ── Restore result, leftovers, detection (review M1, L1, L5) ─────────
+
+def test_restore_reports_success_when_only_the_cleanup_fails(tmp_path,
+                                                             monkeypatch):
+    """Review M1: the swap succeeded, only deleting the old translated copy
+    failed (locked file): that is a note, not "Restore Failed"."""
+    backup, live = tmp_path / "data_original", tmp_path / "data"
+    backup.mkdir()
+    live.mkdir()
+    (backup / "a.json").write_text("JP")
+    (live / "a.json").write_text("EN")
+    real_rmtree = game_io.shutil.rmtree
+
+    def locked_rmtree(path, *a, **k):
+        if str(path).endswith(".rmt-old"):
+            return                                  # nothing could be deleted
+        return real_rmtree(path, *a, **k)
+
+    def no_rename(path):
+        raise PermissionError("in use")
+    monkeypatch.setattr(game_io.shutil, "rmtree", locked_rmtree)
+    monkeypatch.setattr(game_io, "_set_aside", no_rename)
+    game_io.take_cleanup_notes()
+    game_io.restore_tree(str(backup), str(live))       # must not raise
+    assert (live / "a.json").read_text() == "JP"
+    notes = game_io.take_cleanup_notes()
+    assert len(notes) == 1 and "data.rmt-old" in notes[0]
+    from translator.widgets.main_window import MainWindow
+    game_io._cleanup_notes.append(notes[0])
+    assert "Note:" in MainWindow._restore_cleanup_text()
+
+
+def test_restore_does_not_keep_our_crashed_temp_files(tmp_path):
+    """Review L1: a stale *.rmt-tmp from a crashed atomic write is not
+    carried into the restored folder."""
+    backup, live = tmp_path / "data_original", tmp_path / "data"
+    backup.mkdir()
+    live.mkdir()
+    (backup / "a.json").write_text("JP")
+    (live / "a.json").write_text("EN")
+    (live / "a.json.rmt-tmp").write_text("half")
+    (live / "Map099.json").write_text("update")        # still kept
+    game_io.restore_tree(str(backup), str(live))
+    assert not (live / "a.json.rmt-tmp").exists()
+    assert (live / "Map099.json").read_text() == "update"
+
+
+def test_kirikiri_detected_after_a_killed_restore_without_writing(tmp_path):
+    """Review L5: a loose-files Kirikiri game (no startup.tjs, no XP3) whose
+    restore was killed mid-swap is still detected, read-only."""
+    from translator.kirikiri import KirikiriParser
+    game = tmp_path / "Kag"
+    scen = game / "data" / "scenario"
+    scen.mkdir(parents=True)
+    (scen / "a.ks").write_bytes("@name chara=誰\n【太郎】こんにちは\n".encode("cp932"))
+    assert KirikiriParser.is_kirikiri_project(str(game))
+    os.rename(scen, str(scen) + ".rmt-old")
+    (game / "data" / "scenario.rmt-old" / game_io.SWAP_MARKER).write_text("x")
+    assert KirikiriParser.is_kirikiri_project(str(game))
+    assert not scen.exists()                            # detection is read-only
+
+
+def test_wolf_unwritable_database_is_counted_once_with_its_cause(
+        tmp_path, monkeypatch):
+    """Review M2: an unsupported database's lines were reported as an
+    unwritten file AND counted again as "game text changed"."""
+    from types import SimpleNamespace as NS
+    from translator import wolfrpg
+    from test_smoke_findings import _WOLF2_DAT, _wolf_game
+    game = _wolf_game(tmp_path, dat=_WOLF2_DAT,
+                      mps=b"\x00" * 10 + b"WOLFM\x00" + b"\x00" * 8)
+    p = wolfrpg.WolfRPGParser()
+
+    def reload(backup_dir):
+        p.maps, p.common_events = [], None
+        p.databases = [NS(name="DataBase")]
+        p._reload_failures = []
+
+    def export_db(db, src, dst, trans, orig=None):
+        p._db_changed, p._db_visited = 0, set()
+        return "LZ4-compressed DB export not supported"
+    monkeypatch.setattr(p, "_reload_from_backup", reload)
+    monkeypatch.setattr(p, "_export_database", export_db)
+    entries = [_entry("Database/DataBase/Type0/Data0/F0", "Database/DataBase",
+                      "Type0/Data0/F0", "剣", "Sword"),
+               _entry("Database/DataBase/Type0/Data0/F1", "Database/DataBase",
+                      "Type0/Data0/F1", "盾", "Shield")]
+    for e in entries:
+        e.id = f"{e.file}/{e.field}"
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(game), entries)
+    assert ei.value.changed == {}
+    assert len(ei.value.unsupported) == 1 and not ei.value.errors
+    assert "LZ4" in ei.value.unsupported[0]
+    advice = game_io.export_advice(ei.value)
+    assert "can't write" in advice and "new project" not in advice

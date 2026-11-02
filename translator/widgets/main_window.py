@@ -856,6 +856,12 @@ class MainWindow(QMainWindow):
         """What the user can do, depending on why lines were not written."""
         return game_io.export_advice(partial)
 
+    @staticmethod
+    def _restore_cleanup_text() -> str:
+        """Notes about leftovers of a restore that succeeded (or "")."""
+        notes = game_io.take_cleanup_notes()
+        return ("\n\nNote: " + "\n".join(notes)) if notes else ""
+
     def _show_recovery_notes(self, project_dir: str | None):
         """Tell the user an interrupted Restore Originals of this game was
         put back (notes about other folders are dropped)."""
@@ -3406,6 +3412,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self, "Restore Complete",
                     self.handler.get_restore_message()
+                    + self._restore_cleanup_text()
                 )
             except FileNotFoundError as e:
                 QMessageBox.information(self, "No Backup Found", str(e))
@@ -3457,7 +3464,8 @@ class MainWindow(QMainWindow):
             if plugins_restored:
                 msg += "plugins.js has also been restored from backup.\n"
             msg += "The backups are still available."
-            QMessageBox.information(self, "Restore Complete", msg)
+            QMessageBox.information(self, "Restore Complete",
+                                    msg + self._restore_cleanup_text())
         except Exception as e:
             QMessageBox.critical(self, "Restore Failed", str(e))
 

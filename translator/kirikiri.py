@@ -536,6 +536,10 @@ class KirikiriParser:
 
         # Check for data/scenario/**/*.ks with KAG markers (recursive)
         scenario_dir = os.path.join(path, "data", "scenario")
+        if game_io.interrupted_swap(scenario_dir):
+            # Restore Originals killed mid-swap (read-only check; opening
+            # the game puts the folder back)
+            scenario_dir += ".rmt-old"
         if os.path.isdir(scenario_dir):
             from pathlib import Path
             for ks_path in Path(scenario_dir).rglob("*.ks"):

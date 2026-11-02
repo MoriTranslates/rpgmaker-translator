@@ -1475,7 +1475,11 @@ class WolfRPGParser:
             except OSError as exc:
                 skipped.append(f'CommonEvent.dat ({exc})')
 
-        # Apply to databases
+        # Apply to databases.  A database that can't be written is reported
+        # once, with its cause; its lines are not counted again below as
+        # "game text changed" (review M2).
+        unsupported: list[str] = []
+        reported_dbs: set[str] = set()
         for db in self.databases:
             file_name = f'Database/{db.name}'
             db_trans = {}
@@ -1489,6 +1493,12 @@ class WolfRPGParser:
             backup_dat = backup_dir / 'BasicData' / f'{db.name}.dat'
             live_dat = self.data_dir / 'BasicData' / f'{db.name}.dat'
             if not backup_dat.is_file():
+                if db_trans:
+                    reported_dbs.add(file_name)
+                    unsupported.append(
+                        f'{db.name}.dat (not in the backup -- added after '
+                        f'the first export?; {len(db_trans)} translations '
+                        f'not written)')
                 continue
             if not db_trans:
                 # Nothing translated (any more): put the original back.
@@ -1498,20 +1508,23 @@ class WolfRPGParser:
                 except OSError as exc:
                     skipped.append(f'{db.name}.dat ({exc})')
                 continue
+            io_error = False
             try:
                 reason = self._export_database(
                     db, backup_dat, live_dat, db_trans, db_orig)
-                if self._db_changed:
+                if self._db_changed and not reason:
                     changed[f'{db.name}.dat'] = self._db_changed
                 if not reason:
                     self._visited_keys.update(
                         f'{file_name}/{k}' for k in self._db_visited)
             except OSError as exc:
-                reason = str(exc)
+                reason, io_error = str(exc), True
             if reason:
                 log.warning('DB %s not exported: %s', db.name, reason)
-                skipped.append(f'{db.name}.dat ({reason}, '
-                               f'{len(db_trans)} translations)')
+                reported_dbs.add(file_name)
+                (skipped if io_error else unsupported).append(
+                    f'{db.name}.dat ({reason}, {len(db_trans)} '
+                    f'translations not written)')
             else:
                 written.append(live_dat)
         loaded_dbs = {f'Database/{db.name}/' for db in self.databases}
@@ -1544,14 +1557,15 @@ class WolfRPGParser:
             if key in self._visited_keys or trans == originals.get(key):
                 continue
             file = key_file.get(key, '')
-            if file in unreadable or (file.startswith('Database/')
-                                      and file not in loaded_dbs):
+            if file in unreadable or file in reported_dbs or (
+                    file.startswith('Database/') and file not in loaded_dbs):
                 continue
             label = (file.split('/', 1)[1] + '.mps' if file.startswith('MapData/')
                      else 'CommonEvent.dat' if file == 'CommonEvents'
                      else file.split('/')[-1] + '.dat')
             changed[label] = changed.get(label, 0) + 1
-        game_io.raise_export_problems(skipped, changed)
+        game_io.raise_export_problems(skipped, changed,
+                                      unsupported=unsupported)
 
     def _apply_commands(self, commands, key_prefix: str, translations: dict,
                         originals: dict, label: str,

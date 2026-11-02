@@ -385,6 +385,8 @@ def restore_tree(backup_dir: str, live_dir: str,
             for dirpath, _dirs, files in os.walk(live_dir):
                 rel = os.path.relpath(dirpath, live_dir)
                 for fn in files:
+                    if fn.endswith(".rmt-tmp"):
+                        continue        # our own crashed atomic write
                     dst = os.path.join(staging, rel, fn)
                     if not os.path.exists(dst):
                         os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -423,15 +425,39 @@ def restore_tree(backup_dir: str, live_dir: str,
     if had_live:
         # Done: the old (translated) folder goes.  Drop the marker first so
         # a partly failed delete can never be mistaken for a killed swap.
+        # The restore itself is complete here: a failure from now on is
+        # only an untidy leftover, reported as a note -- never raised as
+        # "restore failed" (review M1).
         try:
             os.remove(os.path.join(aside, SWAP_MARKER))
         except OSError as exc:
+            # Harmless: the live folder exists again, and a marker is only
+            # acted on when the live folder is missing.
             log.warning("Could not remove %s: %s", SWAP_MARKER, exc)
         shutil.rmtree(aside, ignore_errors=True)
         if os.path.exists(aside):
             # Partly deleted (locked file / antivirus): keep it out of the
             # way under a unique name instead of leaving a .rmt-old behind.
-            _set_aside(aside)
+            try:
+                where = _set_aside(aside)
+            except OSError as exc:
+                log.warning("Could not move leftover %s aside: %s", aside, exc)
+                where = aside
+            _cleanup_notes.append(
+                f"The original files were restored, but the old translated "
+                f"copy could not be fully deleted (a file is in use?). It "
+                f"was left in {where}; delete that folder when the game is "
+                f"closed.")
+
+
+_cleanup_notes: list[str] = []
+
+
+def take_cleanup_notes() -> list[str]:
+    """Notes about leftovers from restores that otherwise succeeded."""
+    notes = list(_cleanup_notes)
+    _cleanup_notes.clear()
+    return notes
 
 
 # ── Export manifest / game-update detection ──────────────────────────
