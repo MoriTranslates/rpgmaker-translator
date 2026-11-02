@@ -609,6 +609,7 @@ class RPGMakerMVParser:
                     game_io.refreshed_note(refreshed))
 
         errors = []
+        skipped_lines: dict[str, int] = {}
         for filename in sorted(candidates):
             source_path = os.path.join(source_dir, filename)
             if not os.path.isfile(source_path):
@@ -625,9 +626,11 @@ class RPGMakerMVParser:
                 with open(source_path, "r", encoding="utf-8-sig") as f:
                     data = json.load(f)
 
-                self._apply_translations_fast(
+                n_skipped = self._apply_translations_fast(
                     data, by_file.get(filename, []),
                     global_speakers=global_speakers)
+                if n_skipped:
+                    skipped_lines[filename] = n_skipped
 
                 # Switch locale so name input shows Latin alphabet instead of kana
                 if filename == "System.json" and isinstance(data, dict):
@@ -660,29 +663,17 @@ class RPGMakerMVParser:
             log.warning("Export failed for gamefont.css: %s", exc)
             errors.append(f"gamefont.css: {exc}")
 
-        game_io.raise_if_problems(
-            errors,
-            f"Export finished with errors — {len(errors)} file(s) could not "
-            f"be written (is the game running?):")
+        game_io.raise_export_problems(errors, skipped_lines)
 
     @staticmethod
     def _atomic_write_text(path: str, text: str):
-        """Write *text* to *path* via a temp file + os.replace.
+        """Write *text* to *path* via temp file + fsync + os.replace.
 
-        A crash or full disk mid-write leaves the previous file intact
-        instead of a truncated game file.
+        A crash, power cut or full disk mid-write leaves the previous file
+        intact instead of a truncated game file (shared game_io helper, so
+        the data is on disk before the rename, like every other engine).
         """
-        tmp_path = path + ".tmp"
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                f.write(text)
-            os.replace(tmp_path, path)
-        except BaseException:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-            raise
+        game_io.atomic_write_text(path, text)
 
     def export_patch_zip(self, project_dir: str, entries: list,
                          zip_path: str, game_title: str = "",
@@ -2378,6 +2369,11 @@ class RPGMakerMVParser:
         Args:
             global_speakers: Optional {original_name: translation} dict for
                 101 speaker names, built globally in save_project().
+
+        Returns:
+            How many dialogue / scroll / comment / choice translations could
+            not be placed because no command in their event page still holds
+            their original text (they are left untranslated, never guessed).
         """
         from collections import deque
 
@@ -2425,7 +2421,7 @@ class RPGMakerMVParser:
                 self._apply_translation(data, entry)
 
         if not scan_entries and not speaker_lookup:
-            return
+            return 0
 
         # ── Prepare each block entry: (orig_lines, trans_lines) ──
         # Each dialog / scroll / comment / choice entry is applied at the
@@ -2510,49 +2506,74 @@ class RPGMakerMVParser:
         def text_at(c):
             return str((c.get("parameters") or [""])[0])
 
-        def block_matches(cmd_list, i, ol, code, cont_code=None):
-            """Do the commands at i hold exactly the lines *ol*?"""
-            if i + len(ol) > len(cmd_list):
-                return False
-            if cont_code is None and not is_block_end(cmd_list, i + len(ol), code):
-                return False  # would leave trailing JP lines
-            for j, orig_line in enumerate(ol):
-                c = cmd_list[i + j]
-                expected = code if (j == 0 or cont_code is None) else cont_code
-                if not isinstance(c, dict) or c.get("code") != expected:
-                    return False
-                if text_at(c) != orig_line:
-                    return False
-            return True
+        def block_layout(cmd_list, i, ol, code, cont_code=None):
+            """Line count of each command at i, if they hold exactly *ol*.
 
-        def apply_block(cmd_list, i, ol, tl, code, comment=False):
+            Usually one line per command, but games translated or edited
+            by other tools keep several lines in ONE 401 command, joined by
+            "\n".  The parser joins commands the same way, so matching per
+            command keeps the match positional.  Returns None when the
+            commands at i don't hold *ol*.
+            """
+            counts: list[int] = []
+            pos, j = 0, i
+            while pos < len(ol):
+                if j >= len(cmd_list):
+                    return None
+                c = cmd_list[j]
+                expected = code if (j == i or cont_code is None) else cont_code
+                if not isinstance(c, dict) or c.get("code") != expected:
+                    return None
+                lines = text_at(c).split("\n")
+                if ol[pos:pos + len(lines)] != lines:
+                    return None
+                counts.append(len(lines))
+                pos += len(lines)
+                j += 1
+            if not counts:
+                return None
+            if cont_code is None and not is_block_end(cmd_list, j, code):
+                return None  # would leave trailing JP lines
+            return counts
+
+        def apply_block(cmd_list, i, counts, tl, code, comment=False):
             """Write *tl* over the matched block at i; return the advance."""
             done.add(id(cmd_list[i]))
-            if comment:
-                for j in range(len(ol)):
-                    cmd_list[i + j]["parameters"][0] = tl[j]
-                return len(ol)
-            if single_401:
+            n_cmds = len(counts)
+            if single_401 and not comment:
                 # Merge all lines into first 401
                 cmd_list[i]["parameters"][0] = "\n".join(tl)
                 # Remove remaining original 401s
-                del cmd_list[i + 1:i + len(ol)]
+                del cmd_list[i + 1:i + n_cmds]
                 return 1
+            if comment and all(n == 1 for n in counts):
+                for j in range(n_cmds):
+                    cmd_list[i + j]["parameters"][0] = tl[j]
+                return n_cmds
+            if any(n != 1 for n in counts):
+                # Keep the game's command layout: each command gets as many
+                # lines as it had; extra translated lines go to the last one.
+                pos = 0
+                for k, n in enumerate(counts):
+                    take = tl[pos:] if k == n_cmds - 1 else tl[pos:pos + n]
+                    cmd_list[i + k]["parameters"][0] = "\n".join(take)
+                    pos += n
+                return n_cmds
             # Replace text in existing 401 commands
-            for j in range(len(ol)):
+            for j in range(n_cmds):
                 cmd_list[i + j]["parameters"][0] = tl[j]
             # Insert extra 401 commands for overflow
-            extra = tl[len(ol):]
+            extra = tl[n_cmds:]
             if extra:
                 indent = cmd_list[i].get("indent", 0)
-                ins = i + len(ol)
+                ins = i + n_cmds
                 for k, et in enumerate(extra):
                     cmd_list.insert(ins + k, {
                         "code": code,
                         "indent": indent,
                         "parameters": [et],
                     })
-            return len(ol) + len(extra)
+            return n_cmds + len(extra)
 
         done: set[int] = set()   # id() of first command of applied blocks
 
@@ -2585,9 +2606,10 @@ class RPGMakerMVParser:
                     hit = positional.get((scope, kind, counters[kind]))
                     if hit is not None:
                         ol, tl = hit[1]
-                        if block_matches(cmd_list, i, ol, code):
+                        layout = block_layout(cmd_list, i, ol, code)
+                        if layout is not None:
                             del positional[(scope, kind, counters[kind])]
-                            i += apply_block(cmd_list, i, ol, tl, code)
+                            i += apply_block(cmd_list, i, layout, tl, code)
                             continue
                     i = end
                     continue
@@ -2598,11 +2620,12 @@ class RPGMakerMVParser:
                     hit = positional.get(key)
                     if hit is not None:
                         ol, tl = hit[1]
-                        if block_matches(cmd_list, i, ol, code_comment,
-                                         cont_code=code_comment_cont):
+                        layout = block_layout(cmd_list, i, ol, code_comment,
+                                              cont_code=code_comment_cont)
+                        if layout is not None:
                             del positional[key]
-                            i += apply_block(cmd_list, i, ol, tl, code_comment,
-                                             comment=True)
+                            i += apply_block(cmd_list, i, layout, tl,
+                                             code_comment, comment=True)
                             continue
                     i += 1
                     continue
@@ -2642,16 +2665,20 @@ class RPGMakerMVParser:
                     lookup = {code_dialog: dialog_lookup,
                               code_scroll: scroll_lookup,
                               code_comment: comment_lookup}[code]
-                    candidates = lookup.get(text_at(cmd)) if lookup else None
+                    # Keyed by the entry's first line (a command may hold
+                    # several lines, so compare its first line too).
+                    first_text = text_at(cmd).split("\n")[0]
+                    candidates = lookup.get(first_text) if lookup else None
                     if (candidates and code != code_comment
                             and not is_block_start(cmd_list, i, code)):
                         candidates = None  # mid-block — never a parsed block start
                     applied = False
                     for idx, (ol, tl) in enumerate(candidates or ()):
                         cont = code_comment_cont if code == code_comment else None
-                        if block_matches(cmd_list, i, ol, code, cont_code=cont):
-                            first_text = text_at(cmd)
-                            i += apply_block(cmd_list, i, ol, tl, code,
+                        layout = block_layout(cmd_list, i, ol, code,
+                                              cont_code=cont)
+                        if layout is not None:
+                            i += apply_block(cmd_list, i, layout, tl, code,
                                              comment=(code == code_comment))
                             del candidates[idx]
                             if not candidates:
@@ -2683,7 +2710,7 @@ class RPGMakerMVParser:
         for (scope, kind, *_rest), (field, payload) in positional.items():
             fallback.append((scope, field, payload))
         if not fallback:
-            return
+            return 0
         by_scope: dict = {}
         for scope, field, payload in fallback:
             lk = by_scope.setdefault(scope, {}).setdefault(field, {})
@@ -2700,6 +2727,22 @@ class RPGMakerMVParser:
                 fallback_pass(cmd_list, by_scope[scope])
             if global_lookups:
                 fallback_pass(cmd_list, global_lookups)
+
+        # Whatever is still queued found no place whose text matches its
+        # original (game updated, line edited, event removed): it was NOT
+        # written.  Count it so the export never claims to be complete.
+        # A "translation" equal to its original changes nothing -- not a loss.
+        unapplied = 0
+        for lookups in list(by_scope.values()) + [global_lookups or {}]:
+            for field, lk in lookups.items():
+                for orig, queue in lk.items():
+                    for item in queue:
+                        if field == "choice":
+                            unapplied += item != orig
+                        else:
+                            ol, tl = item
+                            unapplied += tl != ol
+        return unapplied
 
     @staticmethod
     def _apply_note_tag(item: dict, tag_name: str, value_idx: int,

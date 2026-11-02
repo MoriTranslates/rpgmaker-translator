@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 try:
     import rubymarshal.reader
-    import rubymarshal.writer
+    from translator import ruby_marshal
     from rubymarshal.classes import RubyString
     HAS_RUBYMARSHAL = True
 except ImportError:
@@ -708,7 +708,7 @@ def inject_plugins(scripts_path: str,
         # Serialise first, then replace atomically: a failed write
         # never leaves a truncated Scripts.rvdata2 (game won't boot).
         game_io.atomic_write_bytes(
-            scripts_path, rubymarshal.writer.writes(scripts))
+            scripts_path, ruby_marshal.writes(scripts))
         return injected
     except Exception as e:
         log.error("Failed to write Scripts.rvdata2: %s", e)
@@ -735,7 +735,7 @@ def remove_plugins(scripts_path: str) -> bool:
         # Serialise first, then replace atomically: a failed write
         # never leaves a truncated Scripts.rvdata2 (game won't boot).
         game_io.atomic_write_bytes(
-            scripts_path, rubymarshal.writer.writes(kept))
+            scripts_path, ruby_marshal.writes(kept))
         log.info("Removed %d injected plugins", len(scripts) - len(kept))
         return True
     except Exception as e:

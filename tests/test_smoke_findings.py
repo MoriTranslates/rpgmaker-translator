@@ -1,16 +1,17 @@
-"""Findings from the 1.1.1 smoke test on copies of real games.
+"""Regression tests for the findings of the 1.1.1 smoke test on real games.
 
-Tests for bugs that are fixed on this branch are plain tests.  Bugs that
-are only reported (not fixed here) are ``xfail(strict=True)`` repros: they
-document the bug, keep the suite green, and turn into a failure ("XPASS")
-the moment someone fixes the bug, so the marker gets removed with the fix.
+Binary writers are checked with ``ruby_marshal_check`` -- an independent
+Ruby Marshal decoder written from Ruby's rules, not with rubymarshal (the
+library under test) -- against bytes laid out the way Ruby writes them.
 """
 
 import json
 import os
+import zlib
 
 import pytest
 
+import ruby_marshal_check as rmc
 from translator.project_model import TranslationEntry
 
 
@@ -19,14 +20,15 @@ def _entry(eid, file, field, original, translation, status="translated"):
                             translation=translation, status=status)
 
 
-# ── VX Ace: Marshal object links (FIXED on this branch) ─────────────
+# ── VX Ace: Marshal object links (FIXED) ────────────────────────────
 #
 # Ruby's Marshal numbers every Float / String / Bignum / Regexp it writes,
 # and "@n" links count them.  rubymarshal 1.2.10's writer does not, so any
 # link written after a Float, or after a plain ``str`` (which is what a
 # translated string is), pointed at the wrong object.  On "Liz ~The Tower
-# and the Grimoire~" 209 of 414 data files came back with scrambled event
-# commands (EventCommand slots holding MoveRoutes, etc.).
+# and the Grimoire~" a plain read+write corrupted 247 of 413 data files and
+# an export-style rewrite broke links in 315 (EventCommand slots holding
+# MoveRoutes or Floats).
 
 # ["x", Foo.new, <link to Foo>]: objects are array=0, "x"=1, Foo=2
 _STR_THEN_LINK = b'\x04\x08[\x08I"\x06x\x06:\x06ETo:\x08Foo\x00@\x07'
@@ -109,44 +111,142 @@ def test_ace_export_keeps_shared_objects_in_a_map(tmp_path):
         e.translation, e.status = "Hello", "translated"
     parser.save_project(str(game), entries)
 
-    out = ruby_loads((game / "Data" / "Map001.rvdata2").read_bytes())
+    raw = (game / "Data" / "Map001.rvdata2").read_bytes()
+    out = ruby_loads(raw)
     lst = out.attributes["@events"][1].attributes["@pages"][0].attributes["@list"]
     assert lst[3].attributes["@parameters"][1] is lst[4].attributes["@parameters"][0]
     assert lst[4].attributes["@parameters"][0].ruby_class_name == "RPG::MoveRoute"
     assert str(lst[1].attributes["@parameters"][0]) == "Hello"
+    # Same check with the independent decoder (Ruby's own numbering)
+    m = rmc.load(raw)
+    ev = dict(m.body)["@events"].body[0][1]
+    cmds = dict(ev.body)["@pages"].body[0].body["@list"].body
+    shared_a = cmds[3].body["@parameters"].body[1]
+    shared_b = cmds[4].body["@parameters"].body[0]
+    assert shared_a is shared_b and shared_a.cls == "RPG::MoveRoute"
 
 
-# ── MV/MZ: one 401 command holding several lines (NOT fixed) ─────────
+# Scripts.rvdata2 laid out exactly as Ruby 1.9 writes it:
+# [[1, "Main" (UTF-8), <zlib blob>], [2, "Other", <zlib blob>]]
+_BLOB1, _BLOB2 = zlib.compress(b"p 1"), zlib.compress(b"p 2")
+_SCRIPTS = (b'\x04\x08[\x07'
+            + b'[\x08i\x06I"\x09Main\x06:\x06ET"' + bytes([len(_BLOB1) + 5]) + _BLOB1
+            + b'[\x08i\x07I"\x0aOther\x06;\x00T"' + bytes([len(_BLOB2) + 5]) + _BLOB2)
+
+
+def test_scripts_round_trip_is_byte_identical():
+    from translator import ruby_marshal
+    assert rmc.load(_SCRIPTS)          # the fixture itself is valid Marshal
+    assert ruby_marshal.writes(ruby_marshal.loads(_SCRIPTS)) == _SCRIPTS
+
+
+def test_plugin_injection_keeps_scripts_intact(tmp_path):
+    from translator import vxace_plugins
+    path = tmp_path / "Scripts.rvdata2"
+    path.write_bytes(_SCRIPTS)
+    assert vxace_plugins.inject_plugins(str(path), ["mouse"])
+    rows = rmc.plain(rmc.load(path.read_bytes()))[1]
+    names = [r[1][1][1] for r in rows]
+    plugin_at = [i for i, n in enumerate(names)
+                 if vxace_plugins._TAG.encode() in n]
+    assert plugin_at and plugin_at[-1] < names.index(b"Main")   # before Main
+    assert b"Other" in names
+    # original script bodies untouched
+    blobs = {r[1][1][1]: r[1][2][1] for r in rows}
+    assert blobs[b"Main"] == _BLOB1 and blobs[b"Other"] == _BLOB2
+    assert vxace_plugins.remove_plugins(str(path))
+    assert path.read_bytes() == _SCRIPTS
+
+
+def test_window_scaler_keeps_scripts_intact(tmp_path):
+    from translator import vxace_scaler
+    path = tmp_path / "Scripts.rvdata2"
+    path.write_bytes(_SCRIPTS)
+    assert vxace_scaler.inject_scaler(str(path))
+    rows = rmc.plain(rmc.load(path.read_bytes()))[1]
+    assert len(rows) == 3
+    assert vxace_scaler.remove_scaler(str(path))
+    assert path.read_bytes() == _SCRIPTS
+
+
+# ── MV/MZ: one 401 command holding several lines (FIXED) ─────────────
 #
 # Games previously machine-translated (e.g. "Utopia" 1.0: 1,705 of 5,053
 # Show Text commands) keep a whole message in ONE 401 command with "\n"
-# inside.  The parser extracts it as a multi-line entry; the exporter then
-# looks for that many consecutive 401 commands, finds one, and skips the
-# translation silently -- "Export Complete", text stays untranslated.
+# inside.  The parser extracts it as a multi-line entry; the exporter used
+# to look for that many consecutive 401 commands, find one, and skip the
+# translation silently -- "Export Complete", text stayed untranslated.
 
-@pytest.mark.xfail(strict=True, reason="smoke finding: multi-line 401 skipped silently")
-def test_mv_single_401_with_embedded_newline_is_exported(mv_game, mv_parser):
+def _set_page(mv_game, cmds):
     path = os.path.join(mv_game, "data", "Map001.json")
     with open(path, encoding="utf-8-sig") as f:
         data = json.load(f)
-    data["events"][1]["pages"][0]["list"] = [
-        {"code": 101, "indent": 0, "parameters": ["", 0, 0, 2, ""]},
-        {"code": 401, "indent": 0, "parameters": ["一行目\n二行目"]},
-        {"code": 0, "indent": 0, "parameters": []},
-    ]
+    data["events"][1]["pages"][0]["list"] = (
+        [{"code": 101, "indent": 0, "parameters": ["", 0, 0, 2, ""]}]
+        + [{"code": c, "indent": 0, "parameters": [t]} for c, t in cmds]
+        + [{"code": 0, "indent": 0, "parameters": []}])
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
-    entries = mv_parser.load_project(mv_game)
-    target = [e for e in entries if e.original == "一行目\n二行目"]
-    assert target
-    for e in entries:
-        e.translation, e.status = "[EN] " + e.original, "translated"
-    mv_parser.save_project(mv_game, entries)   # no error is reported...
-    with open(path, encoding="utf-8") as f:
+    return path
+
+
+def _page_texts(path):
+    with open(path, encoding="utf-8-sig") as f:
         live = json.load(f)
-    texts = [c["parameters"][0] for c in live["events"][1]["pages"][0]["list"]
-             if c["code"] == 401]
-    assert any(t.startswith("[EN]") for t in texts)   # ...but it never lands
+    return [c["parameters"][0] for c in live["events"][1]["pages"][0]["list"]
+            if c["code"] in (401, 405)]
+
+
+def _translate_where(entries, pred, fn):
+    hits = 0
+    for e in entries:
+        if pred(e):
+            e.translation, e.status = fn(e), "translated"
+            hits += 1
+    return hits
+
+
+def test_mv_single_401_with_embedded_newline_is_exported(mv_game, mv_parser):
+    path = _set_page(mv_game, [(401, "一行目\n二行目")])
+    entries = mv_parser.load_project(mv_game)
+    assert _translate_where(entries, lambda e: e.original == "一行目\n二行目",
+                            lambda e: "Line one\nLine two") == 1
+    mv_parser.save_project(mv_game, entries)
+    assert _page_texts(path) == ["Line one\nLine two"]   # same single command
+
+
+def test_mv_mixed_layout_keeps_each_commands_line_count(mv_game, mv_parser):
+    path = _set_page(mv_game, [(401, "あ\nい"), (401, "う")])
+    entries = mv_parser.load_project(mv_game)
+    assert _translate_where(entries, lambda e: e.original == "あ\nい\nう",
+                            lambda e: "A\nB\nC\nD") == 1
+    mv_parser.save_project(mv_game, entries)
+    # first command keeps 2 lines, the extra line goes to the last command
+    assert _page_texts(path) == ["A\nB", "C\nD"]
+
+
+def test_mv_multiline_command_noop_export_is_unchanged(mv_game, mv_parser):
+    path = _set_page(mv_game, [(401, "一行目\n二行目"), (401, "三行目")])
+    entries = mv_parser.load_project(mv_game)
+    assert _translate_where(entries, lambda e: "一行目" in e.original,
+                            lambda e: e.original) == 1
+    mv_parser.save_project(mv_game, entries)
+    assert _page_texts(path) == ["一行目\n二行目", "三行目"]
+
+
+def test_mv_changed_line_is_reported_and_keeps_game_text(mv_game, mv_parser):
+    """A line whose text changed under it (game update / hand edit) is
+    never overwritten, and the export never claims to be complete."""
+    from translator import game_io
+    path = _set_page(mv_game, [(401, "古い台詞")])
+    entries = mv_parser.load_project(mv_game)
+    assert _translate_where(entries, lambda e: e.original == "古い台詞",
+                            lambda e: "Old line") == 1
+    _set_page(mv_game, [(401, "新しい台詞")])        # changed before export
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert "Map001.json: 1 translated line(s) not written" in str(ei.value)
+    assert _page_texts(path) == ["新しい台詞"]
 
 
 # ── Restore killed between its two renames (NOT fixed) ───────────────

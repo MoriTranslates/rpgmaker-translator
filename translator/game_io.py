@@ -51,6 +51,31 @@ def raise_if_problems(problems: list[str], summary: str = ""):
         raise PartialExportError(problems, summary)
 
 
+def raise_export_problems(errors: list[str], skipped: dict[str, int]):
+    """Raise PartialExportError for unwritten files and/or skipped lines.
+
+    *skipped* maps a file to the number of translations that were NOT
+    written because the game text at their place no longer matched their
+    original (game update or hand edit): the game's new text was kept.
+    """
+    problems = list(errors) + [
+        f"{fn}: {n} translated line(s) not written — the game text there "
+        f"changed, so the game's new text was kept"
+        for fn, n in sorted(skipped.items())]
+    if not problems:
+        return
+    parts = []
+    if errors:
+        parts.append(f"{len(errors)} file(s) could not be written "
+                     f"(is the game running?)")
+    if skipped:
+        parts.append(f"{sum(skipped.values())} translated line(s) were not "
+                     f"written because the game's text changed — re-open "
+                     f"the project to pick up the new lines")
+    raise PartialExportError(problems,
+                             "Export incomplete — " + "; ".join(parts) + ":")
+
+
 # ── Atomic writes ────────────────────────────────────────────────────
 
 def _tmp_name(path: str) -> str:

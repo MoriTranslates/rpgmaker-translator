@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 try:
     import rubymarshal.reader
-    import rubymarshal.writer
+    from translator import ruby_marshal
     from rubymarshal.classes import RubyString
     HAS_RUBYMARSHAL = True
 except ImportError:
@@ -301,7 +301,7 @@ def inject_scaler(scripts_path: str, default_scale: float = 2.0) -> bool:
         # Serialise first, then replace atomically: a failed write
         # never leaves a truncated Scripts.rvdata2 (game won't boot).
         game_io.atomic_write_bytes(
-            scripts_path, rubymarshal.writer.writes(scripts))
+            scripts_path, ruby_marshal.writes(scripts))
         base_w, base_h = detect_resolution(scripts_path)
         log.info("Injected window scaler: %dx%d default %sx, "
                  "PgUp/PgDn=scale, F3=borderless cycle",
@@ -330,7 +330,7 @@ def remove_scaler(scripts_path: str) -> bool:
         # Serialise first, then replace atomically: a failed write
         # never leaves a truncated Scripts.rvdata2 (game won't boot).
         game_io.atomic_write_bytes(
-            scripts_path, rubymarshal.writer.writes(scripts))
+            scripts_path, ruby_marshal.writes(scripts))
         return True
     except Exception:
         return False

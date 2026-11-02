@@ -379,18 +379,17 @@ def test_mv_parser_restore_failure_leaves_data_intact(mv_game, mv_parser, monkey
 
 def test_vxace_remove_plugins_write_failure_keeps_scripts(tmp_path, monkeypatch):
     """A failed serialise used to leave a truncated Scripts.rvdata2."""
-    import rubymarshal.writer
     from rubymarshal.classes import RubyString
-    from translator import vxace_plugins
+    from translator import ruby_marshal, vxace_plugins
     scripts = [[1, RubyString("Main"), b"x"],
                [2, RubyString("Plugin " + vxace_plugins._TAG), b"y"]]
     path = tmp_path / "Scripts.rvdata2"
-    path.write_bytes(rubymarshal.writer.writes(scripts))
+    path.write_bytes(ruby_marshal.writes(scripts))
     before = path.read_bytes()
 
     def boom(_obj):
         raise ValueError("cannot serialise")
-    monkeypatch.setattr(rubymarshal.writer, "writes", boom)
+    monkeypatch.setattr(ruby_marshal, "writes", boom)
     assert vxace_plugins.remove_plugins(str(path)) is False
     assert path.read_bytes() == before
 
