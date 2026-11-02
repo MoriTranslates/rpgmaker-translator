@@ -636,6 +636,11 @@ QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
 QScrollArea {{
     border: none;
 }}
+QLabel#emptyTitle {{
+    font-size: 14pt;
+    font-weight: 600;
+    color: {text};
+}}
 QWidget#pipelineBar {{
     background-color: {panel};
     border-bottom: 1px solid {border};

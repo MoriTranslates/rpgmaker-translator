@@ -22,6 +22,7 @@ from ..image_translator import (
 )
 from . import theme
 from .background_task import run_in_thread
+from .empty_state import EmptyStack, EmptyState
 
 log = logging.getLogger(__name__)
 
@@ -370,7 +371,13 @@ class ImagePanel(QWidget):
         hsplit.addWidget(right)
         hsplit.setSizes([180, 1020])
 
-        layout.addWidget(hsplit)
+        self._empty = EmptyState(
+            "image", "Open a game to translate its images",
+            "Title screens, menus and other pictures with Japanese text "
+            "show up here once a game is open.")
+        self._stack = EmptyStack(hsplit, self._empty)
+        self._stack.set_empty(True)
+        layout.addWidget(self._stack)
 
     # ── Project setup ─────────────────────────────────────────────
 
@@ -384,7 +391,14 @@ class ImagePanel(QWidget):
 
         if not self._img_dir:
             self.stats_label.setText("No img/ folder found")
+            self._empty.set_text(
+                "No images to translate in this game",
+                "This game has no img/ folder, so there are no title or "
+                "menu pictures to translate. All of its text is in the "
+                "Text Translation tab.")
+            self._stack.set_empty(True)
             return
+        self._stack.set_empty(False)
 
         self._out_base = os.path.join(os.path.dirname(self._img_dir), "img_translated")
 

@@ -11,6 +11,7 @@ from PyQt6.QtGui import QColor
 
 from ..translation_engine import _event_key
 from . import theme
+from .empty_state import EmptyStack, EmptyState
 
 
 # Status icons and theme color tokens
@@ -152,7 +153,13 @@ class QueuePanel(QWidget):
         self._tree.setAlternatingRowColors(True)
         self._tree.setRootIsDecorated(True)
         self._tree.setUniformRowHeights(True)
-        layout.addWidget(self._tree)
+        self._empty = EmptyState(
+            "list-ordered", "Nothing is translating right now",
+            "Press Next on the bar above (or pick a step) and every line "
+            "shows up here as it is translated, grouped by scene.")
+        self._stack = EmptyStack(self._tree, self._empty)
+        self._stack.set_empty(True)
+        layout.addWidget(self._stack, 1)
 
         # Stats row
         stats = QHBoxLayout()
@@ -169,6 +176,7 @@ class QueuePanel(QWidget):
         """Populate the queue grouped by event (with DB grouped by JSON file)."""
         self.clear()
         self._entries = list(entries)
+        self._stack.set_empty(not self._entries)
         self._start_time = time.time()
         self._done_count = 0
 
@@ -353,6 +361,7 @@ class QueuePanel(QWidget):
         self._summary_label.setText(self._IDLE_TEXT)
         self._eta_label.setText("")
         self._speed_label.setText("")
+        self._stack.set_empty(True)
 
     # ── Internal ────────────────────────────────────────────────────
 

@@ -14,6 +14,7 @@ from PyQt6.QtGui import QColor, QFont
 from ..utils import event_prefix, extract_event_context
 from .spell_checker import SpellHighlighter, build_spell_menu_actions
 from . import theme
+from .empty_state import EmptyStack, EmptyState
 from .status_delegate import STATUS_ROLE, StatusDelegate
 
 # Files that contain events (not database flat entries)
@@ -163,7 +164,13 @@ class EventViewerPanel(QWidget):
         self._hint_label.setStyleSheet(theme.hint_css())
         detail_layout.addWidget(self._hint_label)
 
-        splitter.addWidget(detail_widget)
+        self._empty = EmptyState(
+            "messages-square", "Pick a scene on the left",
+            "Each event's dialogue appears here in order, with who says "
+            "what. Use ↑/↓ to move, Space to mark a line reviewed.")
+        self._detail_stack = EmptyStack(detail_widget, self._empty)
+        self._detail_stack.set_empty(True)
+        splitter.addWidget(self._detail_stack)
         splitter.setSizes([300, 900])
         layout.addWidget(splitter)
 
@@ -217,6 +224,7 @@ class EventViewerPanel(QWidget):
         self._detail_table.setRowCount(0)
         self._event_label.setText("Select an event from the tree")
         self._review_btn.setEnabled(False)
+        self._detail_stack.set_empty(True)
 
     def update_entry(self, entry_id: str, translation: str):
         """Update a single entry's display after batch translation."""
@@ -465,6 +473,7 @@ class EventViewerPanel(QWidget):
 
         self._current_prefix = prefix
         self._current_entries = entries
+        self._detail_stack.set_empty(False)
 
         # Update header
         display = extract_event_context(entries[0].id)
