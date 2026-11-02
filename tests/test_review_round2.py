@@ -593,3 +593,58 @@ def test_rm2k_removed_message_is_reported(tmp_path):
     with pytest.raises(game_io.PartialExportError) as ei:
         p.save_project(str(tmp_path), entries)
     assert "Map0001.lmu: 1 translated line(s) not written" in str(ei.value)
+
+
+# ── MZ plugin identifiers (fix 8) ────────────────────────────────────
+
+_PLUGIN_HEADER = """/*:
+ * @param 形状
+ * @type select
+ * @option 四角い形
+ * @option 斜めな形
+ *
+ * @param 表示名
+ * @type combo
+ * @option 勇者
+ * @option 魔王
+ *
+ * @param 共有名
+ * @type select
+ * @option 選択肢
+ */
+/*~struct~other:
+ * @param 共有名
+ * @desc a free-text field that shares the name
+ */
+"""
+
+
+def _plugin_game(mv_game, params):
+    os.makedirs(os.path.join(mv_game, "js", "plugins"), exist_ok=True)
+    with open(os.path.join(mv_game, "js", "plugins", "TestP.js"), "w",
+              encoding="utf-8") as f:
+        f.write(_PLUGIN_HEADER)
+    plugins = [{"name": "TestP", "status": True, "description": "",
+                "parameters": params}]
+    with open(os.path.join(mv_game, "js", "plugins.js"), "w", encoding="utf-8") as f:
+        f.write("var $plugins =\n" + json.dumps(plugins, ensure_ascii=False) + ";\n")
+
+
+def test_plugin_combo_value_stays_translatable(mv_game, mv_parser):
+    _plugin_game(mv_game, {"形状": "斜めな形", "表示名": "勇者", "共有名": "選択肢"})
+    ids = {e.id for e in mv_parser.load_project(mv_game) if e.file == "plugins.js"}
+    assert "plugins.js/TestP/形状" not in ids          # select: identifier
+    assert "plugins.js/TestP/表示名" in ids            # combo: free text
+    assert "plugins.js/TestP/共有名" in ids            # also a plain string
+
+
+def test_plugin_identifier_in_old_project_is_not_exported(mv_game, mv_parser):
+    """A project made before the filter still holds the translated select
+    value: export must leave the plugin's value alone."""
+    _plugin_game(mv_game, {"形状": "斜めな形"})
+    old = [_entry("plugins.js/TestP/形状", "plugins.js", "TestP/形状",
+                  "斜めな形", "Diagonal")]
+    mv_parser.save_project(mv_game, old)
+    plugins = mv_parser._load_plugins_js(os.path.join(mv_game, "js", "plugins.js"))
+    assert plugins[0]["parameters"]["形状"] == "斜めな形"
+    assert mv_parser.plugin_identifiers_skipped == 1

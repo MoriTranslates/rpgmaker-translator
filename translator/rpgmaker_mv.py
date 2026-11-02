@@ -815,6 +815,10 @@ class RPGMakerMVParser:
                         "plugins.", "plugins_original."),
                 )
                 ps = plugins_backup if os.path.exists(plugins_backup) else plugins_path
+                # plugin headers (identifier filter) sit next to plugins.js
+                self._plugin_dir = os.path.join(
+                    os.path.dirname(plugins_path), "plugins")
+                self._plugin_meta_cache = {}
                 try:
                     plugins = self._load_plugins_js(ps)
                     self._apply_plugin_translations(plugins, plugin_entries)
@@ -3481,21 +3485,23 @@ class RPGMakerMVParser:
     _PLUGIN_DOC_RE = re.compile(
         r'/\*(?::\w*|~struct~[^:\s*]+:\w*)(.*?)\*/', re.S)
     _PLUGIN_TAG_RE = re.compile(
-        r'^\s*\*?\s*@(param|arg|command|option|value)\s+(.*?)\s*$')
+        r'^\s*\*?\s*@(param|arg|command|option|value|type)\s+(.*?)\s*$')
 
     def _plugin_meta(self, plugin_name: str) -> dict:
-        """``{param name: set of fixed values}`` from the plugin's header.
+        """``{param name: {"types": set, "options": set}}`` from the header.
 
-        Collects every ``@option`` / ``@value`` of each ``@param`` in the
-        plugin's doc blocks (all languages and ``~struct~`` blocks).  A
-        missing or unreadable plugin file gives ``{}`` (no extra filtering).
+        Collects the ``@type`` and every ``@option`` / ``@value`` of each
+        ``@param`` in the plugin's doc blocks (all languages and
+        ``~struct~`` blocks; a name used in several places gets all their
+        types).  A missing or unreadable plugin file gives ``{}`` (no extra
+        filtering).
         """
         cache = getattr(self, "_plugin_meta_cache", None)
         if cache is None:
             cache = self._plugin_meta_cache = {}
         if plugin_name in cache:
             return cache[plugin_name]
-        meta: dict[str, set] = {}
+        meta: dict[str, dict] = {}
         plugin_dir = getattr(self, "_plugin_dir", "")
         path = os.path.join(plugin_dir, plugin_name + ".js") if plugin_dir else ""
         try:
@@ -3512,10 +3518,22 @@ class RPGMakerMVParser:
                 tag, val = m.groups()
                 if tag == "param":
                     current = val
+                    info = meta.setdefault(
+                        val, {"types": set(), "options": set(), "typed": []})
+                    info["typed"].append(False)
                 elif tag in ("arg", "command"):
                     current = None      # plugin-command args are not params
-                elif tag in ("option", "value") and current and val:
-                    meta.setdefault(current, set()).add(val)
+                elif current is None:
+                    continue
+                elif tag == "type":
+                    meta[current]["types"].add(val.strip().lower())
+                    meta[current]["typed"][-1] = True
+                elif tag in ("option", "value") and val:
+                    meta[current]["options"].add(val)
+        for info in meta.values():
+            # a definition without @type is a plain string
+            if not all(info.pop("typed")):
+                info["types"].add("string")
         cache[plugin_name] = meta
         return meta
 
@@ -3523,16 +3541,21 @@ class RPGMakerMVParser:
                               value: str) -> bool:
         """True for plugin values the plugin compares against, not text.
 
-        * one of the parameter's declared ``@option`` / ``@value`` choices
-          (``@type select`` / ``combo``): translating it breaks the match
-          (e.g. Keke_StylishGauge ``ゲージの形状`` = ``斜めな形``);
+        * one of the parameter's ``@option`` / ``@value`` choices when the
+          parameter is ``@type select`` everywhere it is declared: the
+          plugin compares the value, so translating it breaks the match
+          (e.g. Keke_StylishGauge ``ゲージの形状`` = ``斜めな形``).  A
+          ``@type combo`` value is free text (the options are only
+          suggestions) and stays translatable, as does any name that is
+          also declared as a plain string somewhere;
         * a font name/key (e.g. Keke_CommonData ``フォント名``) that other
           parameters and the plugin's code look the font up by.
         """
         if self._PLUGIN_FONT_KEY_RE.match(key.strip()):
             return True
-        choices = self._plugin_meta(plugin_name).get(key)
-        return bool(choices) and value.strip() in choices
+        info = self._plugin_meta(plugin_name).get(key)
+        return (bool(info) and info["types"] == {"select"}
+                and value.strip() in info["options"])
 
     def _is_translatable_plugin_value(self, value: str, key: str,
                                        entry_id: str = "") -> bool:
@@ -3593,6 +3616,9 @@ class RPGMakerMVParser:
 
         # Always read from backup (original Japanese) so re-exports work
         source_path = backup_path if os.path.exists(backup_path) else plugins_path
+        # plugin headers (for the identifier filter) sit next to plugins.js
+        self._plugin_dir = os.path.join(os.path.dirname(plugins_path), "plugins")
+        self._plugin_meta_cache = {}
         try:
             plugins = self._load_plugins_js(source_path)
         except (json.JSONDecodeError, OSError) as exc:
@@ -3615,6 +3641,7 @@ class RPGMakerMVParser:
             if isinstance(p, dict) and p.get("name"):
                 plugin_by_name[p["name"]] = p
 
+        self.plugin_identifiers_skipped = 0
         for entry in plugin_entries:
             # Parse ID: plugins.js/PluginName/ParamKey[/nested/path...]
             parts = entry.id.split("/")
@@ -3623,6 +3650,13 @@ class RPGMakerMVParser:
             plugin_name = parts[1]
             param_key = parts[2]
             nested_path = parts[3:]  # may be empty
+            # Projects made before the identifier filter may still hold a
+            # translation of a fixed choice / font key: never write it.
+            leaf = next((seg for seg in reversed(parts[2:])
+                         if not seg.startswith("[")), param_key)
+            if self._is_plugin_identifier(plugin_name, leaf, entry.original):
+                self.plugin_identifiers_skipped += 1
+                continue
 
             plugin = plugin_by_name.get(plugin_name)
             if not plugin:
