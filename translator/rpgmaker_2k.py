@@ -286,14 +286,32 @@ class RPGMaker2KParser:
 
     # ── Load project ──────────────────────────────────────────────────
 
+    def load_originals(self, project_dir: str,
+                       context_size: int = 3) -> list[TranslationEntry]:
+        """Parse the game's ORIGINAL text, for merging a game update.
+
+        Reads each file's ``_original`` backup when an export made one
+        (the live file holds English then; the export refreshes the backup
+        after a game update), else the live file.
+        """
+        return self.load_project(project_dir, context_size, from_backup=True)
+
     def load_project(self, project_dir: str,
-                     context_size: int = 3) -> list[TranslationEntry]:
+                     context_size: int = 3,
+                     from_backup: bool = False) -> list[TranslationEntry]:
         """Extract all translatable strings from an RM2K/2K3 project."""
         entries: list[TranslationEntry] = []
+        self.load_warnings: list[str] = []
+
+        def src(path):
+            if from_backup and os.path.isfile(_backup_path(path)):
+                return _backup_path(path)
+            return path
 
         ldb_path = os.path.join(project_dir, "RPG_RT.ldb")
         if not os.path.isfile(ldb_path):
             raise FileNotFoundError(f"RPG_RT.ldb not found in {project_dir}")
+        ldb_path = src(ldb_path)
 
         # Parse database
         with open(ldb_path, 'rb') as f:
@@ -319,11 +337,12 @@ class RPGMaker2KParser:
         for fname in sorted(os.listdir(project_dir)):
             if not fname.lower().endswith('.lmu') or _is_backup_name(fname):
                 continue
-            fpath = os.path.join(project_dir, fname)
+            fpath = src(os.path.join(project_dir, fname))
             try:
                 entries.extend(self._extract_map(fpath, fname, context_size))
             except Exception as e:
                 log.error("Failed to parse %s: %s", fname, e)
+                self.load_warnings.append(f"{fname}: {e}")
 
         log.info("Loaded %d entries from RM2K project", len(entries))
         return entries
@@ -590,7 +609,7 @@ class RPGMaker2KParser:
               _backup_path(os.path.join(project_dir, f))) for f in lcf_files],
             manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
 
         # Create backups (atomic: an interrupted copy never becomes the
         # "original" every later export reads from)
@@ -601,24 +620,33 @@ class RPGMaker2KParser:
         # every file is then reset from its backup, so reverting all
         # translations really removes the English from the game.
         trans_map = {}
+        self._orig_map = {}
         for e in entries:
             if e.translation and e.status in ("translated", "reviewed"):
                 trans_map[e.id] = e.translation
+                self._orig_map[e.id] = e.original
+        self._trans_map = trans_map
 
         problems: list[str] = []
+        # file -> translations not written because the game text changed
+        changed_lines: dict[str, int] = {}
         # Export database
         source_ldb = ldb_backup if os.path.isfile(ldb_backup) else ldb_path
+        self._changed = 0
         try:
             self._export_ldb(source_ldb, ldb_path, trans_map)
             manifest.record("RPG_RT.ldb", ldb_path)
         except Exception as e:
             log.error("Failed to export RPG_RT.ldb: %s", e)
             problems.append(f"RPG_RT.ldb ({e})")
+        if self._changed:
+            changed_lines["RPG_RT.ldb"] = self._changed
 
         # Export maps
         for fname in map_names:
             fpath = os.path.join(project_dir, fname)
             backup = _backup_path(fpath)
+            self._changed = 0
             try:
                 game_io.backup_file_once(fpath, backup)
                 source = backup if os.path.isfile(backup) else fpath
@@ -627,8 +655,27 @@ class RPGMaker2KParser:
             except Exception as e:
                 log.error("Failed to export %s: %s", fname, e)
                 problems.append(f"{fname} ({e})")
+            if self._changed:
+                changed_lines[fname] = self._changed
         manifest.finish()
-        game_io.raise_if_problems(problems)
+        game_io.raise_export_problems(problems, changed_lines)
+
+    def _orig_ok(self, entry_id: str, current: str) -> bool:
+        """Does the game still hold *entry_id*'s original at its position?
+
+        Translations are addressed by position (database index, command
+        number).  After a game update the text there may differ: then the
+        game's new text is kept and the skip counted (``self._changed``)
+        so the export is reported as incomplete.  Without a recorded
+        original (direct callers) nothing is checked.
+        """
+        orig = getattr(self, "_orig_map", {}).get(entry_id)
+        if orig is None or current == orig:
+            return True
+        # A "translation" equal to its original changes nothing: not a loss
+        if getattr(self, "_trans_map", {}).get(entry_id) != orig:
+            self._changed = getattr(self, "_changed", 0) + 1
+        return False
 
     def _export_ldb(self, source_path: str, target_path: str,
                     trans_map: dict):
@@ -650,7 +697,8 @@ class RPGMaker2KParser:
             for ei, (idx, elem) in enumerate(elements):
                 for field_id, field_name in fields_def:
                     entry_id = f"RPG_RT.ldb/{db_name}/{idx}/{field_name}"
-                    if entry_id in trans_map:
+                    if entry_id in trans_map and self._orig_ok(
+                            entry_id, _decode_str(elem.get(field_id, b''))):
                         elem[field_id] = _encode_str(trans_map[entry_id])
                         elem_changed = True
                         elements[ei] = (idx, elem)
@@ -665,7 +713,8 @@ class RPGMaker2KParser:
             vocab_changed = False
             for fid in list(vocab_chunks):
                 entry_id = f"RPG_RT.ldb/Vocabulary/0x{fid:02X}"
-                if entry_id in trans_map:
+                if entry_id in trans_map and self._orig_ok(
+                        entry_id, _decode_str(vocab_chunks[fid])):
                     vocab_chunks[fid] = _encode_str(trans_map[entry_id])
                     vocab_changed = True
             if vocab_changed:
@@ -776,7 +825,10 @@ class RPGMaker2KParser:
                 msg_cmds = commands[i:j]
 
                 entry_id = f"{prefix}/dialog_{dialogue_index}"
-                if entry_id in trans_map:
+                # Same text the parser extracts: non-blank lines joined
+                block_text = "\n".join(
+                    c.string for c in msg_cmds if c.string.strip())
+                if entry_id in trans_map and self._orig_ok(entry_id, block_text):
                     translation = trans_map[entry_id]
                     trans_lines = translation.split("\n")
                     while len(trans_lines) > 1 and not trans_lines[-1].strip():
@@ -824,7 +876,8 @@ class RPGMaker2KParser:
                         # Load only numbers options with non-blank text
                         if commands[j].string.strip():
                             entry_id = f"{prefix}/choice_{dialogue_index}_{choice_ci}"
-                            if entry_id in trans_map:
+                            if entry_id in trans_map and self._orig_ok(
+                                    entry_id, commands[j].string):
                                 commands[j].string = trans_map[entry_id]
                                 commands[j].string_raw = _encode_str(trans_map[entry_id])
                                 changed = True
@@ -838,7 +891,7 @@ class RPGMaker2KParser:
 
             elif cmd.code == CODE_CHANGE_HERO_NAME:
                 entry_id = f"{prefix}/hero_name_{dialogue_index}"
-                if entry_id in trans_map:
+                if entry_id in trans_map and self._orig_ok(entry_id, cmd.string):
                     cmd.string = trans_map[entry_id]
                     cmd.string_raw = _encode_str(trans_map[entry_id])
                     changed = True
@@ -846,7 +899,7 @@ class RPGMaker2KParser:
 
             elif cmd.code == CODE_CHANGE_HERO_TITLE:
                 entry_id = f"{prefix}/hero_title_{dialogue_index}"
-                if entry_id in trans_map:
+                if entry_id in trans_map and self._orig_ok(entry_id, cmd.string):
                     cmd.string = trans_map[entry_id]
                     cmd.string_raw = _encode_str(trans_map[entry_id])
                     changed = True

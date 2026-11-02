@@ -978,3 +978,70 @@ def test_ace_blank_line_in_message_stays_in_place(tmp_path):
     texts = [str(c.attributes["@parameters"][0]) for c in _ace_cmds(live)
              if c.attributes["@code"] == 401]
     assert texts == ["", "Required corruption: 0"]
+
+
+# ── Every other engine: no translation over changed game text (FIXED) ─
+#
+# RPG Maker 2000/2003, Kirikiri, TyranoScript, SRPG Studio, CSV games and
+# Crowd also wrote translations by position without checking the
+# original, so after a game update the old translation replaced the new
+# line.  Each now keeps the changed line and reports it.
+
+def _rm2k_map(text, choice):
+    from translator import rpgmaker_2k as rm
+
+    def cmd(code, s=""):
+        return rm.EventCommand(code, 0, s, rm._encode_str(s), [])
+    cmds = [cmd(rm.CODE_SHOW_MESSAGE, text), cmd(rm.CODE_SHOW_CHOICE),
+            cmd(rm.CODE_SHOW_CHOICE_OPT, choice),
+            cmd(rm.CODE_SHOW_CHOICE_OPT, "いいえ"), cmd(0)]
+    page = {rm.PAGE_COMMANDS: rm._write_commands(cmds)}
+    ev = {rm.EVENT_NAME: rm._encode_str("EV"),
+          rm.EVENT_PAGES: rm._write_array([(1, page)])}
+    return rm._write_header("LcfMapUnit") + rm._write_chunks(
+        {rm.MAP_EVENTS: rm._write_array([(1, ev)])}, terminate=False)
+
+
+def test_rm2k_export_skips_lines_whose_original_changed(tmp_path):
+    from translator import game_io
+    from translator import rpgmaker_2k as rm
+    (tmp_path / "RPG_RT.ldb").write_bytes(rm._write_header("LcfDataBase"))
+    (tmp_path / "RPG_RT.lmt").write_bytes(b"")
+    live = tmp_path / "Map0001.lmu"
+    live.write_bytes(_rm2k_map("古い台詞", "はい"))
+    p = rm.RPGMaker2KParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN " + e.original, "reviewed"
+    p.save_project(str(tmp_path), entries)
+    live.write_bytes(_rm2k_map("新しい台詞", "やめる"))      # game update
+    (tmp_path / "Map0001_original.lmu").write_bytes(live.read_bytes())
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(tmp_path), entries)
+    assert "Map0001.lmu: 2 translated line(s) not written" in str(ei.value)
+    got = {e.id: e.original for e in rm.RPGMaker2KParser().load_project(str(tmp_path))}
+    assert got["Map0001.lmu/Ev1(EV)/p1/dialog_0"] == "新しい台詞"
+    assert got["Map0001.lmu/Ev1(EV)/p1/choice_1_0"] == "やめる"
+    assert got["Map0001.lmu/Ev1(EV)/p1/choice_1_1"] == "EN いいえ"  # unchanged: written
+
+
+def test_rm2k_resume_merge_reads_original_backups(tmp_path):
+    from translator import rpgmaker_2k as rm
+    from translator.project_model import TranslationProject
+    (tmp_path / "RPG_RT.ldb").write_bytes(rm._write_header("LcfDataBase"))
+    (tmp_path / "RPG_RT.lmt").write_bytes(b"")
+    live = tmp_path / "Map0001.lmu"
+    live.write_bytes(_rm2k_map("古い台詞", "はい"))
+    p = rm.RPGMaker2KParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN " + e.original, "reviewed"
+    p.save_project(str(tmp_path), entries)              # live is English now
+    (tmp_path / "Map0001_original.lmu").write_bytes(     # refreshed backup
+        _rm2k_map("新しい台詞", "はい"))
+    proj = TranslationProject(project_path=str(tmp_path), entries=entries)
+    stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
+    assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
+    by = {e.id: e for e in proj.entries}
+    assert by["Map0001.lmu/Ev1(EV)/p1/dialog_0"].status == "untranslated"
+    assert by["Map0001.lmu/Ev1(EV)/p1/choice_1_0"].status == "reviewed"
