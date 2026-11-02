@@ -1105,3 +1105,69 @@ def test_kirikiri_resume_merge_reads_backup(tmp_path):
     assert any(e.original.startswith("新しい台詞") and e.status == "untranslated"
                for e in proj.entries)
     assert sum(e.status == "reviewed" for e in proj.entries) == 2
+
+
+def _tyrano_game(tmp_path, ks_text, lang_value="進む"):
+    ks = tmp_path / "data" / "scenario" / "first.ks"
+    ks.parent.mkdir(parents=True, exist_ok=True)
+    ks.write_text(ks_text, encoding="utf-8")
+    lang = tmp_path / "tyrano" / "lang.js"
+    lang.parent.mkdir(parents=True, exist_ok=True)
+    lang.write_text('var tyrano_lang = {"word":{"go":"%s"}};\n' % lang_value,
+                    encoding="utf-8")
+    return ks, lang
+
+
+def test_tyrano_export_skips_line_whose_original_changed(tmp_path):
+    from translator import game_io
+    from translator.tyranoscript import TyranoScriptParser
+    ks, _lang = _tyrano_game(tmp_path, "*start\n古い台詞です[p]\n同じ台詞です[p]\n")
+    p = TyranoScriptParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "reviewed"
+    p.save_project(str(tmp_path), entries)
+    update = "*start\n新しい台詞です[p]\n同じ台詞です[p]\n"
+    ks.write_text(update, encoding="utf-8")
+    (tmp_path / "data" / "scenario_original" / "first.ks").write_text(
+        update, encoding="utf-8")
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(tmp_path), entries)
+    assert "first.ks: 1 translated line(s) not written" in str(ei.value)
+    text = ks.read_text(encoding="utf-8")
+    assert "新しい台詞です" in text and "EN first.ks/line_3" in text
+
+
+def test_tyrano_lang_js_value_changed_is_kept(tmp_path):
+    from translator import game_io
+    from translator.tyranoscript import TyranoScriptParser
+    _ks, lang = _tyrano_game(tmp_path, "*start\n台詞です[p]\n")
+    p = TyranoScriptParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN", "translated"
+    p.save_project(str(tmp_path), entries)
+    # the original lang.js (its .bak) now holds a different value
+    (lang.parent / "lang.js.bak").write_text(
+        'var tyrano_lang = {"word":{"go":"次へ"}};\n', encoding="utf-8")
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(tmp_path), entries)
+    assert "tyrano/lang.js: 1 translated line(s) not written" in str(ei.value)
+    assert '"go":"次へ"' in lang.read_text(encoding="utf-8")
+
+
+def test_tyrano_resume_merge_reads_backup(tmp_path):
+    from translator.tyranoscript import TyranoScriptParser
+    from translator.project_model import TranslationProject
+    _tyrano_game(tmp_path, "*start\n一つ目[p]\n二つ目[p]\n三つ目[p]\n")
+    p = TyranoScriptParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN", "reviewed"
+    p.save_project(str(tmp_path), entries)
+    (tmp_path / "data" / "scenario_original" / "first.ks").write_text(
+        "*start\n新しい一つ目[p]\n二つ目[p]\n三つ目[p]\n", encoding="utf-8")
+    proj = TranslationProject(project_path=str(tmp_path), entries=entries)
+    stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
+    assert stats["status"] == "merged" and stats["changed"] == 1 and stats["new"] == 0
+    assert sum(e.status == "reviewed" for e in proj.entries) == len(proj.entries) - 1
