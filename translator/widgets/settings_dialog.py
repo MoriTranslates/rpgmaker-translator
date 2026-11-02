@@ -229,10 +229,46 @@ class SettingsDialog(QDialog):
     def _build_options_tab(self):
         tab = QWidget()
         vbox = QVBoxLayout(tab)
+        vbox.setSpacing(6)
+
+        def group(title):
+            box = QGroupBox(title)
+            form = QFormLayout(box)
+            form.setHorizontalSpacing(14)
+            form.setVerticalSpacing(4)
+            form.setFieldGrowthPolicy(
+                QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            vbox.addWidget(box)
+            return form
+
+        def hint(text):
+            label = QLabel(text)
+            label.setObjectName("hint")
+            label.setWordWrap(True)
+            return label
+
+        def row(form, label, widget, help_text):
+            """A labelled control with a muted one-line explanation under it."""
+            widget.setMinimumWidth(170)
+            widget.setMaximumWidth(240)
+            form.addRow(label, widget)
+            form.addRow("", hint(help_text))
+
+        def check(form, widget, help_text):
+            """A checkbox with its explanation indented under the text."""
+            form.addRow(widget)
+            label = hint(help_text)
+            label.setContentsMargins(26, 0, 0, 4)
+            form.addRow(label)
+
+        # ── Appearance ──
+        look = group("Appearance")
+        self.dark_mode_check = QCheckBox("Dark theme")
+        check(look, self.dark_mode_check,
+              "Ink-night colors. Turn off for the light parchment theme.")
 
         # ── Translation group ──
-        trans_group = QGroupBox("Translation")
-        trans_form = QFormLayout(trans_group)
+        trans_form = group("Translation")
 
         self.context_spin = QSpinBox()
         self.context_spin.setRange(0, 20)
@@ -240,7 +276,9 @@ class SettingsDialog(QDialog):
             "Number of recent dialogue lines included as context for the LLM.\n"
             "Higher = better coherence but slower and uses more VRAM."
         )
-        trans_form.addRow("Context window size:", self.context_spin)
+        row(trans_form, "Context window size:", self.context_spin,
+            "Earlier lines the AI sees for context. More reads better but "
+            "is slower.")
 
         self.workers_spin = QSpinBox()
         self.workers_spin.setRange(1, 16)
@@ -249,7 +287,8 @@ class SettingsDialog(QDialog):
             "Higher = faster batch translation, but uses more VRAM.\n"
             "Ollama will be automatically restarted when this changes."
         )
-        trans_form.addRow("Parallel workers:", self.workers_spin)
+        row(trans_form, "Parallel workers:", self.workers_spin,
+            "Requests translated at once. Faster, but each uses more VRAM.")
 
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(1, 50)
@@ -262,7 +301,8 @@ class SettingsDialog(QDialog):
             "If the LLM returns invalid JSON, entries automatically\n"
             "fall back to single-entry translation."
         )
-        trans_form.addRow("Batch size:", self.batch_spin)
+        row(trans_form, "Batch size:", self.batch_spin,
+            "Lines per request: 5–10 suits local models, ~30 cloud APIs.")
 
         self.history_spin = QSpinBox()
         self.history_spin.setRange(0, 30)
@@ -271,7 +311,9 @@ class SettingsDialog(QDialog):
             "Number of recent translation pairs sent to the LLM as context.\n"
             "0 = disabled. 10 = recommended."
         )
-        trans_form.addRow("Translation history:", self.history_spin)
+        row(trans_form, "Translation history:", self.history_spin,
+            "Recent finished translations shown to the AI so names and "
+            "tone stay consistent. 10 is a good default.")
 
         self.dazed_mode_check = QCheckBox("DazedMTL Mode")
         self.dazed_mode_check.setToolTip(
@@ -281,13 +323,11 @@ class SettingsDialog(QDialog):
             "  - Cloud: 4 workers / Local: 1 worker"
         )
         self.dazed_mode_check.stateChanged.connect(self._on_dazed_mode_changed)
-        trans_form.addRow(self.dazed_mode_check)
+        check(trans_form, self.dazed_mode_check,
+              "Use DazedMTL's batch size, prompt and worker counts.")
 
-        vbox.addWidget(trans_group)
-
-        # ── Export & Behavior group ──
-        export_group = QGroupBox("Export && Behavior")
-        export_form = QFormLayout(export_group)
+        # ── Export group ──
+        export_form = group("Export to the game")
 
         self.wordwrap_spin = QSpinBox()
         self.wordwrap_spin.setRange(0, 200)
@@ -297,7 +337,9 @@ class SettingsDialog(QDialog):
             "0 = auto-detect from game plugins (default).\n"
             "Set manually if auto-detection gives wrong results."
         )
-        export_form.addRow("Word wrap chars/line:", self.wordwrap_spin)
+        row(export_form, "Word wrap chars/line:", self.wordwrap_spin,
+            "Leave on Auto-detect unless English lines run off the "
+            "message box.")
 
         self.font_combo = QComboBox()
         self.font_combo.addItems([
@@ -311,7 +353,8 @@ class SettingsDialog(QDialog):
             "Font used for in-game text after export.\n"
             "Replaces gamefont.css in the game's fonts folder."
         )
-        export_form.addRow("Game font:", self.font_combo)
+        row(export_form, "Game font:", self.font_combo,
+            "Font the game uses for the English text.")
 
         self.inject_wordwrap_check = QCheckBox("Inject word wrap plugin on export")
         self.inject_wordwrap_check.setToolTip(
@@ -319,7 +362,9 @@ class SettingsDialog(QDialog):
             "on export. When enabled, Apply Word Wrap adds <WordWrap> tags.\n"
             "When disabled, Apply Word Wrap uses manual line breaks."
         )
-        export_form.addRow(self.inject_wordwrap_check)
+        check(export_form, self.inject_wordwrap_check,
+              "Adds a small plugin that wraps lines in-game, for games "
+              "without one.")
 
         self.single_401_check = QCheckBox("Merge dialogue into single 401 command")
         self.single_401_check.setToolTip(
@@ -328,37 +373,16 @@ class SettingsDialog(QDialog):
             "Enable this if your game has an auto-advance plugin that\n"
             "paginates after every 4 consecutive 401 commands."
         )
-        export_form.addRow(self.single_401_check)
-
-        self.speaker_processing_check = QCheckBox("Enable speaker text processing")
-        self.speaker_processing_check.setToolTip(
-            "Strips \\N<name> namebox prefixes from dialogue text,\n"
-            "resolves face graphics to actor names, and replaces\n"
-            "Japanese speaker names with English in contexts."
-        )
-        export_form.addRow(self.speaker_processing_check)
-
-        self.extract_comments_check = QCheckBox("Extract comments (code 408)")
-        self.extract_comments_check.setToolTip(
-            "Some games use Comment events to display on-screen text\n"
-            "via plugins. Enable this to extract and translate them.\n\n"
-            "Leave OFF for normal games — comments are editor-only."
-        )
-        export_form.addRow(self.extract_comments_check)
+        check(export_form, self.single_401_check,
+              "Only for games whose message boxes page too early.")
 
         self.disable_splash_check = QCheckBox("Disable 'Made with RPG Maker' splash on export")
         self.disable_splash_check.setToolTip(
             "Automatically disables the MadeWithMv/MadeWithMz splash\n"
             "screen plugin when exporting translations to the game."
         )
-        export_form.addRow(self.disable_splash_check)
-
-        self.review_file_check = QCheckBox("Export review file after batch translation")
-        self.review_file_check.setToolTip(
-            "Saves a side-by-side review TXT file after each batch.\n"
-            "Named: Review_{Provider}_{Model}_{Date}.txt"
-        )
-        export_form.addRow(self.review_file_check)
+        check(export_form, self.disable_splash_check,
+              "Skips the engine logo screen when the game starts.")
 
         self.translation_splash_check = QCheckBox("Show translation splash on export")
         self.translation_splash_check.setToolTip(
@@ -366,7 +390,40 @@ class SettingsDialog(QDialog):
             "that displays before the title screen when the game starts.\n"
             "RPG Maker games only."
         )
-        export_form.addRow(self.translation_splash_check)
+        check(export_form, self.translation_splash_check,
+              "Shows a short 'Translated with RPG Maker Translator' "
+              "screen before the title.")
+
+        self.review_file_check = QCheckBox("Export review file after batch translation")
+        self.review_file_check.setToolTip(
+            "Saves a side-by-side review TXT file after each batch.\n"
+            "Named: Review_{Provider}_{Model}_{Date}.txt"
+        )
+        check(export_form, self.review_file_check,
+              "Saves a side-by-side Japanese/English text file after "
+              "each batch.")
+
+        # ── Extraction (advanced) ──
+        extract_form = group("Text extraction (advanced)")
+
+        self.speaker_processing_check = QCheckBox("Enable speaker text processing")
+        self.speaker_processing_check.setToolTip(
+            "Strips \\N<name> namebox prefixes from dialogue text,\n"
+            "resolves face graphics to actor names, and replaces\n"
+            "Japanese speaker names with English in contexts."
+        )
+        check(extract_form, self.speaker_processing_check,
+              "Detects who is speaking so the AI gets names and pronouns "
+              "right. Keep on.")
+
+        self.extract_comments_check = QCheckBox("Extract comments (code 408)")
+        self.extract_comments_check.setToolTip(
+            "Some games use Comment events to display on-screen text\n"
+            "via plugins. Enable this to extract and translate them.\n\n"
+            "Leave OFF for normal games — comments are editor-only."
+        )
+        check(extract_form, self.extract_comments_check,
+              "Only for games that show event comments on screen. Usually off.")
 
         self.script_strings_check = QCheckBox(
             "Extract strings from Script commands (355/655)"
@@ -376,13 +433,9 @@ class SettingsDialog(QDialog):
             "in event Script commands.\n\n"
             "WARNING: Modifying script commands can break game logic."
         )
-        export_form.addRow(self.script_strings_check)
-
-        vbox.addWidget(export_group)
-
-        # ── Appearance ──
-        self.dark_mode_check = QCheckBox("Enable dark mode (Catppuccin theme)")
-        vbox.addWidget(self.dark_mode_check)
+        check(extract_form, self.script_strings_check,
+              "Translates text stored by event scripts. Can break game "
+              "logic — use only if text is missing.")
 
         vbox.addStretch()
         self._add_scroll_tab(tab, "Options")

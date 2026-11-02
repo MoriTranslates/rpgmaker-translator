@@ -3951,7 +3951,7 @@ class MainWindow(QMainWindow):
     # ── Dark mode ──────────────────────────────────────────────────
 
     def _apply_dark_mode(self):
-        """Apply the dark (Catppuccin Mocha) or light (Latte) theme everywhere."""
+        """Apply the dark (ink night) or light (parchment) theme everywhere."""
         theme.apply(self._dark_mode)
         # Widgets that paint per-item colors re-read the palette
         self.trans_table.set_dark_mode(self._dark_mode)

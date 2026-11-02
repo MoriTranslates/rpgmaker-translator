@@ -617,6 +617,7 @@ QSpinBox::up-button, QSpinBox::down-button,
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
     subcontrol-origin: border;
     width: 18px;
+    height: 13px;
     border: none;
     border-left: 1px solid {border};
     background: transparent;
@@ -839,6 +840,13 @@ def stylesheet() -> str:
     check = icon_path("check-dark.svg" if is_dark() else "check-light.svg")
     if check:
         css += 'QCheckBox::indicator:checked { image: url("%s"); }\n' % check
+    suffix = "dark" if is_dark() else "light"
+    for arrow in ("up", "down"):
+        path = icon_path(f"chevron-{arrow}-{suffix}.svg")
+        if path:
+            css += ('QSpinBox::%s-arrow, QDoubleSpinBox::%s-arrow '
+                    '{ image: url("%s"); width: 10px; height: 10px; }\n'
+                    % (arrow, arrow, path))
     return css
 
 
