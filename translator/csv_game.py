@@ -70,16 +70,8 @@ class CSVGameParser:
                 continue
         return False
 
-    def load_originals(self, project_dir: str) -> list[TranslationEntry]:
-        """Parse the game's ORIGINAL text, for merging a game update.
-
-        Each file is read from data_original/ when an export backed it up
-        (the live file holds English then), else from data/.
-        """
-        return self.load_project(project_dir, from_backup=True)
-
-    def load_project(self, project_dir: str, context_size: int | None = None,
-                     from_backup: bool = False) -> list[TranslationEntry]:
+    def load_project(self, project_dir: str, context_size: int | None = None
+                     ) -> list[TranslationEntry]:
         """Parse all CSV game files and extract translatable entries."""
         if context_size is not None:
             self.context_size = context_size
@@ -94,9 +86,6 @@ class CSVGameParser:
             if not any(name.lower().endswith(ext) for ext in self.extensions):
                 continue
             fpath = os.path.join(data_dir, name)
-            backup = os.path.join(project_dir, "data_original", name)
-            if from_backup and os.path.isfile(backup):
-                fpath = backup
             file_entries = self._parse_file(fpath, name)
             if file_entries:
                 entries.extend(file_entries)
@@ -208,7 +197,7 @@ class CSVGameParser:
             [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
              for fn in sorted(all_files)], manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
         problems: list[str] = []
         # file -> translations not written because the game text changed
         changed_lines: dict[str, int] = {}
@@ -308,18 +297,6 @@ class CSVGameParser:
             log.info("Exported %d translations to %s", applied, filename)
         manifest.finish()
         game_io.raise_export_problems(problems, changed_lines)
-
-    def refresh_backups(self, project_dir: str) -> list[str]:
-        """Before a resume merge: put a game update into the backup."""
-        data_dir = os.path.join(project_dir, "data")
-        backup_dir = os.path.join(project_dir, "data_original")
-        if not os.path.isdir(backup_dir) or not os.path.isdir(data_dir):
-            return []
-        names = sorted(n for n in os.listdir(data_dir)
-                       if any(n.lower().endswith(x) for x in self.extensions))
-        return game_io.refresh_on_resume(
-            [(n, os.path.join(data_dir, n), os.path.join(backup_dir, n))
-             for n in names], backup_dir + ".manifest.json")
 
     def restore_originals(self, project_dir: str):
         """Restore original files from backup."""

@@ -736,168 +736,6 @@ def test_ace_unreadable_file_is_a_load_warning(tmp_path):
     assert any(w.startswith("CommonEvents.rvdata2") for w in p.load_warnings)
 
 
-# ── "Re-open to pick up new or changed lines" (FIXED) ────────────────
-#
-# The export note told users to re-open the project after a game update,
-# but a resume never re-read the game, and a fresh open read the live
-# files (already English).  Resuming now merges the game's ORIGINAL text
-# (from the backup the export refreshed) into the project by entry ID.
-
-def _proj(entries):
-    from translator.project_model import TranslationProject
-    return TranslationProject(project_path="", entries=entries)
-
-
-def test_merge_keeps_unchanged_adds_new_resets_changed():
-    proj = _proj([
-        _entry("a", "F", "dialog", "同じ", "Same", "reviewed"),
-        _entry("b", "F", "dialog", "古い", "Old", "translated"),
-        _entry("c", "F", "dialog", "残る", "Kept", "translated"),   # not in parse
-    ])
-    fresh = [_entry("a", "F", "dialog", "同じ", "", "untranslated"),
-             _entry("b", "F", "dialog", "新しい", "", "untranslated"),
-             _entry("d", "F", "dialog", "追加", "", "untranslated")]
-    stats = proj.merge_fresh_originals(fresh)
-    assert {k: stats[k] for k in ("status", "new", "changed", "unchanged")} == {"status": "merged", "new": 1, "changed": 1, "unchanged": 1}
-    by = {e.id: e for e in proj.entries}
-    assert (by["a"].translation, by["a"].status) == ("Same", "reviewed")
-    assert (by["b"].original, by["b"].translation, by["b"].status) == \
-        ("新しい", "", "untranslated")
-    orphans = {o["id"]: o for o in proj.migration_orphans}
-    assert orphans["b"]["translation"] == "Old"
-    # "c" left the game (its file and kind were parsed): retired, but its
-    # translation stays recoverable
-    assert "c" not in by and orphans["c"]["translation"] == "Kept"
-    assert stats["retired"] == 1
-    assert by["d"].status == "untranslated"
-
-
-def test_merge_keeps_entries_it_could_not_check():
-    """An unreadable file, or a kind the parse did not produce at all
-    (parse options), is "couldn't check", never "removed"."""
-    proj = _proj([_entry("u", "Unreadable", "dialog", "読めない", "EN", "reviewed"),
-                  _entry("c", "F", "comment", "注釈", "EN", "reviewed"),
-                  _entry("a", "F", "dialog", "同じ", "Same", "reviewed")])
-    fresh = [_entry("a", "F", "dialog", "同じ", "", "untranslated")]
-    stats = proj.merge_fresh_originals(fresh, unreadable_files={"Unreadable"})
-    assert stats["kept_unchecked"] == 2 and stats["retired"] == 0
-    assert {e.id for e in proj.entries} == {"a", "u", "c"}
-
-
-def _many(n, text="原文"):
-    return [_entry(str(i), "F", "dialog", f"{text}{i}", f"EN{i}") for i in range(n)]
-
-
-def test_merge_refuses_when_most_translated_lines_would_change():
-    proj = _proj(_many(30))
-    fresh = [_entry(str(i), "F", "dialog", f"English {i}", "", "untranslated")
-             for i in range(30)]
-    stats = proj.merge_fresh_originals(fresh)
-    assert stats["status"] == "low_match"
-    assert [e.translation for e in proj.entries] == [f"EN{i}" for i in range(30)]
-    assert not proj.migration_orphans
-    # the user can still go ahead; nothing is lost
-    stats = proj.merge_fresh_originals(fresh, force=True)
-    assert stats["status"] == "merged" and stats["changed"] == 30
-    assert len(proj.migration_orphans) == 30
-
-
-def test_merge_small_project_is_never_blocked():
-    """A tiny project (below the minimum) merges even if most lines changed."""
-    proj = _proj(_many(2) + [_entry("x", "F", "dialog", "未訳", "", "untranslated")])
-    fresh = [_entry("0", "F", "dialog", "変わった", "", "untranslated"),
-             _entry("1", "F", "dialog", "原文1", "", "untranslated"),
-             _entry("x", "F", "dialog", "未訳", "", "untranslated"),
-             _entry("2", "F", "dialog", "追加", "", "untranslated")]
-    stats = proj.merge_fresh_originals(fresh)
-    assert stats["status"] == "merged" and stats["changed"] == 1 and stats["new"] == 1
-
-
-def test_merge_respects_skipped_status():
-    """Fix 5: the fresh parse's "skipped" and the user's own skip survive."""
-    proj = _proj([_entry("a", "F", "dialog", "同じ", "", "untranslated"),
-                  _entry("b", "F", "dialog", "古い", "", "skipped")])
-    fresh = [_entry("a", "F", "dialog", "同じ", "", "skipped"),
-             _entry("b", "F", "dialog", "新しい", "", "untranslated")]
-    proj.merge_fresh_originals(fresh)
-    by = {e.id: e for e in proj.entries}
-    assert by["a"].status == "skipped"           # parser says skip
-    assert by["b"].status == "skipped"           # user skipped this slot
-
-
-def test_mv_game_update_lines_are_merged_after_export(mv_game, mv_parser):
-    from translator.project_model import TranslationProject
-    entries = mv_parser.load_project(mv_game)
-    for e in entries:
-        e.translation, e.status = "EN " + e.id, "reviewed"
-    mv_parser.save_project(mv_game, entries)
-    # game update: item 1 renamed, a new item added (live file replaced)
-    items_path = os.path.join(mv_game, "data", "Items.json")
-    with open(os.path.join(mv_game, "data_original", "Items.json"),
-              encoding="utf-8-sig") as f:
-        items = json.load(f)
-    items[1]["name"] = "ハイポーション"
-    items.append({"id": len(items), "name": "アップデート品",
-                  "description": "", "note": ""})
-    with open(items_path, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False)
-    with pytest.raises(OSError):                 # stale line is reported
-        mv_parser.save_project(mv_game, entries)
-    assert mv_parser.last_export_notes and \
-        "Re-open the project" in mv_parser.last_export_notes[0]
-    # resume: merge the refreshed originals
-    proj = TranslationProject(project_path=mv_game, entries=entries)
-    stats = proj.merge_fresh_originals(mv_parser.load_originals(mv_game))
-    assert stats["status"] == "merged" and stats["changed"] == 1 and stats["new"] == 1
-    by = {e.id: e for e in proj.entries}
-    assert by["Items.json/1/name"].original == "ハイポーション"
-    assert by["Items.json/1/name"].status == "untranslated"
-    assert by["Items.json/2/name"].status == "reviewed"     # unchanged kept
-    assert any(e.original == "アップデート品" for e in proj.entries)
-    # the next export is complete again
-    mv_parser.save_project(mv_game, proj.entries)
-
-
-def test_resume_shows_merged_game_update(qapp, monkeypatch, tmp_path, mv_game, mv_parser):
-    from translator.project_model import TranslationProject
-    from translator.widgets import main_window as mw
-    entries = mv_parser.load_project(mv_game)
-    for e in entries:
-        e.translation, e.status = "EN " + e.id, "translated"
-    proj = TranslationProject(project_path=mv_game, project_type="rpgmaker_mv",
-                              entries=entries)
-    state = os.path.join(mv_game, "_translation_state.json")
-    proj.save_state(state)
-    # game updated before the first export: a new item in the live data
-    items_path = os.path.join(mv_game, "data", "Items.json")
-    with open(items_path, encoding="utf-8-sig") as f:
-        items = json.load(f)
-    items.append({"id": len(items), "name": "新アイテム", "description": "",
-                  "note": ""})
-    with open(items_path, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False)
-
-    settings = tmp_path / "_settings.json"
-    settings.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(mw.MainWindow, "_SETTINGS_FILE", str(settings))
-    monkeypatch.setattr(mw.AIClient, "is_available", lambda self: False)
-    monkeypatch.setattr(mw.AIClient, "list_models", lambda self: [])
-    shown = []
-    monkeypatch.setattr(mw.QMessageBox, "information",
-                        lambda _p, title, text, *a, **k: shown.append(title))
-    win = mw.MainWindow()
-    try:
-        assert win._restore_from_state(state)
-    finally:
-        win._closing = True
-        win._autosave_timer.stop()
-        win.hide()
-    assert "Game Update Merged" in shown
-    assert any(e.original == "新アイテム" for e in win.project.entries)
-    assert all(e.status == "translated" for e in win.project.entries
-               if e.original != "新アイテム")
-
-
 # ── Low items (FIXED) ────────────────────────────────────────────────
 
 _GAUGE_PLUGIN = '''/*:
@@ -1077,28 +915,6 @@ def test_rm2k_export_skips_lines_whose_original_changed(tmp_path):
     assert got["Map0001.lmu/Ev1(EV)/p1/choice_1_1"] == "EN いいえ"  # unchanged: written
 
 
-def test_rm2k_resume_merge_reads_original_backups(tmp_path):
-    from translator import rpgmaker_2k as rm
-    from translator.project_model import TranslationProject
-    (tmp_path / "RPG_RT.ldb").write_bytes(rm._write_header("LcfDataBase"))
-    (tmp_path / "RPG_RT.lmt").write_bytes(b"")
-    live = tmp_path / "Map0001.lmu"
-    live.write_bytes(_rm2k_map("古い台詞", "はい"))
-    p = rm.RPGMaker2KParser()
-    entries = p.load_project(str(tmp_path))
-    for e in entries:
-        e.translation, e.status = "EN " + e.original, "reviewed"
-    p.save_project(str(tmp_path), entries)              # live is English now
-    (tmp_path / "Map0001_original.lmu").write_bytes(     # refreshed backup
-        _rm2k_map("新しい台詞", "はい"))
-    proj = TranslationProject(project_path=str(tmp_path), entries=entries)
-    stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
-    assert {k: stats[k] for k in ("status", "new", "changed", "unchanged")} == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
-    by = {e.id: e for e in proj.entries}
-    assert by["Map0001.lmu/Ev1(EV)/p1/dialog_0"].status == "untranslated"
-    assert by["Map0001.lmu/Ev1(EV)/p1/choice_1_0"].status == "reviewed"
-
-
 def _kirikiri_game(tmp_path, body: bytes):
     ks = tmp_path / "data" / "scenario" / "a.ks"
     ks.parent.mkdir(parents=True, exist_ok=True)
@@ -1137,26 +953,6 @@ def test_kirikiri_undecodable_byte_is_not_a_change(tmp_path):
         e.translation, e.status = "EN line", "translated"
     p.save_project(str(tmp_path), entries)          # no "not written" error
     assert b"EN line" in ks.read_bytes()
-
-
-def test_kirikiri_resume_merge_reads_backup(tmp_path):
-    from translator.kirikiri import KirikiriParser
-    from translator.project_model import TranslationProject
-    _kirikiri_game(tmp_path, "*start\r\n古い台詞です[p]\r\n\r\n二つ目[p]\r\n\r\n三つ目[p]\r\n"
-                   .encode("cp932"))
-    p = KirikiriParser()
-    entries = p.load_project(str(tmp_path))
-    for e in entries:
-        e.translation, e.status = "EN line", "reviewed"
-    p.save_project(str(tmp_path), entries)
-    (tmp_path / "data" / "scenario_original" / "a.ks").write_bytes(
-        "*start\r\n新しい台詞です[p]\r\n\r\n二つ目[p]\r\n\r\n三つ目[p]\r\n".encode("cp932"))
-    proj = TranslationProject(project_path=str(tmp_path), entries=entries)
-    stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
-    assert {k: stats[k] for k in ("status", "new", "changed", "unchanged")} == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
-    assert any(e.original.startswith("新しい台詞") and e.status == "untranslated"
-               for e in proj.entries)
-    assert sum(e.status == "reviewed" for e in proj.entries) == 2
 
 
 def _tyrano_game(tmp_path, ks_text, lang_value="進む"):
@@ -1206,23 +1002,6 @@ def test_tyrano_lang_js_value_changed_is_kept(tmp_path):
         p.save_project(str(tmp_path), entries)
     assert "tyrano/lang.js: 1 translated line(s) not written" in str(ei.value)
     assert '"go":"次へ"' in lang.read_text(encoding="utf-8")
-
-
-def test_tyrano_resume_merge_reads_backup(tmp_path):
-    from translator.tyranoscript import TyranoScriptParser
-    from translator.project_model import TranslationProject
-    _tyrano_game(tmp_path, "*start\n一つ目[p]\n二つ目[p]\n三つ目[p]\n")
-    p = TyranoScriptParser()
-    entries = p.load_project(str(tmp_path))
-    for e in entries:
-        e.translation, e.status = "EN", "reviewed"
-    p.save_project(str(tmp_path), entries)
-    (tmp_path / "data" / "scenario_original" / "first.ks").write_text(
-        "*start\n新しい一つ目[p]\n二つ目[p]\n三つ目[p]\n", encoding="utf-8")
-    proj = TranslationProject(project_path=str(tmp_path), entries=entries)
-    stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
-    assert stats["status"] == "merged" and stats["changed"] == 1 and stats["new"] == 0
-    assert sum(e.status == "reviewed" for e in proj.entries) == len(proj.entries) - 1
 
 
 def _srpg_dts(texts):
@@ -1284,21 +1063,6 @@ def test_srpg_export_reports_line_whose_original_is_gone(tmp_path):
     assert got == ["新しい台詞", "EN 同じ台詞"]
 
 
-def test_srpg_resume_merge_reads_backup(tmp_path):
-    from translator.srpgstudio import SRPGStudioParser
-    from translator.project_model import TranslationProject
-    (tmp_path / "data.dts").write_bytes(_srpg_dts(["一つ目", "二つ目", "三つ目"]))
-    p = SRPGStudioParser()
-    entries = p.load_project(str(tmp_path))
-    for e in entries:
-        e.translation, e.status = "EN", "reviewed"
-    p.save_project(str(tmp_path), entries)
-    (tmp_path / "data_original.dts").write_bytes(_srpg_dts(["新しい一つ目", "二つ目", "三つ目"]))
-    proj = TranslationProject(project_path=str(tmp_path), entries=entries)
-    stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
-    assert {k: stats[k] for k in ("status", "new", "changed", "unchanged")} == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
-
-
 def test_no_control_bytes_in_source_files():
     """Raw control bytes in source (a NUL or backspace typed through shell
     escaping) fail silently or confuse tools -- write escapes instead."""
@@ -1352,22 +1116,6 @@ def test_csv_inserted_row_does_not_shift_translations(tmp_path):
     assert rows[3][3] == ""                    # row_3's entry was 二行目, now row 4
 
 
-def test_csv_resume_merge_reads_backup(tmp_path):
-    from translator.csv_game import CSVGameParser
-    from translator.project_model import TranslationProject
-    _csv_game(tmp_path, ["一行目", "二行目", "三行目"])
-    p = CSVGameParser()
-    entries = p.load_project(str(tmp_path))
-    for e in entries:
-        e.translation, e.status = "EN", "reviewed"
-    p.save_project(str(tmp_path), entries)
-    (tmp_path / "data_original" / "script.x").write_bytes(
-        "com,hen1,hen2,hen2_en\r\ns,s,変更,\r\ns,s,二行目,\r\ns,s,三行目,\r\n".encode("utf-8"))
-    proj = TranslationProject(project_path=str(tmp_path), entries=entries)
-    stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
-    assert {k: stats[k] for k in ("status", "new", "changed", "unchanged")} == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
-
-
 def _crowd_sce(lines):
     from translator import crowd
     body = "$ main $" + "".join(
@@ -1402,22 +1150,6 @@ def test_crowd_export_skips_line_whose_original_changed(tmp_path):
     assert "新しい台詞" in text and "EN line" in text
 
 
-def test_crowd_resume_merge_reads_backup(tmp_path):
-    from translator import crowd
-    from translator.project_model import TranslationProject
-    (tmp_path / "game.sce").write_bytes(_crowd_sce(["一つ目", "二つ目", "三つ目"]))
-    p = crowd.CrowdParser()
-    entries = p.load_project(str(tmp_path))
-    for e in entries:
-        e.translation, e.status = "EN", "reviewed"
-    p.save_project(str(tmp_path), entries)
-    (tmp_path / "sce_original" / "game.sce").write_bytes(
-        _crowd_sce(["新しい一つ目", "二つ目", "三つ目"]))
-    proj = TranslationProject(project_path=str(tmp_path), entries=entries)
-    stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
-    assert {k: stats[k] for k in ("status", "new", "changed", "unchanged")} == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
-
-
 def test_mv_patch_zip_reports_lines_it_could_not_place(mv_game, mv_parser, tmp_path):
     """The install package used to drop such lines silently."""
     import zipfile
@@ -1440,7 +1172,6 @@ def test_mv_patch_zip_reports_lines_it_could_not_place(mv_game, mv_parser, tmp_p
     assert texts[0] == "新しい台詞"
     assert items[1]["name"].startswith("EN ")              # the rest is included
     assert os.path.exists(path)
-
 
 
 def test_restore_never_puts_junk_rmt_old_in_place(tmp_path):

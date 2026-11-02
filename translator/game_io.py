@@ -33,10 +33,27 @@ log = logging.getLogger(__name__)
 
 
 class PartialExportError(OSError):
-    """Some files were exported, others failed.  ``problems`` lists them."""
+    """Some files were exported, others failed.  ``problems`` lists them.
 
-    def __init__(self, problems: list[str], summary: str = ""):
+    The cause of each problem is kept apart so the UI can give the right
+    advice without matching message text:
+
+    * ``errors``      -- files that could not be written (locked, disk full)
+    * ``changed``     -- {file: n} translations skipped because the game's
+                         text at their place is no longer their original
+    * ``unsafe``      -- translations not written because they would break
+                         the line they go into (fix the translation)
+    * ``unsupported`` -- parts of the game this version can't write
+    A plain ``PartialExportError(problems)`` counts every problem as an error.
+    """
+
+    def __init__(self, problems: list[str], summary: str = "", *,
+                 errors=None, changed=None, unsafe=None, unsupported=None):
         self.problems = list(problems)
+        self.errors = list(self.problems if errors is None else errors)
+        self.changed = dict(changed or {})
+        self.unsafe = list(unsafe or [])
+        self.unsupported = list(unsupported or [])
         shown = "\n  ".join(self.problems[:20])
         more = (f"\n  ... and {len(self.problems) - 20} more"
                 if len(self.problems) > 20 else "")
@@ -51,29 +68,74 @@ def raise_if_problems(problems: list[str], summary: str = ""):
         raise PartialExportError(problems, summary)
 
 
-def raise_export_problems(errors: list[str], skipped: dict[str, int]):
+def changed_line_problem(fn: str, n: int) -> str:
+    return (f"{fn}: {n} translated line(s) not written — the game's text there "
+            f"changed (game update or edit), so the game's text was kept")
+
+
+def raise_export_problems(errors: list[str], skipped: dict[str, int],
+                          unsafe: list[str] = (), unsupported: list[str] = ()):
     """Raise PartialExportError for unwritten files and/or skipped lines.
 
     *skipped* maps a file to the number of translations that were NOT
     written because the game text at their place no longer matched their
-    original (game update or hand edit): the game's new text was kept.
+    original (game update or hand edit): the game's text was kept.
+    *unsafe* / *unsupported*: see ``PartialExportError``.
     """
-    problems = list(errors) + [
-        f"{fn}: {n} translated line(s) not written — the game text there "
-        f"changed, so the game's new text was kept"
-        for fn, n in sorted(skipped.items())]
+    skipped = {fn: n for fn, n in skipped.items() if n}
+    problems = (list(errors) + list(unsupported) + list(unsafe)
+                + [changed_line_problem(fn, n)
+                   for fn, n in sorted(skipped.items())])
     if not problems:
         return
     parts = []
     if errors:
         parts.append(f"{len(errors)} file(s) could not be written "
                      f"(is the game running?)")
+    if unsupported:
+        parts.append(f"{len(unsupported)} part(s) of the game can't be "
+                     f"written by this version")
+    if unsafe:
+        parts.append("some translations would break the game's script")
     if skipped:
-        parts.append(f"{sum(skipped.values())} translated line(s) were not "
-                     f"written because the game's text changed — re-open "
-                     f"the project to pick up the new lines")
-    raise PartialExportError(problems,
-                             "Export incomplete — " + "; ".join(parts) + ":")
+        parts.append(f"{sum(skipped.values())} translated line(s) were "
+                     f"skipped because the game's text changed")
+    raise PartialExportError(
+        problems, "Export incomplete — " + "; ".join(parts) + ":",
+        errors=errors, changed=skipped, unsafe=unsafe,
+        unsupported=unsupported)
+
+
+# What the user can do about lines whose game text changed.  The app does
+# not merge a game update into a project (by design, for now).
+CHANGED_LINES_ADVICE = (
+    "Lines whose text in the game changed (game update or hand edit) were "
+    "skipped and are listed above; the game keeps its own text there. "
+    "Exporting again won't change them, and this project does not pick up "
+    "new or changed lines. To translate the new version of the game, start "
+    "a new project on a clean copy of it (Import Translations can bring "
+    "over your existing work).")
+
+
+def export_advice(partial) -> str:
+    """What the user can do, by cause of the problems in *partial*."""
+    advice = []
+    errors = getattr(partial, "errors", None)
+    if errors is None:
+        errors = getattr(partial, "problems", None) or []
+    if errors:
+        advice.append("For files that could not be written: close the game, "
+                      "free disk space if needed, and export again.")
+    if getattr(partial, "unsupported", None):
+        advice.append("Parts this version can't write keep their original "
+                      "text; exporting again won't change that.")
+    if getattr(partial, "unsafe", None):
+        advice.append("Translations that would break a script line (an "
+                      "unbalanced quote or backslash) were not written: "
+                      "edit them and export again.")
+    if getattr(partial, "changed", None):
+        advice.append(CHANGED_LINES_ADVICE)
+    return "\n\n".join(advice)
 
 
 # ── Atomic writes ────────────────────────────────────────────────────
@@ -201,12 +263,28 @@ RECOVERED_NOTE = (
     "Restore Originals again if you wanted the original files.")
 
 
-_recovery_notes: list[str] = []
+# (folder that was put back, user-facing note)
+_recovery_notes: list[tuple[str, str]] = []
 
 
-def take_recovery_notes() -> list[str]:
-    """User-facing notes for recoveries since the last call (then cleared)."""
-    notes = list(_recovery_notes)
+def _inside(path: str, root: str) -> bool:
+    try:
+        path = os.path.normcase(os.path.realpath(path))
+        root = os.path.normcase(os.path.realpath(root))
+        return os.path.commonpath([path, root]) == root
+    except ValueError:              # different drives
+        return False
+
+
+def take_recovery_notes(project_dir: str | None = None) -> list[str]:
+    """User-facing notes for recoveries since the last call (then cleared).
+
+    With *project_dir*, only notes for folders inside that game are
+    returned; notes about other games are dropped (they were logged when
+    the recovery happened) so they never show up at an unrelated open.
+    """
+    notes = [note for path, note in _recovery_notes
+             if project_dir is None or _inside(path, project_dir)]
     _recovery_notes.clear()
     return notes
 
@@ -255,8 +333,8 @@ def recover_interrupted_restore(live_dir: str) -> bool:
         _set_aside(staging)
     log.warning("Recovered %s from an interrupted Restore Originals",
                 live_dir)
-    _recovery_notes.append(
-        RECOVERED_NOTE.format(name=os.path.basename(live_dir) + "/"))
+    _recovery_notes.append((live_dir, RECOVERED_NOTE.format(
+        name=os.path.basename(live_dir) + "/")))
     return True
 
 
@@ -455,8 +533,7 @@ class ExportManifest:
         self.exists = not self.pending
 
 
-def refresh_changed_originals(pairs, manifest: ExportManifest,
-                              mark_pending: bool = True) -> list[str]:
+def refresh_changed_originals(pairs, manifest: ExportManifest) -> list[str]:
     """Re-baseline backups for game files that changed after the backup.
 
     *pairs* is an iterable of ``(key, live_path, backup_path)``.  A live
@@ -467,16 +544,14 @@ def refresh_changed_originals(pairs, manifest: ExportManifest,
     * the live file is not what we last wrote, and
     * it differs from the backup (or the backup has no copy of it).
 
-    With *mark_pending* (exports), always marks the manifest pending
-    (``begin``) before returning, so callers write game files only after
-    that marker is safely on disk.
+    Always marks the manifest pending (``begin``) before returning, so
+    callers write game files only after that marker is safely on disk.
 
     Returns the keys that were refreshed.
     """
     refreshed = []
     if not manifest.exists:
-        if mark_pending:
-            manifest.begin()
+        manifest.begin()
         return refreshed
     for key, live, bak in pairs:
         if not os.path.isfile(live):
@@ -491,51 +566,23 @@ def refresh_changed_originals(pairs, manifest: ExportManifest,
         refreshed.append(key)
         log.warning("Game file %s changed since the backup was taken — "
                     "backup refreshed from the current file", key)
-    if mark_pending:
-        manifest.begin()
+    manifest.begin()
     return refreshed
 
 
-def refresh_on_resume(pairs, manifest_path: str) -> list[str]:
-    """The export's game-update refresh, run when a project is resumed.
-
-    Without it the resume merge read the backup as it was before the
-    update, saw no change, and the "re-open the project" advice did
-    nothing until an export had run.  Same rules as an export: a live file
-    goes into the backup only when the manifest knows what we last wrote
-    and the live file is neither that nor the backup.  The manifest is not
-    marked pending (nothing is about to be written to the game).
-    """
-    manifest = ExportManifest(manifest_path)
-    if not manifest.exists:
-        return []
-    refreshed = refresh_changed_originals(pairs, manifest, mark_pending=False)
-    if refreshed:
-        manifest.save()
-    return refreshed
-
-
-def refreshed_note(refreshed: list[str], merges_on_reopen: bool = False) -> str:
-    """User-facing note for files whose backup was re-baselined.
-
-    *merges_on_reopen*: the engine's parser has ``load_originals`` and the
-    main window merges new / changed lines when the project is resumed.
-    Other engines say honestly that the new lines are not added.
-    """
+def refreshed_note(refreshed: list[str]) -> str:
+    """User-facing note for files whose backup was re-baselined."""
     if not refreshed:
         return ""
     shown = ", ".join(refreshed[:8])
     more = f" and {len(refreshed) - 8} more" if len(refreshed) > 8 else ""
-    head = (f"{len(refreshed)} game file(s) changed since your first export "
+    return (f"{len(refreshed)} game file(s) changed since your first export "
             f"(game update?): {shown}{more}. The backup was refreshed from "
-            f"the current files so the update is kept. ")
-    if merges_on_reopen:
-        return head + ("Re-open the project (and resume it) to add the new "
-                       "and changed lines; lines that did not change keep "
-                       "their translations.")
-    return head + ("New or changed lines in those files are NOT added to "
-                   "your project (this engine can't merge a game update "
-                   "yet): they stay untranslated in the game.")
+            f"the current files so the update is kept. This project does not "
+            f"pick up new or changed lines: translated lines whose text "
+            f"changed were skipped and are listed, and new lines stay "
+            f"untranslated. To translate the new version of the game, start "
+            f"a new project on a clean copy of it.")
 
 
 def tree_pairs(live_dir: str, backup_dir: str, suffixes: tuple[str, ...]):

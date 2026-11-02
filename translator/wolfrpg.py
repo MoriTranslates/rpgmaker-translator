@@ -1077,17 +1077,7 @@ class WolfRPGParser:
 
     # ── Loading ───────────────────────────────────────────────────────
 
-    def load_originals(self, folder: str) -> list[TranslationEntry]:
-        """Parse the game's ORIGINAL text, for merging a game update.
-
-        After an export the live BasicData/ and MapData/ hold English, so
-        read the backup (refreshed by the export when the game was
-        updated); before any export the live files are the original.
-        """
-        return self.load_project(folder, from_backup=True)
-
-    def load_project(self, folder: str, context_size: int | None = None,
-                     from_backup: bool = False) -> list[TranslationEntry]:
+    def load_project(self, folder: str, context_size: int | None = None) -> list[TranslationEntry]:
         """Load all translatable strings from a Wolf RPG game."""
         if context_size is not None:
             self.context_size = context_size
@@ -1115,12 +1105,8 @@ class WolfRPGParser:
             self.load_warnings.append(self._refusal_message(marker, existed))
             return []
 
-        src = self.data_dir
-        if from_backup and self._backup_dir_for(self.data_dir).is_dir():
-            src = self._backup_dir_for(self.data_dir)
-
         # Parse maps
-        map_dir = src / 'MapData'
+        map_dir = self.data_dir / 'MapData'
         if map_dir.is_dir():
             for mps_file in sorted(map_dir.glob('*.mps')):
                 try:
@@ -1133,7 +1119,7 @@ class WolfRPGParser:
                     self.load_warnings.append(f'MapData/{mps_file.name}: {e}')
 
         # Parse common events
-        basic_dir = src / 'BasicData'
+        basic_dir = self.data_dir / 'BasicData'
         ce_path = basic_dir / 'CommonEvent.dat' if basic_dir.is_dir() else None
         if ce_path and ce_path.is_file():
             try:
@@ -1165,11 +1151,8 @@ class WolfRPGParser:
 
         return entries
 
-    def _find_data_dir(self, unpack: bool = True):
-        """Find the Data/ directory (unpacking Data.wolf if *unpack*).
-
-        With ``unpack=False`` returns None instead of unpacking.
-        """
+    def _find_data_dir(self) -> Path:
+        """Find or create the Data/ directory."""
         # Check Data/ folder with actual game content
         data_dir = self.game_dir / 'Data'
         if data_dir.is_dir():
@@ -1186,8 +1169,6 @@ class WolfRPGParser:
 
         # Need to unpack Data.wolf
         wolf_file = self.game_dir / 'Data.wolf'
-        if not unpack:
-            return None
         if wolf_file.is_file():
             return unpack_data_wolf(self.game_dir)
 
@@ -1426,7 +1407,7 @@ class WolfRPGParser:
         refreshed = game_io.refresh_changed_originals(
             self._data_file_pairs(backup_dir), manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
 
         # Re-read maps, common events and DB structure from backup for
         # idempotent re-export
@@ -1859,24 +1840,6 @@ class WolfRPGParser:
         else:
             tail = " Your game files were not changed."
         return f'{WOLF3_UNSUPPORTED}{tail} (Detected from {marker}.)'
-
-    def refresh_backups(self, folder: str) -> list[str]:
-        """Before a resume merge: put a game update into the backup.
-
-        Never unpacks Data.wolf (only an already unpacked game has a
-        backup to refresh).
-        """
-        self.game_dir = Path(folder)
-        data_dir = self._find_data_dir(unpack=False)
-        if data_dir is None or wolf3_marker(data_dir):
-            return []
-        self.data_dir = data_dir
-        backup_dir = self._backup_dir_for(data_dir)
-        if not backup_dir.is_dir():
-            return []
-        return game_io.refresh_on_resume(
-            list(self._data_file_pairs(backup_dir)),
-            str(backup_dir) + '.manifest.json')
 
     def restore_originals(self, folder: str):
         """Restore original files from backup."""

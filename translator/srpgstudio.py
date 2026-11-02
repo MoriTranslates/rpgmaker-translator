@@ -235,16 +235,7 @@ class SRPGStudioParser:
 
     # ── Public interface (matches RPGMakerMVParser) ───────────
 
-    def load_originals(self, project_dir: str) -> list[TranslationEntry]:
-        """Parse the game's ORIGINAL text, for merging a game update.
-
-        Reads data_original.dts when an export made it (data.dts holds
-        English then; the export refreshes the backup after an update).
-        """
-        return self.load_project(project_dir, from_backup=True)
-
-    def load_project(self, project_dir: str,
-                     from_backup: bool = False) -> list[TranslationEntry]:
+    def load_project(self, project_dir: str) -> list[TranslationEntry]:
         """Load all translatable entries from an SRPG Studio project.
 
         Args:
@@ -260,9 +251,6 @@ class SRPGStudioParser:
                 "Please select an SRPG Studio game folder."
             )
 
-        backup_path = os.path.join(project_dir, "data_original.dts")
-        if from_backup and os.path.isfile(backup_path):
-            dts_path = backup_path
         blob, header = self._extract_project_blob(dts_path)
         strings = self._scan_strings(blob)
 
@@ -335,7 +323,7 @@ class SRPGStudioParser:
         refreshed = game_io.refresh_changed_originals(
             [("data.dts", dts_path, backup_path)], manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
         # Backup on first export (atomic copy)
         if game_io.backup_file_once(dts_path, backup_path):
             manifest.save()
@@ -483,15 +471,6 @@ class SRPGStudioParser:
             parts.append(blob[pos:])
 
         return b"".join(parts)
-
-    def refresh_backups(self, project_dir: str) -> list[str]:
-        """Before a resume merge: put a game update into the backup."""
-        dts = os.path.join(project_dir, "data.dts")
-        backup = os.path.join(project_dir, "data_original.dts")
-        if not os.path.isfile(backup):
-            return []
-        return game_io.refresh_on_resume(
-            [("data.dts", dts, backup)], backup + ".manifest.json")
 
     def restore_originals(self, project_dir: str):
         """Restore original data.dts from backup."""

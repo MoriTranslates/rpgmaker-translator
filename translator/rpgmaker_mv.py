@@ -325,22 +325,6 @@ class RPGMakerMVParser:
             )
         return self._load_from(project_dir, data_dir)
 
-    def load_originals(self, project_dir: str) -> list:
-        """Parse the game's ORIGINAL text, for merging a game update.
-
-        After an export the live data/ holds English, so read data_original/
-        (which an export refreshes when the game was updated); before any
-        export, data/ itself is the original.  plugins.js is read from
-        plugins_original.js the same way by the plugin parser.
-        """
-        data_dir = self._find_data_dir(project_dir)
-        if not data_dir:
-            raise FileNotFoundError(
-                f"No 'data' folder found in {project_dir}.")
-        backup = data_dir + "_original"
-        return self._load_from(
-            project_dir, backup if os.path.isdir(backup) else data_dir)
-
     def _load_from(self, project_dir: str, data_dir: str) -> list:
         """Parse every entry, reading the data files from *data_dir*."""
         self.load_warnings = []
@@ -625,7 +609,7 @@ class RPGMakerMVParser:
                  for fn in sorted(candidates)], manifest)
             if refreshed:
                 self.last_export_notes.append(
-                    game_io.refreshed_note(refreshed, merges_on_reopen=True))
+                    game_io.refreshed_note(refreshed))
 
         errors = []
         skipped_lines: dict[str, int] = {}
@@ -723,10 +707,6 @@ class RPGMakerMVParser:
 
         End users extract into the game folder and run install.bat.
 
-        A game update since the last export is put into the backup first
-        (the export's own rule), so the package never ships old game files
-        that would roll the player's game back.
-
         Raises ``PartialExportError`` -- after the package is written --
         when translations were left out because the game text at their
         place changed or no longer exists.
@@ -737,8 +717,6 @@ class RPGMakerMVParser:
                 f"Could not find data/ directory in:\n{project_dir}"
             )
 
-        # A game update since the last export goes into the backup first
-        self.refresh_backups(project_dir)
         # Use backup (original JP) as source, same as save_project
         backup_dir = data_dir + "_original"
         source_dir = backup_dir if os.path.isdir(backup_dir) else data_dir
@@ -1219,23 +1197,6 @@ class RPGMakerMVParser:
         Returns True when a new backup was made.
         """
         return game_io.backup_tree_once(data_dir, data_dir + "_original")
-
-    def refresh_backups(self, project_dir: str) -> list[str]:
-        """Before a resume merge: put a game update into the backup.
-
-        The export's own refresh, run without writing the game, so the
-        merge reads the updated originals.  Returns refreshed file names.
-        """
-        data_dir = self._find_data_dir(project_dir)
-        if not data_dir or not os.path.isdir(data_dir + "_original"):
-            return []
-        backup_dir = data_dir + "_original"
-        names = set()
-        for d in (backup_dir, data_dir):
-            names.update(fn for fn in os.listdir(d) if _is_parsed_data_file(fn))
-        return game_io.refresh_on_resume(
-            [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
-             for fn in sorted(names)], backup_dir + ".manifest.json")
 
     def restore_originals(self, project_dir: str) -> bool:
         """Restore data/ (and plugins.js / gamefont.css) from backup.

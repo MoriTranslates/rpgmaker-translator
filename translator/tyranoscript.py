@@ -86,17 +86,7 @@ class TyranoScriptParser:
 
     # ── Public API ─────────────────────────────────────────────
 
-    def load_originals(self, project_dir: str) -> list[TranslationEntry]:
-        """Parse the game's ORIGINAL text, for merging a game update.
-
-        .ks files are read from scenario_original/ and lang.js / Config.tjs
-        from their .bak copies when an export made them (the live files
-        hold English then), else from the live files.
-        """
-        return self.load_project(project_dir, from_backup=True)
-
-    def load_project(self, project_dir: str,
-                     from_backup: bool = False) -> list[TranslationEntry]:
+    def load_project(self, project_dir: str) -> list[TranslationEntry]:
         """Load all .ks files from a TyranoScript project.
 
         Args:
@@ -111,32 +101,24 @@ class TyranoScriptParser:
 
         entries = []
         ks_files = sorted(Path(scenario_dir).rglob("*.ks"))
-        backup_dir = Path(os.path.dirname(scenario_dir)) / "scenario_original"
-
-        def src(ks_path):
-            if from_backup:
-                bak = backup_dir / ks_path.relative_to(Path(scenario_dir))
-                if bak.is_file():
-                    return bak
-            return ks_path
 
         # First pass: collect character name definitions
         self._char_names = {}  # name_id -> jname
         for ks_path in ks_files:
-            self._scan_char_names(src(ks_path))
+            self._scan_char_names(ks_path)
 
         # Second pass: extract translatable text
         for ks_path in ks_files:
             rel_path = str(ks_path.relative_to(Path(scenario_dir)))
             rel_path = rel_path.replace("\\", "/")
-            file_entries = self._parse_ks_file(src(ks_path), rel_path)
+            file_entries = self._parse_ks_file(ks_path, rel_path)
             entries.extend(file_entries)
 
         # Extract system files (lang.js, Config.tjs)
         data_root = os.path.dirname(scenario_dir)  # data/ directory
         game_root = os.path.dirname(data_root)      # game root
-        entries.extend(self._extract_lang_js(game_root, from_backup))
-        entries.extend(self._extract_config_title(data_root, from_backup))
+        entries.extend(self._extract_lang_js(game_root))
+        entries.extend(self._extract_config_title(data_root))
 
         return entries
 
@@ -163,7 +145,7 @@ class TyranoScriptParser:
             game_io.tree_pairs(scenario_dir, original_dir, (".ks",))
             + self._system_pairs(project_dir, manifest), manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
         problems: list[str] = []
 
         # Build eval_var replacement map: 'original_jp' -> 'translated_en'
@@ -341,21 +323,6 @@ class TyranoScriptParser:
         update would copy the English over the original .bak.)"""
         return [p for p in self._system_files(project_dir)
                 if p[0] in manifest.files]
-
-    def refresh_backups(self, project_dir: str) -> list[str]:
-        """Before a resume merge: put a game update into the backups."""
-        scenario_dir = self._find_scenario_dir(project_dir)
-        if not scenario_dir:
-            return []
-        original_dir = os.path.join(os.path.dirname(scenario_dir),
-                                    "scenario_original")
-        if not os.path.isdir(original_dir):
-            return []
-        manifest_path = original_dir + ".manifest.json"
-        manifest = game_io.ExportManifest(manifest_path)
-        return game_io.refresh_on_resume(
-            game_io.tree_pairs(scenario_dir, original_dir, (".ks",))
-            + self._system_pairs(project_dir, manifest), manifest_path)
 
     @staticmethod
     def _patch_game_fonts(project_dir: str):
@@ -854,16 +821,13 @@ class TyranoScriptParser:
         game_io.atomic_write_text(config_path, text)
         return False
 
-    def _extract_lang_js(self, game_root: str,
-                         from_backup: bool = False) -> list[TranslationEntry]:
+    def _extract_lang_js(self, game_root: str) -> list[TranslationEntry]:
         """Extract translatable strings from tyrano/lang.js."""
         entries = []
         for sub in [game_root, os.path.join(game_root, "extracted")]:
             lang_path = os.path.join(sub, "tyrano", "lang.js")
             if not os.path.isfile(lang_path):
                 continue
-            if from_backup and os.path.isfile(lang_path + ".bak"):
-                lang_path += ".bak"
             try:
                 text = Path(lang_path).read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
@@ -884,15 +848,12 @@ class TyranoScriptParser:
             break  # only process first found
         return entries
 
-    def _extract_config_title(self, data_root: str,
-                              from_backup: bool = False) -> list[TranslationEntry]:
+    def _extract_config_title(self, data_root: str) -> list[TranslationEntry]:
         """Extract game title from data/system/Config.tjs."""
         entries = []
         config_path = os.path.join(data_root, "system", "Config.tjs")
         if not os.path.isfile(config_path):
             return entries
-        if from_backup and os.path.isfile(config_path + ".bak"):
-            config_path += ".bak"
         try:
             text = Path(config_path).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):

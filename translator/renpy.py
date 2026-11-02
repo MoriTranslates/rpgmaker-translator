@@ -232,14 +232,6 @@ class RenPyParser:
 
     # ── Load project ──────────────────────────────────────────────────
 
-    def load_originals(self, project_dir: str) -> list[TranslationEntry]:
-        """Parse the game's ORIGINAL text, for merging a game update.
-
-        Each .rpy is read from game_original/ when it has a backup copy
-        (the live file holds English after an export), else live.
-        """
-        return self.load_project(project_dir, prefer_backup=True)
-
     def load_project(self, project_dir: str,
                      context_size: int = 3,
                      prefer_backup: bool = False) -> list[TranslationEntry]:
@@ -442,7 +434,7 @@ class RenPyParser:
             [(f, os.path.join(game_dir, f), os.path.join(backup_dir, f))
              for f in rpy_names], manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
 
         # Build translation map
         trans_map = {}
@@ -456,6 +448,7 @@ class RenPyParser:
         # Process each .rpy file
         exported = 0
         problems: list[str] = []
+        unsafe: list[str] = []
         changed_lines: dict[str, int] = {}
         for fname in rpy_names:
             # Read from backup (idempotent re-export)
@@ -468,7 +461,7 @@ class RenPyParser:
                 if self._changed_lines:
                     changed_lines[fname] = self._changed_lines
                 if self._unsafe_lines:
-                    problems.append(
+                    unsafe.append(
                         f"{fname}: {self._unsafe_lines} translation(s) not "
                         f"written -- they would break the script line "
                         f"(unbalanced quote or backslash)")
@@ -480,7 +473,7 @@ class RenPyParser:
 
         manifest.finish()
         log.info("Exported %d translations to .rpy files", exported)
-        game_io.raise_export_problems(problems, changed_lines)
+        game_io.raise_export_problems(problems, changed_lines, unsafe=unsafe)
 
     def _export_file(self, source_path: str, target_path: str,
                      fname: str, trans_map: dict) -> int:
@@ -588,16 +581,6 @@ class RenPyParser:
                    if eid.startswith(f"{fname}/"))
 
     # ── Restore originals ─────────────────────────────────────────────
-
-    def refresh_backups(self, project_dir: str) -> list[str]:
-        """Before a resume merge: put a game update into the backup."""
-        game_dir = os.path.join(project_dir, "game")
-        backup_dir = os.path.join(project_dir, "game_original")
-        if not os.path.isdir(backup_dir):
-            return []
-        return game_io.refresh_on_resume(
-            [(f, os.path.join(game_dir, f), os.path.join(backup_dir, f))
-             for f in _rpy_files(game_dir)], backup_dir + ".manifest.json")
 
     def restore_originals(self, project_dir: str):
         """Restore original .rpy files from backup."""

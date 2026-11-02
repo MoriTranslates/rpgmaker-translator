@@ -345,25 +345,6 @@ class KirikiriParser:
         log.info("Parsed %d entries from %d .ks files", len(entries), len(ks_files))
         return entries
 
-    def load_originals(self, project_dir: str) -> list[TranslationEntry]:
-        """Parse the game's ORIGINAL text, for merging a game update.
-
-        Each .ks is read from scenario_original/ when an export backed it
-        up (the live file holds English then; the export refreshes the
-        backup after a game update), else from the live scenario folder.
-        """
-        scenario_dir = self._find_scenario_dir(project_dir)
-        if not scenario_dir:
-            return []
-        backup_dir = Path(os.path.dirname(scenario_dir)) / "scenario_original"
-        entries = []
-        for ks_path in sorted(Path(scenario_dir).rglob("*.ks")):
-            rel_path = str(ks_path.relative_to(Path(scenario_dir))).replace("\\", "/")
-            bak = backup_dir / rel_path
-            entries.extend(self._parse_ks_file(bak if bak.is_file() else ks_path,
-                                               rel_path))
-        return entries
-
     def save_project(self, project_dir: str, entries: list[TranslationEntry]):
         """Export translations back into .ks files."""
         scenario_dir = self._find_scenario_dir(project_dir)
@@ -383,7 +364,7 @@ class KirikiriParser:
         pairs = game_io.tree_pairs(scenario_dir, backup_dir, (".ks",))
         refreshed = game_io.refresh_changed_originals(pairs, manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
         problems: list[str] = []
         written: list[tuple[str, str]] = []
         # file -> translations not written because the game text changed
@@ -470,19 +451,6 @@ class KirikiriParser:
         manifest.finish()
         log.info("Exported %d translations to scenario/", export_count)
         game_io.raise_export_problems(problems, changed_lines)
-
-    def refresh_backups(self, project_dir: str) -> list[str]:
-        """Before a resume merge: put a game update into the backup."""
-        scenario_dir = self._find_scenario_dir(project_dir)
-        if not scenario_dir:
-            return []
-        backup_dir = os.path.join(os.path.dirname(scenario_dir),
-                                  "scenario_original")
-        if not os.path.isdir(backup_dir):
-            return []
-        return game_io.refresh_on_resume(
-            game_io.tree_pairs(scenario_dir, backup_dir, (".ks",)),
-            backup_dir + ".manifest.json")
 
     def restore_originals(self, project_dir: str):
         """Restore original scenario files from backup."""

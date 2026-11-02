@@ -913,15 +913,13 @@ class TranslationWizard(QDialog):
                 os.path.dirname(project_path),
                 f"{folder_name} - Translation Patch.zip",
             )
-            from ..game_io import PartialExportError
+            from ..game_io import PartialExportError, export_advice
             try:
                 parser.export_patch_zip(project_path, translated, zip_path)
                 done = f"Done — patch saved to {zip_path}"
             except PartialExportError as partial:
-                done = (f"Patch saved to {zip_path}, but INCOMPLETE: "
-                        f"{len(partial.problems)} file(s) are missing lines "
-                        f"because the game's text changed — re-open the "
-                        f"project and create the patch again.")
+                done = (f"Patch saved to {zip_path}, but INCOMPLETE.\n"
+                        f"{partial}\n\n{export_advice(partial)}")
 
             self.progress_bar.setRange(0, 1)
             self.progress_bar.setValue(1)

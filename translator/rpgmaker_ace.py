@@ -284,19 +284,6 @@ class RPGMakerAceParser:
             )
         return self._load_from(data_dir)
 
-    def load_originals(self, project_dir: str) -> list:
-        """Parse the game's ORIGINAL text, for merging a game update.
-
-        After an export the live Data/ holds English, so read Data_original/
-        (refreshed by the export when the game was updated); before any
-        export, Data/ itself is the original.
-        """
-        data_dir = self._find_data_dir(project_dir)
-        if not data_dir:
-            raise FileNotFoundError(f"No 'Data' folder found in {project_dir}.")
-        backup = data_dir + "_original"
-        return self._load_from(backup if os.path.isdir(backup) else data_dir)
-
     def _load_from(self, data_dir: str) -> list:
         """Parse every entry, reading the .rvdata2 files from *data_dir*."""
         self.load_warnings = []
@@ -352,7 +339,7 @@ class RPGMakerAceParser:
         refreshed = game_io.refresh_changed_originals(
             self._backup_pairs(data_dir), manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
 
         problems: list[str] = []
         skipped: dict[str, int] = {}
@@ -411,14 +398,6 @@ class RPGMakerAceParser:
                              and fn != "Scripts.rvdata2")
         return [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
                 for fn in sorted(names)]
-
-    def refresh_backups(self, project_dir: str) -> list[str]:
-        """Before a resume merge: put a game update into the backup."""
-        data_dir = self._find_data_dir(project_dir)
-        if not data_dir or not os.path.isdir(data_dir + "_original"):
-            return []
-        return game_io.refresh_on_resume(
-            self._backup_pairs(data_dir), data_dir + "_original.manifest.json")
 
     def restore_originals(self, project_dir: str):
         """Restore Data_original/ → Data/."""

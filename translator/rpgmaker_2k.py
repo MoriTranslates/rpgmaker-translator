@@ -286,32 +286,15 @@ class RPGMaker2KParser:
 
     # ── Load project ──────────────────────────────────────────────────
 
-    def load_originals(self, project_dir: str,
-                       context_size: int = 3) -> list[TranslationEntry]:
-        """Parse the game's ORIGINAL text, for merging a game update.
-
-        Reads each file's ``_original`` backup when an export made one
-        (the live file holds English then; the export refreshes the backup
-        after a game update), else the live file.
-        """
-        return self.load_project(project_dir, context_size, from_backup=True)
-
     def load_project(self, project_dir: str,
-                     context_size: int = 3,
-                     from_backup: bool = False) -> list[TranslationEntry]:
+                     context_size: int = 3) -> list[TranslationEntry]:
         """Extract all translatable strings from an RM2K/2K3 project."""
         entries: list[TranslationEntry] = []
         self.load_warnings: list[str] = []
 
-        def src(path):
-            if from_backup and os.path.isfile(_backup_path(path)):
-                return _backup_path(path)
-            return path
-
         ldb_path = os.path.join(project_dir, "RPG_RT.ldb")
         if not os.path.isfile(ldb_path):
             raise FileNotFoundError(f"RPG_RT.ldb not found in {project_dir}")
-        ldb_path = src(ldb_path)
 
         # Parse database
         with open(ldb_path, 'rb') as f:
@@ -337,7 +320,7 @@ class RPGMaker2KParser:
         for fname in sorted(os.listdir(project_dir)):
             if not fname.lower().endswith('.lmu') or _is_backup_name(fname):
                 continue
-            fpath = src(os.path.join(project_dir, fname))
+            fpath = os.path.join(project_dir, fname)
             try:
                 entries.extend(self._extract_map(fpath, fname, context_size))
             except Exception as e:
@@ -609,7 +592,7 @@ class RPGMaker2KParser:
               _backup_path(os.path.join(project_dir, f))) for f in lcf_files],
             manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
 
         # Create backups (atomic: an interrupted copy never becomes the
         # "original" every later export reads from)
@@ -921,16 +904,6 @@ class RPGMaker2KParser:
         return changed
 
     # ── Restore originals ─────────────────────────────────────────────
-
-    def refresh_backups(self, project_dir: str) -> list[str]:
-        """Before a resume merge: put a game update into the backups."""
-        names = ["RPG_RT.ldb"] + [
-            f for f in sorted(os.listdir(project_dir))
-            if f.lower().endswith(".lmu") and not _is_backup_name(f)]
-        return game_io.refresh_on_resume(
-            [(f, os.path.join(project_dir, f),
-              _backup_path(os.path.join(project_dir, f))) for f in names],
-            os.path.join(project_dir, "RPG_RT_original.manifest.json"))
 
     def restore_originals(self, project_dir: str):
         """Restore original LCF files from backups."""

@@ -854,19 +854,18 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _export_incomplete_advice(partial) -> str:
         """What the user can do, depending on why lines were not written."""
-        problems = list(getattr(partial, "problems", []) or [])
-        changed = [p for p in problems if "line(s) not written" in p]
-        other = [p for p in problems if p not in changed]
-        advice = []
-        if other:
-            advice.append("For files that could not be written: close the "
-                          "game, free disk space if needed, and export again.")
-        if changed:
-            advice.append("For lines whose game text changed (game update?): "
-                          "exporting again won't change them. Re-open the "
-                          "project and resume it to pick up the new text, "
-                          "translate the new lines, then export.")
-        return "\n".join(advice)
+        return game_io.export_advice(partial)
+
+    def _show_recovery_notes(self, project_dir: str | None):
+        """Tell the user an interrupted Restore Originals of this game was
+        put back (notes about other folders are dropped)."""
+        if not project_dir:
+            game_io.take_recovery_notes()
+            return
+        notes = game_io.take_recovery_notes(project_dir)
+        if notes:
+            QMessageBox.information(self, "Interrupted Restore Recovered",
+                                    "\n\n".join(notes))
 
     @staticmethod
     def _load_warning_text(warnings: list[str], limit: int = 15) -> str:
@@ -1038,9 +1037,9 @@ class MainWindow(QMainWindow):
         # handle): say so, instead of silently showing a partial project.
         load_warnings = list(
             getattr(self.handler.parser, "load_warnings", None) or [])
-        load_warnings += game_io.take_recovery_notes()
         if load_warnings:
             self._show_load_warnings(load_warnings)
+        self._show_recovery_notes(path)
 
         if not entries:
             QMessageBox.warning(
@@ -1063,7 +1062,6 @@ class MainWindow(QMainWindow):
         self.project = TranslationProject(
             project_path=path, project_type=self._project_type, entries=entries
         )
-        self._record_parse_options()
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries(entries)
         self.event_viewer.set_entries(entries)
@@ -2131,9 +2129,11 @@ class MainWindow(QMainWindow):
         if self.handler.has_plugin_system and self.project.project_path:
             self._merge_new_plugin_entries()
 
-        # Game updated since the state was saved: add new lines, reset
-        # changed ones; unchanged lines keep their translation and status.
-        self._merge_game_update()
+        # A resume never re-reads the game to change the project: lines a
+        # game update changed are skipped and listed by the export.  The
+        # only thing said here is an interrupted Restore Originals that
+        # finding the game's folder just put back.
+        self._show_recovery_notes(self.project.project_path)
 
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries(self.project.entries)
@@ -2173,109 +2173,6 @@ class MainWindow(QMainWindow):
         self._backfill_db_glossary()
         self._last_save_path = path
         return True
-
-    def _merge_game_update(self) -> dict | None:
-        """Merge the game's current ORIGINAL text into the resumed project.
-
-        Every engine's parser has ``refresh_backups`` and ``load_originals``:
-        a game update is first put into the backup (the export's own rule,
-        so the merge never reads a stale backup), then the originals are
-        re-read and merged (``translator.game_update``: by ID, then by text
-        in the same scope, so renumbered lines keep their work).  The
-        reading runs on a worker thread.  Returns the merge stats, or None
-        when nothing was checked.
-        """
-        from ..project_model import ID_SCHEME, ids_outdated
-        parser = self.handler.parser
-        path = self.project.project_path
-        if (not path or not os.path.isdir(path)
-                or not hasattr(parser, "load_originals")
-                or ids_outdated(self.project.project_type,
-                                getattr(self.project, "id_scheme", ID_SCHEME))):
-            # (a project whose IDs still need migrating is never merged)
-            return None
-        self._apply_parse_options()
-
-        def work():
-            try:
-                refreshed = (parser.refresh_backups(path)
-                             if hasattr(parser, "refresh_backups") else [])
-                fresh = parser.load_originals(path)
-                warnings = list(getattr(parser, "load_warnings", None) or [])
-                return ("ok", refreshed, fresh, warnings)
-            except Exception as exc:  # noqa: BLE001 -- reported below
-                log.exception("Re-reading the game for a merge failed")
-                return ("error", exc)
-
-        result = self._run_blocking(
-            "Checking the Game", "Checking the game for updates…", work)
-        if not result or result[0] == "error":
-            QMessageBox.warning(
-                self, "Game Not Checked",
-                "The game files could not be re-read, so this project was "
-                "not checked for a game update (it is loaded exactly as "
-                f"saved).\n\n{result[1] if result else 'Unknown error'}")
-            return None
-        _ok, refreshed, fresh, warnings = result
-        warnings = warnings + game_io.take_recovery_notes()
-        if warnings:
-            self._show_load_warnings(warnings)
-        # Files the parse could not read: "couldn't check", never "removed"
-        unreadable = set()
-        for w in warnings:
-            name = w.split(":", 1)[0].strip()
-            unreadable.update({name, os.path.splitext(name)[0]})
-
-        stats = self.project.merge_fresh_originals(fresh, unreadable)
-        if stats["status"] == "low_match":
-            reply = QMessageBox.question(
-                self, "Merge Game Changes?",
-                f"Most of this project's translated lines "
-                f"({stats['changed']}) are no longer in the game. This is "
-                "probably not the game (or not the backup) the project was "
-                "made from.\n\nMerge anyway? Lines that left the game are "
-                "kept in the save file (\"migration_orphans\"), not lost.\n"
-                "Choose No to load the project exactly as saved.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if reply != QMessageBox.StandardButton.Yes:
-                return stats
-            stats = self.project.merge_fresh_originals(
-                fresh, unreadable, force=True)
-        if stats["new"] or stats["changed"] or stats["moved"] or stats["retired"]:
-            msg = ("The game changed since this project was saved "
-                   "(game update?).\n\n"
-                   f"• {stats['new']} new line(s) added (untranslated)\n"
-                   f"• {stats['changed']} changed line(s) reset to untranslated\n"
-                   f"• {stats['moved']} line(s) moved in the game; they kept "
-                   "their translation and status\n"
-                   f"• {stats['retired']} line(s) no longer in the game were "
-                   "removed from the list\n"
-                   f"• {stats['unchanged']} line(s) unchanged")
-            if stats["changed"] or stats["retired"]:
-                msg += ("\n\nThe old translations of changed and removed "
-                        "lines are kept in the save file under "
-                        "\"migration_orphans\" -- nothing is lost.")
-            if refreshed:
-                msg += (f"\n\nBackup refreshed for {len(refreshed)} updated "
-                        "game file(s).")
-            QMessageBox.information(self, "Game Update Merged", msg)
-        return stats
-
-    def _apply_parse_options(self):
-        """Parse with the settings the project was made with (a different
-        "speaker processing" setting must not make the game look changed)."""
-        opts = getattr(self.project, "parse_options", None) or {}
-        parser = self.handler.parser
-        if "speaker_processing" in opts and hasattr(parser, "speaker_processing"):
-            parser.speaker_processing = bool(opts["speaker_processing"])
-
-    def _record_parse_options(self):
-        """Remember the settings this project's entries were parsed with."""
-        parser = self.handler.parser
-        if hasattr(parser, "speaker_processing"):
-            self.project.parse_options = {
-                "speaker_processing": bool(parser.speaker_processing)}
 
     def _merge_new_plugin_entries(self) -> int:
         """Extract plugin + System.json entries and merge any missing from project.
@@ -3326,7 +3223,7 @@ class MainWindow(QMainWindow):
                 raise outcome[1]
             notes = list(getattr(self.handler.parser, "last_export_notes",
                                  None) or [])
-            notes += game_io.take_recovery_notes()
+            notes += game_io.take_recovery_notes(self.project.project_path)
 
             # MV/MZ post-export: plugin injection
             plugin_msg = ""
@@ -6007,9 +5904,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(
                     self, "Install Package Incomplete",
                     f"Saved to:\n{path}\n\nSome translated lines were NOT "
-                    f"included:\n\n{partial}\n\nRe-open the project (and "
-                    "resume it) to pick up the game's new lines, then "
-                    "create the package again.")
+                    f"included:\n\n{partial}\n\n"
+                    + game_io.export_advice(partial))
                 return
             QMessageBox.information(
                 self, "Install Package Created",

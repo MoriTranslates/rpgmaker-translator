@@ -154,16 +154,7 @@ class CrowdParser:
         self._key: bytes = _DEFAULT_KEY
         self._mod: int = _DEFAULT_MOD
 
-    def load_originals(self, project_dir: str) -> list[TranslationEntry]:
-        """Parse the game's ORIGINAL text, for merging a game update.
-
-        Each .sce is read from sce_original/ when an export backed it up
-        (the live file holds English then), else the live file.
-        """
-        return self.load_project(project_dir, from_backup=True)
-
-    def load_project(self, project_dir: str, context_size: int | None = None,
-                     from_backup: bool = False) -> list[TranslationEntry]:
+    def load_project(self, project_dir: str, context_size: int | None = None) -> list[TranslationEntry]:
         """Parse all .sce files in the project directory."""
         if context_size is not None:
             self.context_size = context_size
@@ -180,12 +171,7 @@ class CrowdParser:
         all_entries = []
         for sce_path in sce_files:
             log.info("Loading Crowd script: %s", sce_path)
-            src_path = sce_path
-            bak = os.path.join(project_dir, "sce_original",
-                               os.path.basename(sce_path))
-            if from_backup and os.path.isfile(bak):
-                src_path = bak
-            with open(src_path, "rb") as f:
+            with open(sce_path, "rb") as f:
                 enc_data = f.read()
 
             dec_data = decrypt_sce(enc_data, self._key, self._mod)
@@ -214,7 +200,7 @@ class CrowdParser:
               os.path.join(backup_dir, os.path.basename(p)))
              for p in sce_files], manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
         problems: list[str] = []
         # file -> translations not written because the game text changed
         changed_lines: dict[str, int] = {}
@@ -298,17 +284,6 @@ class CrowdParser:
                 problems.append(f"{sce_name} ({exc})")
         manifest.finish()
         game_io.raise_export_problems(problems, changed_lines)
-
-    def refresh_backups(self, project_dir: str) -> list[str]:
-        """Before a resume merge: put a game update into the backup."""
-        backup_dir = os.path.join(project_dir, "sce_original")
-        if not os.path.isdir(backup_dir):
-            return []
-        return game_io.refresh_on_resume(
-            [(os.path.basename(p), p,
-              os.path.join(backup_dir, os.path.basename(p)))
-             for p in self._find_sce_files(project_dir)],
-            backup_dir + ".manifest.json")
 
     def restore_originals(self, project_dir: str):
         """Restore original .sce from backup."""
