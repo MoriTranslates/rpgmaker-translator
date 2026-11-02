@@ -13,7 +13,7 @@ from collections import Counter
 log = logging.getLogger(__name__)
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QSplitter, QToolBar, QStatusBar, QProgressBar,
+    QMainWindow, QSplitter, QStatusBar, QProgressBar,
     QFileDialog, QMessageBox, QLabel, QWidget, QVBoxLayout, QHBoxLayout,
     QApplication, QProgressDialog, QMenu, QInputDialog, QDialog, QTabWidget,
     QCheckBox, QDialogButtonBox,
@@ -255,7 +255,7 @@ class MainWindow(QMainWindow):
                                   "list-ordered")):
             theme.bind_icon(lambda ic, i=i: self.tabs.setTabIcon(i, ic), name)
 
-        # Pipeline progress bar (below toolbar, above tabs)
+        # Pipeline bar: workflow steps + Next + Stop (above the tabs)
         self.pipeline_bar = PipelineBar()
 
         central = QWidget()
@@ -740,31 +740,19 @@ class MainWindow(QMainWindow):
         )
 
     def _build_toolbar(self):
-        """Build a slim toolbar with quick-access controls."""
-        toolbar = QToolBar("Quick Actions")
-        toolbar.setIconSize(QSize(16, 16))
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+        """Put Stop on the pipeline bar — the workspace's single action bar.
 
-        # Reuse actions created in _build_menubar
-        toolbar.addAction(self.batch_db_action)
-        toolbar.addAction(self.batch_dialogue_action)
-        toolbar.addAction(self.stop_action)
-        toolbar.addSeparator()
-        toolbar.addAction(self.export_action)
-        stop_btn = toolbar.widgetForAction(self.stop_action)
-        if stop_btn is not None:
-            stop_btn.setObjectName("stopButton")  # red while a run is active
-        # Toolbar buttons show the shortcut in their tooltip (set on the
-        # action — QToolButton re-syncs its tooltip whenever the action changes)
+        The steps themselves (Translate DB, Dialogue, … Apply to Game) are
+        the pipeline bar's buttons, so there is no separate toolbar.
+        """
+        self.pipeline_bar.set_stop_action(self.stop_action)
+        # Step actions show their shortcut in menu tooltips too
         for action in (self.batch_db_action, self.batch_dialogue_action,
                        self.export_action):
             keys = action.shortcut().toString(
                 QKeySequence.SequenceFormat.NativeText)
             if keys and keys not in action.toolTip():
                 action.setToolTip(f"{action.toolTip()}  ({keys})")
-        self.toolbar = toolbar
 
     def _build_statusbar(self):
         """Build the bottom status bar with progress."""

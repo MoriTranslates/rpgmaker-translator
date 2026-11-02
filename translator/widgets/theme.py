@@ -44,6 +44,8 @@ DARK = {
     "accent_hover": "#74c7ec",  # sapphire
     "on_accent":    "#1e1e2e",
     "accent_alt":   "#89dceb",  # sky
+    "accent_soft":  "#283250",  # accent wash for the current step
+    "error_soft":   "#3a2233",
     "ok":           "#a6e3a1",  # green
     "warn":         "#f9e2af",  # yellow
     "caution":      "#fab387",  # peach
@@ -78,6 +80,8 @@ LIGHT = {
     "accent_hover": "#3b7af7",
     "on_accent":    "#ffffff",
     "accent_alt":   "#209fb5",
+    "accent_soft":  "#dbe6fd",
+    "error_soft":   "#fbe3e8",
     "ok":           "#40a02b",
     "warn":         "#c47a10",  # darker than Latte yellow — readable on white
     "caution":      "#fe640b",
@@ -467,6 +471,46 @@ QRadioButton::indicator:checked {{
 }}
 QScrollArea {{
     border: none;
+}}
+QWidget#pipelineBar {{
+    background-color: {panel};
+    border-bottom: 1px solid {border};
+}}
+QWidget#pipelineBar QLabel#hint {{
+    color: {text_muted};
+}}
+QToolButton[step] {{
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 5px 10px;
+    color: {text_muted};
+}}
+QToolButton[step]:hover {{
+    background-color: {button};
+    color: {text};
+}}
+QToolButton[step="active"] {{
+    background-color: {accent_soft};
+    color: {accent};
+    font-weight: 600;
+}}
+QToolButton[step="done"] {{
+    color: {text};
+}}
+QToolButton#stopButton {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 5px 12px;
+    color: {text_dim};
+}}
+QToolButton#stopButton:enabled {{
+    color: {error};
+    border-color: {error};
+}}
+QToolButton#stopButton:enabled:hover {{
+    background-color: {error_soft};
 }}
 """
 
