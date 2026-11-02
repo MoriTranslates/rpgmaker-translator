@@ -259,7 +259,7 @@ class TyranoScriptParser:
             except OSError as exc:
                 problems.append(f"{file_key} ({exc})")
 
-        manifest.save()
+        manifest.finish()
 
         # Export system files
         self._export_lang_js(project_dir, entries)

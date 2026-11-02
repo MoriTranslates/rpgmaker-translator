@@ -419,7 +419,7 @@ class KirikiriParser:
 
         for rel_path, live_path in written:
             manifest.record(rel_path, live_path)
-        manifest.save()
+        manifest.finish()
         log.info("Exported %d translations to scenario/", export_count)
         game_io.raise_if_problems(problems)
 

@@ -1487,7 +1487,7 @@ class WolfRPGParser:
         # Remember what we wrote so a later game update can be told apart
         for path in written:
             manifest.record(self._manifest_key(path), str(path))
-        manifest.save()
+        manifest.finish()
 
         # Move Data.wolf aside so the game reads from the folder.
         # os.replace: a stale .bak from an earlier export must not make

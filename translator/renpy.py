@@ -398,7 +398,7 @@ class RenPyParser:
                 continue
             exported += count
 
-        manifest.save()
+        manifest.finish()
         log.info("Exported %d translations to .rpy files", exported)
         game_io.raise_if_problems(problems)
 

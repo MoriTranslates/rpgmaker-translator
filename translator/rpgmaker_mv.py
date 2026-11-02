@@ -644,7 +644,7 @@ class RPGMakerMVParser:
                 log.warning("Export failed for %s: %s", filename, exc)
                 errors.append(f"{filename}: {exc}")
 
-        manifest.save()
+        manifest.finish()
 
         # Export plugin translations (plugins.js is outside data/)
         try:

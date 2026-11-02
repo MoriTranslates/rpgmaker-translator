@@ -94,7 +94,7 @@ def test_refresh_changed_originals_rules(tmp_path):
 
     m.record("ours.json", str(live / "ours.json"))
     m.record("update.json", str(live / "update.json"))
-    m.save()
+    m.finish()
     # The game is updated: update.json changes, a new file appears.
     (live / "update.json").write_text("JP2-v2", encoding="utf-8")
     m = game_io.ExportManifest(str(bak) + ".manifest.json")
@@ -162,7 +162,7 @@ def test_wolf_reverted_db_goes_back_to_original(tmp_path):
     (game / "BasicData" / "DataBase.dat").write_bytes(b"EN-DB")
     m = game_io.ExportManifest(str(tmp_path / "WolfGame_original") + ".manifest.json")
     m.record("BasicData/DataBase.dat", str(game / "BasicData" / "DataBase.dat"))
-    m.save()
+    m.finish()
     WolfRPGParser().save_project(str(game), [])
     assert (game / "BasicData" / "DataBase.dat").read_bytes() == b"JP-DB"
 
@@ -421,3 +421,62 @@ def test_kirikiri_export_without_scenario_is_an_error(tmp_path):
     from translator.kirikiri import KirikiriParser
     with pytest.raises(FileNotFoundError):
         KirikiriParser().save_project(str(tmp_path), [])
+
+
+# ── Preflight: safety steps fail safe ────────────────────────────────
+
+def test_crash_mid_export_never_bakes_our_output_into_backup(mv_game, mv_parser, monkeypatch):
+    """If an export dies after writing some files (so the manifest can't
+    record them), the next export must not treat our English output as a
+    game update and copy it into data_original/."""
+    from translator.rpgmaker_mv import RPGMakerMVParser
+    entries = mv_parser.load_project(mv_game)
+    mv_parser.save_project(mv_game, entries)          # baseline + manifest
+    item = next(e for e in entries if e.file == "Items.json" and e.field == "name")
+    item.translation, item.status = "Potion EN", "translated"
+
+    real = RPGMakerMVParser._save_plugins
+
+    def die(*a, **k):
+        raise KeyboardInterrupt("killed mid-export")
+    monkeypatch.setattr(RPGMakerMVParser, "_save_plugins", die)
+    with pytest.raises(KeyboardInterrupt):
+        mv_parser.save_project(mv_game, entries)      # data/ written, no finish()
+    monkeypatch.setattr(RPGMakerMVParser, "_save_plugins", real)
+
+    p2 = RPGMakerMVParser()
+    p2.save_project(mv_game, p2.load_project(mv_game))
+    with open(os.path.join(mv_game, "data_original", "Items.json"),
+              encoding="utf-8-sig") as f:
+        assert "Potion EN" not in f.read()
+    assert p2.last_export_notes == []
+
+
+def test_export_aborts_before_writing_if_manifest_cannot_be_marked(tmp_path, monkeypatch):
+    from translator.rpgmaker_ace import RPGMakerAceParser
+    game = _ace_game(tmp_path)
+    RPGMakerAceParser().save_project(str(game), [])
+    live = game / "Data" / "Map001.rvdata2"
+    before = live.read_bytes()
+
+    def no_disk(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(game_io.ExportManifest, "_write", no_disk)
+    with pytest.raises(OSError):
+        RPGMakerAceParser().save_project(str(game), [
+            _entry("Map001/x", "Map001.rvdata2", "dialog", "JP", "EN")])
+    assert live.read_bytes() == before
+
+
+@pytest.mark.parametrize("live_rel, bak_rel", [
+    ("game", "game/BasicData_original"),     # backup inside the replaced folder
+    ("game", "game"),
+    ("game/Data", "game"),                   # replaced folder inside the backup
+])
+def test_restore_tree_refuses_overlapping_paths(tmp_path, live_rel, bak_rel):
+    (tmp_path / live_rel).mkdir(parents=True, exist_ok=True)
+    (tmp_path / bak_rel).mkdir(parents=True, exist_ok=True)
+    (tmp_path / "game" / "save.dat").write_bytes(b"SAVE")
+    with pytest.raises(ValueError):
+        game_io.restore_tree(str(tmp_path / bak_rel), str(tmp_path / live_rel))
+    assert (tmp_path / "game" / "save.dat").read_bytes() == b"SAVE"

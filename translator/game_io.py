@@ -171,6 +171,16 @@ def restore_tree(backup_dir: str, live_dir: str,
     the replaced folder(s).
     """
     backup_dir, live_dir = os.fspath(backup_dir), os.fspath(live_dir)
+    real_live = os.path.realpath(live_dir)
+    real_bak = os.path.realpath(backup_dir)
+    if (os.path.dirname(real_live) == real_live          # a drive root
+            or real_bak == real_live
+            or real_bak.startswith(real_live.rstrip(os.sep) + os.sep)
+            or real_live.startswith(real_bak.rstrip(os.sep) + os.sep)):
+        # Swapping out live_dir would delete (or recurse into) the backup.
+        raise ValueError(
+            f"Refusing to restore {live_dir} from {backup_dir}: the backup "
+            "and the folder it replaces overlap.")
     if only is not None:
         for name in only:
             b = os.path.join(backup_dir, name)
@@ -242,13 +252,19 @@ class ExportManifest:
         self.path = os.fspath(path)
         self.files: dict[str, dict] = {}
         self.exists = False
+        self.pending = False
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
             if isinstance(raw, dict) and isinstance(raw.get("files"), dict):
                 self.files = raw["files"]
-                self.exists = True
+                # A manifest left "pending" by an export that crashed or
+                # couldn't record what it wrote can't tell our output from
+                # a game update: treat it like no manifest (never refresh).
+                self.exists = not raw.get("pending", False)
         except (OSError, ValueError):
+            # Missing or unreadable manifest: behave as for a v1.1.0 backup
+            # -- never re-baseline, the safe direction.
             pass
 
     def is_ours(self, key: str, live_path: str) -> bool:
@@ -272,15 +288,36 @@ class ExportManifest:
     def forget(self, key: str) -> None:
         self.files.pop(key, None)
 
+    def _write(self) -> None:
+        atomic_write_text(self.path, json.dumps(
+            {"version": self.VERSION, "pending": self.pending,
+             "files": self.files}, ensure_ascii=False, indent=1))
+
+    def begin(self) -> None:
+        """Mark an export as in progress, BEFORE any game file is written.
+
+        Raises OSError if that can't be recorded -- the export must then
+        not touch the game, or a later export could mistake our own output
+        for a game update and copy English into the backup.
+        """
+        self.pending = True
+        self._write()
+
     def save(self) -> None:
+        """Write the manifest, keeping the current pending state."""
         try:
-            atomic_write_text(self.path, json.dumps(
-                {"version": self.VERSION, "files": self.files},
-                ensure_ascii=False, indent=1))
-            self.exists = True
+            self._write()
         except OSError as exc:
+            # Harmless to lose: if this was the pending marker, it is still
+            # on disk from begin(); without a manifest nothing is refreshed.
             log.warning("Could not write export manifest %s: %s",
                         self.path, exc)
+
+    def finish(self) -> None:
+        """Record a completed export (clears the pending marker)."""
+        self.pending = False
+        self.save()
+        self.exists = not self.pending
 
 
 def refresh_changed_originals(pairs, manifest: ExportManifest) -> list[str]:
@@ -294,11 +331,15 @@ def refresh_changed_originals(pairs, manifest: ExportManifest) -> list[str]:
     * the live file is not what we last wrote, and
     * it differs from the backup (or the backup has no copy of it).
 
+    Always marks the manifest pending (``begin``) before returning, so
+    callers write game files only after that marker is safely on disk.
+
     Returns the keys that were refreshed.
     """
-    if not manifest.exists:
-        return []
     refreshed = []
+    if not manifest.exists:
+        manifest.begin()
+        return refreshed
     for key, live, bak in pairs:
         if not os.path.isfile(live):
             continue
@@ -312,6 +353,7 @@ def refresh_changed_originals(pairs, manifest: ExportManifest) -> list[str]:
         refreshed.append(key)
         log.warning("Game file %s changed since the backup was taken — "
                     "backup refreshed from the current file", key)
+    manifest.begin()
     return refreshed
 
 

@@ -257,7 +257,7 @@ class CrowdParser:
                 manifest.record(sce_name, sce_path)
             except (OSError, ValueError) as exc:
                 problems.append(f"{sce_name} ({exc})")
-        manifest.save()
+        manifest.finish()
         game_io.raise_if_problems(problems)
 
     def restore_originals(self, project_dir: str):

@@ -306,7 +306,7 @@ class RPGMakerAceParser:
             except Exception as exc:
                 log.error("Failed to export %s: %s", filename, exc)
                 problems.append(f"{filename} ({exc})")
-        manifest.save()
+        manifest.finish()
         game_io.raise_if_problems(problems)
 
     def restore_originals(self, project_dir: str):

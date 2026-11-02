@@ -359,7 +359,7 @@ class SRPGStudioParser:
         # disk never leaves a truncated file holding all game data)
         game_io.atomic_write_bytes(dts_path, pre_project + patched)
         manifest.record("data.dts", dts_path)
-        manifest.save()
+        manifest.finish()
 
         log.info("Exported translations to %s (%d bytes patched)",
                  dts_path, len(patched))

@@ -627,7 +627,7 @@ class RPGMaker2KParser:
             except Exception as e:
                 log.error("Failed to export %s: %s", fname, e)
                 problems.append(f"{fname} ({e})")
-        manifest.save()
+        manifest.finish()
         game_io.raise_if_problems(problems)
 
     def _export_ldb(self, source_path: str, target_path: str,

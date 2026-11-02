@@ -277,7 +277,7 @@ class CSVGameParser:
             manifest.record(filename, fpath)
 
             log.info("Exported %d translations to %s", applied, filename)
-        manifest.save()
+        manifest.finish()
         game_io.raise_if_problems(problems)
 
     def restore_originals(self, project_dir: str):
