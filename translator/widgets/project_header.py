@@ -28,7 +28,8 @@ class ProjectHeader(QWidget):
 
         self.engine = QLabel("")
         self.engine.setObjectName("engineBadge")
-        layout.addWidget(self.engine)
+        # A pill, not a full-height box
+        layout.addWidget(self.engine, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.subtitle = QLabel("")
         self.subtitle.setObjectName("hint")

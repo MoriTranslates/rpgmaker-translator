@@ -90,7 +90,7 @@ LIGHT = {
     "button":       "#efe6d2",
     "button_hover": "#e6dac0",
     "button_pressed": "#dccfb0",
-    "selection":    "#f3dfb3",
+    "selection":    "#dde5f3",  # cool ink wash, never mistaken for amber
     "selection_text": "#1b2238",
     "text":         "#1b2238",  # ink navy
     "text_soft":    "#2b3350",

@@ -11,8 +11,8 @@ import os
 from PyQt6.QtCore import QPointF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPixmap, QRadialGradient
 from PyQt6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QPushButton, QVBoxLayout, QWidget,
+    QApplication, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
+    QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget,
 )
 
 from . import theme
@@ -34,7 +34,7 @@ _STEPS = (
 
 # Recent list: rows visible before it scrolls
 _RECENT_VISIBLE_ROWS = 4
-_RECENT_ROW_HEIGHT = 40
+_RECENT_ROW_HEIGHT = 44
 _RECENT_PATH_WIDTH = 480  # px — longer paths are elided in the middle
 _LOGO_WIDTH = 520
 
@@ -189,17 +189,19 @@ class WelcomePage(QWidget):
             self._step_labels.append((badge, text))
         col.addLayout(steps)
 
-        # ── Supported engines as badges ──
+        # ── Supported engines as badges (two centered rows, never squeezed) ──
         col.addSpacing(8)
-        engines = QHBoxLayout()
-        engines.setSpacing(6)
-        engines.addStretch()
-        for name in _ENGINES:
-            chip = QLabel(name)
-            chip.setObjectName("engineChip")
-            engines.addWidget(chip)
-        engines.addStretch()
-        col.addLayout(engines)
+        half = (len(_ENGINES) + 1) // 2
+        for names in (_ENGINES[:half], _ENGINES[half:]):
+            engines = QHBoxLayout()
+            engines.setSpacing(6)
+            engines.addStretch()
+            for name in names:
+                chip = QLabel(name)
+                chip.setObjectName("engineChip")
+                engines.addWidget(chip)
+            engines.addStretch()
+            col.addLayout(engines)
 
         holder = QWidget()
         holder.setObjectName("welcomeHolder")
@@ -221,15 +223,15 @@ class WelcomePage(QWidget):
         painter.fillRect(self.rect(), theme.qcolor("window"))
         mid = self._logo.mapTo(self, self._logo.rect().center())
         center = QPointF(self.width() / 2, mid.y() + 10)
-        radius = max(self.width(), self.height()) * 0.42
+        radius = max(self.width(), self.height()) * 0.38
         grad = QRadialGradient(center, radius)
         glow = QColor(theme.c("glow"))
-        clear = QColor(glow)
-        clear.setAlpha(0)
-        glow.setAlpha(235)
-        grad.setColorAt(0.0, glow)
-        grad.setColorAt(0.45, QColor(glow.red(), glow.green(), glow.blue(), 90))
-        grad.setColorAt(1.0, clear)
+        # Eased falloff in small steps: a few linear stops show as rings
+        peak = 170 if theme.is_dark() else 140
+        for i in range(13):
+            t = i / 12
+            glow.setAlpha(int(peak * (1 - t) ** 2.2))
+            grad.setColorAt(t, QColor(glow))
         painter.fillRect(self.rect(), grad)
         painter.end()
 
@@ -280,7 +282,7 @@ class WelcomePage(QWidget):
             label = QLabel(
                 f"<span>{html.escape(name)}</span><br>"
                 f"<span style=\"color: {theme.c('text_dim')}; "
-                f"font-size: 8pt;\">{html.escape(shown_path)}</span>")
+                f"font-size: 9.5pt;\">{html.escape(shown_path)}</span>")
             label.setTextFormat(Qt.TextFormat.RichText)
             label.setContentsMargins(8, 2, 8, 2)
             # Clicks go to the list item, not the label
@@ -313,16 +315,30 @@ class WelcomePage(QWidget):
             self._logo.setPixmap(pm)
             self._title.setVisible(False)   # the logo already says it
         t = theme.colors()
-        # Light mode: the night-sky logo sits on an ink card of its own
-        logo_bg = ("transparent" if theme.is_dark()
-                   else t["window"] if self._logo_src.isNull() else "#0f1424")
+        # The logo is drawn for a night sky (white lettering).  On parchment
+        # it gets one: a candlelit "window" card with a warm rim and a soft
+        # shadow, so it reads as an illustration rather than a pasted box.
+        night = theme.is_dark() or self._logo_src.isNull()
+        if night:
+            logo_css = "background: transparent; padding: 6px;"
+            self._logo.setGraphicsEffect(None)
+        else:
+            logo_css = (
+                "background: qradialgradient(cx:0.5, cy:0.62, radius:0.8, "
+                "fx:0.5, fy:0.62, stop:0 #3a2a14, stop:0.5 #171d33, "
+                "stop:1 #0f1424);"
+                "border: 1px solid #d9bf8c; border-radius: 18px;"
+                "padding: 10px 34px;")
+            shadow = QGraphicsDropShadowEffect(self._logo)
+            shadow.setBlurRadius(36)
+            shadow.setOffset(0, 8)
+            shadow.setColor(QColor(110, 72, 20, 70))
+            self._logo.setGraphicsEffect(shadow)
         self.setStyleSheet(f"""
             QWidget#welcomeHolder, QWidget#welcomeRecent {{
                 background: transparent;
             }}
-            QLabel#welcomeLogo {{
-                background: {logo_bg}; border-radius: 14px; padding: 6px;
-            }}
+            QLabel#welcomeLogo {{ {logo_css} }}
             QLabel#welcomeTitle {{ font-size: 20pt; font-weight: 700; }}
             QLabel#welcomeTagline {{
                 font-size: 12pt; color: {t['text_soft']};
@@ -353,7 +369,7 @@ class WelcomePage(QWidget):
             QLabel#engineChip {{
                 background-color: {t['raised']}; color: {t['text_muted']};
                 border: 1px solid {t['border']}; border-radius: 10px;
-                padding: 2px 9px; font-size: 8.5pt;
+                padding: 2px 10px; font-size: 9.5pt;
             }}
             QListWidget#recentList {{
                 background: transparent; border: none; outline: none;
