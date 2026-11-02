@@ -852,6 +852,23 @@ class MainWindow(QMainWindow):
         self._open_project_path(path)
 
     @staticmethod
+    def _export_incomplete_advice(partial) -> str:
+        """What the user can do, depending on why lines were not written."""
+        problems = list(getattr(partial, "problems", []) or [])
+        changed = [p for p in problems if "line(s) not written" in p]
+        other = [p for p in problems if p not in changed]
+        advice = []
+        if other:
+            advice.append("For files that could not be written: close the "
+                          "game, free disk space if needed, and export again.")
+        if changed:
+            advice.append("For lines whose game text changed (game update?): "
+                          "exporting again won't change them. Re-open the "
+                          "project and resume it to pick up the new text, "
+                          "translate the new lines, then export.")
+        return "\n".join(advice)
+
+    @staticmethod
     def _load_warning_text(warnings: list[str], limit: int = 15) -> str:
         """User-facing text for files the parser skipped while loading."""
         shown = "\n".join(f"• {w}" for w in warnings[:limit])
@@ -3309,6 +3326,7 @@ class MainWindow(QMainWindow):
                 raise outcome[1]
             notes = list(getattr(self.handler.parser, "last_export_notes",
                                  None) or [])
+            notes += game_io.take_recovery_notes()
 
             # MV/MZ post-export: plugin injection
             plugin_msg = ""
@@ -3346,10 +3364,10 @@ class MainWindow(QMainWindow):
             if partial is not None:
                 QMessageBox.warning(
                     self, "Export Incomplete",
-                    "Some files were NOT exported, so parts of the game are "
-                    "still untranslated or show older text:\n\n"
-                    f"{partial}\n\nFix the problem (close the game, free "
-                    "disk space…) and export again." + plugin_msg + note_msg)
+                    "Parts of the game are still untranslated or show older "
+                    f"text:\n\n{partial}\n\n"
+                    + self._export_incomplete_advice(partial)
+                    + plugin_msg + note_msg)
                 return
             QMessageBox.information(
                 self, "Export Complete",
@@ -3485,6 +3503,9 @@ class MainWindow(QMainWindow):
                 return
             try:
                 self.handler.restore_originals(self.project.project_path)
+                # A killed earlier restore was put back and then completed
+                # by this one: the "still translated" note no longer applies
+                game_io.take_recovery_notes()
                 QMessageBox.information(
                     self, "Restore Complete",
                     self.handler.get_restore_message()
@@ -3529,6 +3550,7 @@ class MainWindow(QMainWindow):
             # leaves the live data/ folder exactly as it was.
             plugins_restored = self.parser.restore_originals(
                 self.project.project_path)
+            game_io.take_recovery_notes()   # completed by this restore
 
             # Clean up injected word wrap plugin
             self.parser.remove_wordwrap_plugin(self.project.project_path)

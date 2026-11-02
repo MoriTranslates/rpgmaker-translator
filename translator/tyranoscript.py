@@ -458,6 +458,9 @@ class TyranoScriptParser:
     def is_tyranoscript_project(path: str) -> bool:
         """Check if a folder looks like a TyranoScript game."""
         scenario = os.path.join(path, "data", "scenario")
+        if game_io.interrupted_swap(scenario):
+            # Restore Originals killed mid-swap (read-only check)
+            scenario += ".rmt-old"
         if os.path.isdir(scenario):
             return any(f.endswith(".ks") for f in os.listdir(scenario))
         # Some games use extracted/ subfolder
@@ -525,6 +528,9 @@ class TyranoScriptParser:
             os.path.join(project_dir, "data", "scenario"),
             os.path.join(project_dir, "extracted", "data", "scenario"),
         ]
+        # A Restore Originals killed mid-swap: put the folder back first
+        for c in candidates:
+            game_io.recover_interrupted_restore(c)
         for c in candidates:
             if os.path.isdir(c):
                 return c

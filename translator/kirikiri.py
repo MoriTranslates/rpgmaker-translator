@@ -601,6 +601,10 @@ class KirikiriParser:
             os.path.join(project_dir, "data", "scenario"),
             os.path.join(project_dir, "scenario"),
         ]
+        # A Restore Originals killed mid-swap: put the folder back first
+        # (never re-extract over it from the XP3)
+        for d in candidates:
+            game_io.recover_interrupted_restore(d)
         for d in candidates:
             if os.path.isdir(d):
                 return d

@@ -11,85 +11,107 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [1.1.1] - 2026-11-02
 
-A safety release. Two independent code reviews found ways the app could damage game folders, put
-translations in the wrong place or overwrite your review work. All of them are fixed here.
+A safety release. Code reviews and tests on copies of real games found ways the app could damage
+game folders, put translations in the wrong place or lose your review work. This release fixes the
+problems listed below.
 
 ### Fixed
 
+Game files and backups:
+
+- **RPG Maker VX Ace: exporting no longer scrambles the game data.** The `.rvdata2` writer numbered
+  objects differently from Ruby, so after any translated line the game's internal links pointed at
+  the wrong objects (event commands turned into move routes or numbers). On a real game this hit
+  most maps. Exports, the script plugins and the window scaler now write files the way Ruby does,
+  and text the app can't decode is written back byte for byte.
 - **Wolf RPG: Restore Originals could delete your save files.** For games that keep `BasicData/`
   and `MapData/` in the main folder, backup and restore now only touch those two folders, never
   the whole game folder.
-- **No more half-written game files.** Every engine now writes game files, backups and the
-  VX Ace script patches safely. A crash, a full disk or a locked file leaves the old file in
-  place instead of a broken one, and an interrupted first backup is never treated as complete.
-  A failed Restore Originals leaves the game as it was.
-- **Game updates are no longer rolled back.** If you update a game after your first export, the
-  next export notices the changed files, refreshes the backup from them and tells you to re-open
-  the project for any new lines. It used to copy the old files back over the update.
+- **No more half-written game files.** Every engine writes game files, backups and the VX Ace
+  script patches safely. A crash, a full disk or a locked file leaves the old file in place
+  instead of a broken one, and an interrupted first backup is never treated as complete.
+- **Restore Originals is safe to interrupt.** A failed restore leaves the game as it was. If the
+  app or PC stops in the middle of the final swap, the game folder is put back the next time the
+  game is opened, exported or restored (RPG Maker MV/MZ, VX Ace, Kirikiri, TyranoScript; Wolf RPG
+  on the next restore), and you are told. Leftover copies are kept aside, never deleted.
+- **Restore Originals keeps files a game update added** instead of deleting them.
+- **Game updates are no longer rolled back.** When you update a game after exporting with this
+  version, the next export, or resuming the project, notices the changed files and puts them into
+  the backup, including new files and TyranoScript's `lang.js` / `Config.tjs`. It used to copy the
+  old files back over the update. (Backups made by 1.1.0 can't tell an update from the app's own
+  output, so for those the old behaviour stays until the first export with this version.)
+
+Translations in the right place:
+
 - **RPG Maker MV/MZ: translations land on the right line.** Dialogue, scrolling text, comments
   and choices are written to the exact event and position they came from. Before, a line that
   appears in several events could get its translation in the wrong event and stay Japanese in
   the one you translated.
+- **RPG Maker MV/MZ: messages kept in one Show Text command are exported.** Games translated or
+  edited by other tools often keep a whole message, line breaks included, in one command. Those
+  translations were silently skipped.
+- **A translation is never written over text that changed.** Every engine that places translations
+  by position (RPG Maker MV/MZ, VX Ace, 2000/2003, Wolf RPG, Ren'Py, Kirikiri, TyranoScript, CSV
+  games, Crowd) now checks that the original is still there. After a game update or a hand edit,
+  the game's new text is kept. Before, the old translation replaced the new line.
+- **SRPG Studio:** two identical lines with different translations each keep their own
+  translation (both used to get the last one).
 - **Reverted lines no longer stay in English** in VX Ace, 2000/2003, Wolf RPG and Crowd games.
-- **"Export Complete" only when it really is.** If some files could not be written, you now see
-  "Export Incomplete" with the list of files, for every engine.
+
+Honest reports:
+
+- **"Export Complete" only when it really is**, for every engine. You now see "Export Incomplete"
+  with the files and line counts when a file could not be written, or when translated lines
+  could not be placed because the game's text changed or the line is gone. The advice matches
+  the cause. The install package (patch zip) reports missing lines the same way.
+- **Files that can't be read are listed** when you open or resume a project, instead of their text
+  silently missing.
+
+Your work is kept:
+
+- **Re-opening a project after a game update picks up the changes**, for every engine. Lines are
+  matched by their text, so lines that only moved keep their translation and Reviewed status. New
+  lines are added, changed lines go back to untranslated, and lines that left the game are removed
+  from the list. The old translations of changed and removed lines are kept in the save file. If
+  most of your translated lines would change (probably the wrong game), you are asked first.
+- **Ren'Py projects from earlier versions keep their work** after the dialogue numbering changed
+  in this version (see below): saved projects are re-matched by text when they are opened.
 - **Your reviewed lines are left alone.** Automatic clean-up, code repair and bulk grammar polish
   no longer change, clear or re-translate lines you marked Reviewed, and polish no longer turns
   Reviewed lines back into Translated. If you edit a line while the AI is still working on it,
   your edit wins.
+
+Engines:
+
+- **Wolf RPG Editor 3.x games are recognised (including `GamePro.exe`) and refused** with a clear
+  message instead of being opened with garbled text and exported into broken files.
+- **Ren'Py:** scripts in subfolders of `game/` are translated, and lines ending in `with …`,
+  `nointeract` or `id …` are no longer skipped. `[player]`-style variables are protected from the
+  AI, and stray `[` or `{` are escaped. A backslash or quote in a translation can no longer break
+  the script line, and a character name containing `\"` is no longer cut short. Translations with
+  a leftover `«CODE»` placeholder are rejected instead of written into the game.
+- **RPG Maker MZ:** plugin settings that are fixed choices (`@type select`) or font names are no
+  longer offered for translation or written back, including in existing projects. Translating them
+  broke the plugin.
+- **Wolf RPG:** file paths with spaces or brackets are no longer offered for translation, and
+  export no longer fails when a `Data.wolf.bak` already exists.
 - **Translator notes:** a scene-break line (`---`, `***`, `━━━`, `＊＊＊`…) no longer cuts off the
   rest of a translation.
-- **Ren'Py:** `[player]`-style variables are protected from the AI, and stray `[` or `{` in a
-  translation are escaped, so the game no longer crashes when that line is shown. Translations
-  with a leftover `«CODE»` placeholder are rejected instead of written into the game.
 - **Crowd:** curly quotes from the AI no longer turn into `"` characters that can break scripts.
 - **CSV games:** a column of numbers or sound IDs next to the text is no longer mistaken for the
   English column and overwritten. The file is skipped and the export says so.
 - **SRPG Studio:** numbers in the game data are no longer offered as text to translate.
 - **Kirikiri:** bytes the app can't decode are kept as they are instead of becoming `?`.
-- Wolf RPG export no longer fails when a `Data.wolf.bak` already exists.
-
-Found by testing on copies of real games:
-
-- **RPG Maker VX Ace: exporting no longer scrambles the game data.** The `.rvdata2` writer numbered
-  objects differently from Ruby, so after any translated line the game's internal links pointed at
-  the wrong objects (event commands turned into move routes or numbers). On a real game this hit
-  most maps. Exports, the script plugins and the window scaler now write files the way Ruby does.
-- **RPG Maker MV/MZ: messages kept in one Show Text command are exported.** Games translated or
-  edited by other tools often keep a whole message, line breaks included, in one command. Those
-  translations were silently skipped, while the export still said "Export Complete".
-- **Translations are never written over text that changed, in every engine.** After a game update
-  or a hand edit, a line whose text changed keeps the game's new text, and the export says "Export
-  Incomplete" with the files and how many lines. Before, the old translation replaced the new line
-  in every engine: positions shifted in RPG Maker 2000/2003, VX Ace, Wolf RPG, Ren'Py, Kirikiri,
-  TyranoScript, CSV games and Crowd, and database names in MV/MZ.
-- **Re-opening a project after a game update now really picks up the changes**, for every engine.
-  New lines are added, changed lines go back to untranslated (their old translation is kept in the
-  save file), and everything else keeps its translation and Reviewed status.
-- **The install package (patch zip) says when lines are missing.** Lines it couldn't place are
-  listed as "Install Package Incomplete" instead of being left out silently.
-- **SRPG Studio:** two identical lines with different translations each keep their own
-  translation (both used to get the last one).
-- **RPG Maker VX Ace:** a blank line at the start of a message stays at the start (it used to move
-  to the bottom, even when nothing was translated).
-- **An interrupted Restore Originals can't leave the game without its data folder any more.** The
-  folder is put back automatically the next time the game is opened, exported or restored.
-- **Wolf RPG Editor 3.x games are recognised (including `GamePro.exe`) and refused** with a clear
-  message instead of being opened with garbled text and exported into broken files.
-- **Files that can't be read are listed when you open a project**, instead of their text silently
-  missing.
-- **Ren'Py:** scripts in subfolders of `game/` are translated, lines ending in `with …` or
-  `nointeract` are no longer skipped, a backslash in a translation shows up in the game, and a
-  character name containing `\"` is no longer cut short.
-- **RPG Maker MZ:** plugin settings that are fixed choices or font names are no longer offered for
-  translation (translating them broke the plugin).
-- **Wolf RPG:** file paths with spaces or brackets are no longer offered for translation.
 
 ### Changed
 
 - Bulk grammar polish only polishes lines that aren't marked Reviewed.
 - RPG Maker 2000/2003 export asks before adding EasyRPG Player to the game folder.
 - Writing translations to the game no longer freezes the window on large games.
+- Resuming a project checks the game for updates in the background, with a progress dialog.
+- Ren'Py: lines ending in `with …`, `nointeract` or `id …` are now dialogue, so later lines of the
+  same label are numbered differently. Saved projects are re-matched by text automatically.
+- The "speaker processing" setting is saved with each project and used again when it is resumed.
 
 ### Security
 

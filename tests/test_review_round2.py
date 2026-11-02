@@ -732,3 +732,54 @@ def test_wolf3_encrypted_dat_is_detected_and_wolf2_encrypted_is_not(tmp_path):
     assert "encrypted" in wolfrpg.wolf3_marker(tmp_path / "Data")
     (basic / "DataBase.dat").write_bytes(b"\x00P\x00\x00\x00\x50" + b"\x00" * 10)
     assert wolfrpg.wolf3_marker(tmp_path / "Data") is None
+
+
+# ── Messages, recovery for scenario engines, detection (fixes 16, 17) ─
+
+def test_export_incomplete_advice_matches_the_cause():
+    from translator.game_io import PartialExportError
+    from translator.widgets.main_window import MainWindow
+    changed = PartialExportError(
+        ["Map001.json: 2 translated line(s) not written — the game text "
+         "there changed, so the game's new text was kept"])
+    locked = PartialExportError(["Map002.json: [Errno 13] Permission denied"])
+    a = MainWindow._export_incomplete_advice(changed)
+    assert "Re-open the project" in a and "close the game" not in a
+    b = MainWindow._export_incomplete_advice(locked)
+    assert "close the game" in b and "Re-open" not in b
+
+
+def test_kirikiri_recovers_a_killed_swap_instead_of_reextracting(tmp_path):
+    from translator import game_io
+    from translator.kirikiri import KirikiriParser
+    from test_smoke_findings import _kill_between_renames
+    scen = tmp_path / "data" / "scenario"
+    scen.mkdir(parents=True)
+    (scen / "a.ks").write_bytes("*start\r\n翻訳済みの台詞[p]\r\n".encode("cp932"))
+    _kill_between_renames(str(scen))
+    game_io.take_recovery_notes()
+    entries = KirikiriParser().load_project(str(tmp_path))
+    assert (scen / "a.ks").is_file()
+    assert entries and entries[0].original.startswith("翻訳済み")
+    assert game_io.take_recovery_notes()
+
+
+def test_tyrano_detection_is_read_only_after_a_killed_swap(tmp_path):
+    from translator.tyranoscript import TyranoScriptParser
+    from test_smoke_findings import _kill_between_renames
+    scen = tmp_path / "data" / "scenario"
+    scen.mkdir(parents=True)
+    (scen / "first.ks").write_text("*start\n台詞[p]\n", encoding="utf-8")
+    _kill_between_renames(str(scen))
+    assert TyranoScriptParser.is_tyranoscript_project(str(tmp_path))
+    assert not scen.exists()                       # nothing renamed
+
+
+def test_renpy_detects_scripts_only_in_subfolders(tmp_path):
+    from translator.renpy import RenPyParser
+    game = tmp_path / "RenGame"
+    (game / "renpy").mkdir(parents=True)
+    (game / "game" / "scripts").mkdir(parents=True)
+    (game / "game" / "scripts" / "ch1.rpy").write_text('label a:\n    "台詞"\n',
+                                                       encoding="utf-8")
+    assert RenPyParser.is_renpy_project(str(game))

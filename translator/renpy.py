@@ -222,7 +222,9 @@ class RenPyParser:
         if not os.path.isdir(game_dir):
             return False
         # Must have at least one .rpy file
-        has_rpy = bool(_rpy_files(game_dir))
+        # stop at the first script: detection must not walk every image
+        has_rpy = any(fn.endswith(".rpy")
+                      for _d, _s, files in os.walk(game_dir) for fn in files)
         # Should also have renpy/ folder or a .py launcher
         has_renpy = (os.path.isdir(os.path.join(path, "renpy")) or
                      any(f.endswith(".py") for f in os.listdir(path)))
