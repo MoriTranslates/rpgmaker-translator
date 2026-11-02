@@ -112,6 +112,9 @@ JAPANESE_RE = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uFF00-\uFFEF
 # Filter out file paths, color codes, and non-display strings from DB
 _DB_SKIP_RE = re.compile(
     r'^[\w\-/\\]+\.\w{2,4}$'   # file paths (BGM/foo.mp3)
+    # asset paths with spaces, brackets etc. ("SE2/着信01 (2).wav")
+    r'|^[^\n:*?"<>|]+\.(?i:png|jpe?g|bmp|gif|webp|ogg|wav|mp3|mp4|webm|mid'
+    r'|midi|avi|wmv|mpg|ttf|otf|ico|txt|csv|dat|mps|wolf)$'
     r'|^\d+$'                   # pure numbers
     r'|^#[0-9A-Fa-f]{3,8}$'    # color codes
     r'|^$',                     # empty

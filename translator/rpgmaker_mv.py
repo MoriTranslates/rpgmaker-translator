@@ -3326,6 +3326,8 @@ class RPGMakerMVParser:
             return []
 
         entries = []
+        self._plugin_dir = os.path.join(os.path.dirname(plugins_path), "plugins")
+        self._plugin_meta_cache = {}
         for plugin in plugins:
             if not isinstance(plugin, dict):
                 continue
@@ -3370,6 +3372,8 @@ class RPGMakerMVParser:
             pass
 
         # Plain string — check if translatable
+        if self._is_plugin_identifier(plugin_name, key, value):
+            return
         if self._is_translatable_plugin_value(value, key, id_prefix):
             out.append(TranslationEntry(
                 id=id_prefix,
@@ -3403,6 +3407,68 @@ class RPGMakerMVParser:
                 elif isinstance(v, (list, dict)):
                     self._scan_parsed_plugin(v, k, child_id,
                                              plugin_name, out)
+
+    # Parameters naming a registered font: other parameters (and the
+    # plugin's code) look the font up by this name, so it is a key.
+    _PLUGIN_FONT_KEY_RE = re.compile(
+        r'^(?:フォント名|フォントネーム|font[\s_]*(?:name|face|family))$',
+        re.IGNORECASE)
+    # Header comment blocks: /*: ... */, /*:ja ... */, /*~struct~X: ... */
+    _PLUGIN_DOC_RE = re.compile(
+        r'/\*(?::\w*|~struct~[^:\s*]+:\w*)(.*?)\*/', re.S)
+    _PLUGIN_TAG_RE = re.compile(
+        r'^\s*\*?\s*@(param|arg|command|option|value)\s+(.*?)\s*$')
+
+    def _plugin_meta(self, plugin_name: str) -> dict:
+        """``{param name: set of fixed values}`` from the plugin's header.
+
+        Collects every ``@option`` / ``@value`` of each ``@param`` in the
+        plugin's doc blocks (all languages and ``~struct~`` blocks).  A
+        missing or unreadable plugin file gives ``{}`` (no extra filtering).
+        """
+        cache = getattr(self, "_plugin_meta_cache", None)
+        if cache is None:
+            cache = self._plugin_meta_cache = {}
+        if plugin_name in cache:
+            return cache[plugin_name]
+        meta: dict[str, set] = {}
+        plugin_dir = getattr(self, "_plugin_dir", "")
+        path = os.path.join(plugin_dir, plugin_name + ".js") if plugin_dir else ""
+        try:
+            with open(path, encoding="utf-8-sig", errors="replace") as f:
+                src = f.read()
+        except OSError:
+            src = ""   # no plugin file: no metadata, keep the old behaviour
+        for block in self._PLUGIN_DOC_RE.findall(src):
+            current = None
+            for line in block.splitlines():
+                m = self._PLUGIN_TAG_RE.match(line)
+                if not m:
+                    continue
+                tag, val = m.groups()
+                if tag == "param":
+                    current = val
+                elif tag in ("arg", "command"):
+                    current = None      # plugin-command args are not params
+                elif tag in ("option", "value") and current and val:
+                    meta.setdefault(current, set()).add(val)
+        cache[plugin_name] = meta
+        return meta
+
+    def _is_plugin_identifier(self, plugin_name: str, key: str,
+                              value: str) -> bool:
+        """True for plugin values the plugin compares against, not text.
+
+        * one of the parameter's declared ``@option`` / ``@value`` choices
+          (``@type select`` / ``combo``): translating it breaks the match
+          (e.g. Keke_StylishGauge ``ゲージの形状`` = ``斜めな形``);
+        * a font name/key (e.g. Keke_CommonData ``フォント名``) that other
+          parameters and the plugin's code look the font up by.
+        """
+        if self._PLUGIN_FONT_KEY_RE.match(key.strip()):
+            return True
+        choices = self._plugin_meta(plugin_name).get(key)
+        return bool(choices) and value.strip() in choices
 
     def _is_translatable_plugin_value(self, value: str, key: str,
                                        entry_id: str = "") -> bool:

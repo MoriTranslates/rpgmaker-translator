@@ -844,3 +844,95 @@ def test_resume_shows_merged_game_update(qapp, monkeypatch, tmp_path, mv_game, m
     assert any(e.original == "新アイテム" for e in win.project.entries)
     assert all(e.status == "translated" for e in win.project.entries
                if e.original != "新アイテム")
+
+
+# ── Low items (FIXED) ────────────────────────────────────────────────
+
+_GAUGE_PLUGIN = '''/*:
+ * @plugindesc test
+ * @param 形状
+ * @type select
+ * @option 四角い形
+ * @option 斜めな形
+ * @default 四角い形
+ *
+ * @param 内部名
+ * @type select
+ * @option 表示用の名前
+ * @value 内部の値
+ *
+ * @param 見出し
+ * @desc ふつうの表示テキスト
+ *
+ * @param フォント登録
+ * @type struct<font>[]
+ *
+ * @command 何か
+ * @arg 種類
+ * @option 引数の選択肢
+ */
+/*~struct~font:
+ * @param フォント名
+ * @desc フォントの呼び出しに使う
+ */
+'''
+
+
+def test_mz_plugin_choices_and_font_keys_are_not_offered(mv_game, mv_parser):
+    plugins_js = os.path.join(mv_game, "js", "plugins.js")
+    os.makedirs(os.path.join(mv_game, "js", "plugins"), exist_ok=True)
+    with open(os.path.join(mv_game, "js", "plugins", "TestGauge.js"), "w",
+              encoding="utf-8") as f:
+        f.write(_GAUGE_PLUGIN)
+    fonts = json.dumps([json.dumps({"フォント名": "刻", "フォントファイル": "a.ttf"})],
+                       ensure_ascii=False)
+    plugins = [{"name": "TestGauge", "status": True, "description": "",
+                "parameters": {"形状": "斜めな形", "内部名": "内部の値",
+                               "見出し": "ゲームの見出し", "フォント登録": fonts}}]
+    with open(plugins_js, "w", encoding="utf-8") as f:
+        f.write("var $plugins =\n" + json.dumps(plugins, ensure_ascii=False) + ";\n")
+    ids = {e.id for e in mv_parser.load_project(mv_game) if e.file == "plugins.js"}
+    assert "plugins.js/TestGauge/見出し" in ids                 # display text
+    assert "plugins.js/TestGauge/形状" not in ids               # @option value
+    assert "plugins.js/TestGauge/内部名" not in ids             # @value
+    assert not any("フォント名" in i for i in ids)              # font key
+
+
+def test_mz_plugin_option_not_in_list_is_still_offered(mv_game, mv_parser):
+    """A combo value the author typed in (not one of the options) is text."""
+    os.makedirs(os.path.join(mv_game, "js", "plugins"), exist_ok=True)
+    with open(os.path.join(mv_game, "js", "plugins", "TestGauge.js"), "w",
+              encoding="utf-8") as f:
+        f.write(_GAUGE_PLUGIN)
+    plugins = [{"name": "TestGauge", "status": True, "description": "",
+                "parameters": {"形状": "自由入力の文章"}}]
+    with open(os.path.join(mv_game, "js", "plugins.js"), "w", encoding="utf-8") as f:
+        f.write("var $plugins =\n" + json.dumps(plugins, ensure_ascii=False) + ";\n")
+    ids = {e.id for e in mv_parser.load_project(mv_game) if e.file == "plugins.js"}
+    assert "plugins.js/TestGauge/形状" in ids
+
+
+@pytest.mark.parametrize("text, is_path", [
+    ("BGM/foo.mp3", True),
+    ("SE2/着信01 (2).wav", True),
+    ("Picture/ポップ（大）_Good.PNG", True),
+    ("BattleEffect/03 アイス.png", True),
+    ("回復薬を使った。", False),
+    ("HPが50回復する。", False),
+    ("説明文 (改).", False),
+])
+def test_wolf_path_filter_handles_spaces_and_brackets(text, is_path):
+    from translator.wolfrpg import _DB_SKIP_RE
+    assert bool(_DB_SKIP_RE.match(text)) is is_path
+
+
+def test_mv_atomic_write_fsyncs_before_replace(tmp_path, monkeypatch):
+    import translator.rpgmaker_mv as mv
+    calls = []
+    real_fsync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(os, "fsync", lambda fd: (calls.append("fsync"), real_fsync(fd)))
+    monkeypatch.setattr(os, "replace", lambda a, b: (calls.append("replace"), real_replace(a, b)))
+    target = tmp_path / "Map001.json"
+    mv.RPGMakerMVParser._atomic_write_text(str(target), "{}")
+    assert calls == ["fsync", "replace"]
+    assert target.read_text(encoding="utf-8") == "{}"
