@@ -185,6 +185,30 @@ def backup_tree_once(src_dir: str, backup_dir: str,
     return True
 
 
+def recover_interrupted_restore(live_dir: str) -> bool:
+    """Undo a restore that was killed between its two renames.
+
+    ``restore_tree`` moves *live_dir* to ``<live_dir>.rmt-old`` and then
+    renames the finished copy into place.  A kill in between leaves no
+    *live_dir* at all -- the game won't start and the engine isn't even
+    detected.  Put the folder back as it was before that restore (the
+    user can simply restore again).  Returns True if it recovered.
+    """
+    live_dir = os.fspath(live_dir)
+    aside = live_dir + ".rmt-old"
+    if os.path.exists(live_dir) or not os.path.isdir(aside):
+        return False
+    os.rename(aside, live_dir)
+    staging = live_dir + ".rmt-restore"
+    if os.path.isdir(staging):
+        # A complete or partial copy of the backup -- the backup itself is
+        # untouched, so losing this copy loses nothing.
+        shutil.rmtree(staging, ignore_errors=True)
+    log.warning("Recovered %s from an interrupted Restore Originals",
+                live_dir)
+    return True
+
+
 def restore_tree(backup_dir: str, live_dir: str,
                  only: list[str] | None = None) -> None:
     """Replace *live_dir* (or just its ``only`` children) with the backup.

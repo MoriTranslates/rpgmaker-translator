@@ -1241,6 +1241,10 @@ class RPGMakerMVParser:
         for MZ (and MV editor projects) it's at the project root.
         """
         for base in (project_dir, os.path.join(project_dir, "www")):
+            # A Restore Originals killed mid-swap leaves data.rmt-old and
+            # no data/: put it back so the game is found (and runs) again.
+            for name in ("data", "Data"):
+                game_io.recover_interrupted_restore(os.path.join(base, name))
             data = os.path.join(base, "data")
             if not os.path.isdir(data):
                 data = os.path.join(base, "Data")

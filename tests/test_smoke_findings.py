@@ -249,33 +249,80 @@ def test_mv_changed_line_is_reported_and_keeps_game_text(mv_game, mv_parser):
     assert _page_texts(path) == ["新しい台詞"]
 
 
-# ── Restore killed between its two renames (NOT fixed) ───────────────
+# ── Restore killed between its two renames (FIXED) ───────────────────
 #
 # restore_tree renames data/ -> data.rmt-old, then data.rmt-restore -> data/.
-# A kill between the two leaves no data/ folder.  restore_tree can recover
-# from that, but MV/MZ and VX Ace restore_originals look up the data folder
-# first and fail ("Could not find the game's data/ folder"), so the app
-# can never run the recovery; the game will not start either.
+# A kill between the two left no data/ folder: the game would not start,
+# the engine was not detected and Restore said "Could not find the game's
+# data/ folder".  Opening, exporting or restoring now puts it back.
 
-@pytest.mark.xfail(strict=True, reason="smoke finding: interrupted restore not recoverable in-app")
+def _kill_between_renames(data_dir):
+    """Recreate the on-disk state of a restore killed mid-swap."""
+    import shutil
+    shutil.copytree(data_dir, data_dir + ".rmt-restore")   # finished copy
+    os.rename(data_dir, data_dir + ".rmt-old")             # first rename
+
+
 def test_mv_restore_recovers_after_kill_between_renames(mv_game, mv_parser):
+    from translator.engine_handler import detect_engine, RPGMakerMVHandler
     mv_parser.save_project(mv_game, mv_parser.load_project(mv_game))
     data = os.path.join(mv_game, "data")
-    os.rename(data, data + ".rmt-old")         # state after the kill
-    mv_parser.restore_originals(mv_game)
+    _kill_between_renames(data)
+    assert detect_engine(mv_game) is RPGMakerMVHandler      # still found
     assert os.path.isdir(data)
+    assert not os.path.exists(data + ".rmt-old")
+    assert not os.path.exists(data + ".rmt-restore")
+    mv_parser.restore_originals(mv_game)                     # and restorable
+    assert os.path.isdir(data) and not os.path.exists(data + ".rmt-old")
 
 
-@pytest.mark.xfail(strict=True, reason="smoke finding: interrupted restore not recoverable in-app")
-def test_ace_restore_recovers_after_kill_between_renames(tmp_path):
-    from translator.rpgmaker_ace import RPGMakerAceParser, ruby_writes
+def test_mv_open_after_kill_between_renames(mv_game, mv_parser):
+    data = os.path.join(mv_game, "data")
+    with open(os.path.join(data, "System.json"), "rb") as f:
+        before = f.read()
+    _kill_between_renames(data)
+    assert mv_parser.load_project(mv_game)
+    with open(os.path.join(data, "System.json"), "rb") as f:
+        assert f.read() == before
+
+
+def _ace_game_dir(tmp_path):
+    from translator.rpgmaker_ace import ruby_writes
     game = tmp_path / "AceGame"
     (game / "Data").mkdir(parents=True)
     (game / "Data" / "Map001.rvdata2").write_bytes(ruby_writes(["JP"]))
+    return game
+
+
+def test_ace_restore_recovers_after_kill_between_renames(tmp_path):
+    from translator.engine_handler import detect_engine, RPGMakerAceHandler
+    from translator.rpgmaker_ace import RPGMakerAceParser
+    game = _ace_game_dir(tmp_path)
     RPGMakerAceParser().save_project(str(game), [])
-    os.rename(game / "Data", str(game / "Data") + ".rmt-old")
+    _kill_between_renames(str(game / "Data"))
+    assert detect_engine(str(game)) is RPGMakerAceHandler
+    assert (game / "Data").is_dir()
     RPGMakerAceParser().restore_originals(str(game))
     assert (game / "Data").is_dir()
+    assert not os.path.exists(str(game / "Data") + ".rmt-old")
+
+
+def test_ace_export_after_kill_between_renames(tmp_path):
+    from translator.rpgmaker_ace import RPGMakerAceParser
+    game = _ace_game_dir(tmp_path)
+    RPGMakerAceParser().save_project(str(game), [])
+    _kill_between_renames(str(game / "Data"))
+    RPGMakerAceParser().save_project(str(game), [])          # no crash
+    assert (game / "Data" / "Map001.rvdata2").is_file()
+
+
+def test_recover_does_nothing_when_live_folder_exists(tmp_path):
+    from translator import game_io
+    live = tmp_path / "data"
+    live.mkdir()
+    (tmp_path / "data.rmt-old").mkdir()
+    assert game_io.recover_interrupted_restore(str(live)) is False
+    assert (tmp_path / "data.rmt-old").is_dir()      # left for restore_tree
 
 
 # ── VX Ace: stale translation lands on an updated line (NOT fixed) ───

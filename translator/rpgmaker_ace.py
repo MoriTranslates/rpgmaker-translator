@@ -158,6 +158,9 @@ class RPGMakerAceParser:
     @staticmethod
     def is_ace_project(path: str) -> bool:
         """Check if path contains a VX Ace project (Data/*.rvdata2)."""
+        # A Restore Originals killed mid-swap leaves Data.rmt-old and no
+        # Data/: put it back so the game is found (and runs) again.
+        game_io.recover_interrupted_restore(os.path.join(path, "Data"))
         data_dir = os.path.join(path, "Data")
         if not os.path.isdir(data_dir):
             return False
@@ -339,6 +342,9 @@ class RPGMakerAceParser:
 
     @staticmethod
     def _find_data_dir(project_dir: str) -> Optional[str]:
+        for name in ("Data", "data"):
+            game_io.recover_interrupted_restore(
+                os.path.join(project_dir, name))
         for name in ("Data", "data"):
             d = os.path.join(project_dir, name)
             if os.path.isdir(d):
