@@ -107,6 +107,30 @@ def _block_has_text(line_cmds: list) -> bool:
     return False
 
 
+def _block_text(line_cmds: list, namebox: bool = True) -> tuple[str, str]:
+    """``(text, namebox)`` exactly as the parser extracts a 401/405 block.
+
+    Non-empty lines joined by "\\n"; for Show Text a leading ``\\N<name>``
+    namebox is split off.  Export compares this with ``entry.original``
+    so a translation is only written where its original still is.
+    """
+    lines = []
+    for c in line_cmds:
+        lp = _attr(c, "parameters") or []
+        if lp:
+            s = _str(lp[0])
+            if s:
+                lines.append(s)
+    full = "\n".join(lines)
+    nb = ""
+    if namebox:
+        m = _NAMEBOX_RE.match(full)
+        if m:
+            nb = m.group(0)
+            full = full[m.end():].lstrip("\n")
+    return full, nb
+
+
 def _has_japanese(text: str) -> bool:
     return bool(JAPANESE_RE.search(text))
 
@@ -285,6 +309,7 @@ class RPGMakerAceParser:
             self.last_export_notes.append(game_io.refreshed_note(refreshed))
 
         problems: list[str] = []
+        skipped: dict[str, int] = {}
         for filename in sorted(all_files):
             file_entries = by_file.get(filename, [])
             source_path = os.path.join(source_dir, filename)
@@ -302,14 +327,16 @@ class RPGMakerAceParser:
                         game_io.atomic_copy(source_path, out_path)
                 else:
                     data = self._read_rvdata2(source_path)
-                    self._apply_translations(data, filename, file_entries)
+                    n = self._apply_translations(data, filename, file_entries)
+                    if n:
+                        skipped[filename] = n
                     self._write_rvdata2(out_path, data)
                 manifest.record(filename, out_path)
             except Exception as exc:
                 log.error("Failed to export %s: %s", filename, exc)
                 problems.append(f"{filename} ({exc})")
         manifest.finish()
-        game_io.raise_if_problems(problems)
+        game_io.raise_export_problems(problems, skipped)
 
     def restore_originals(self, project_dir: str):
         """Restore Data_original/ → Data/."""
@@ -766,13 +793,33 @@ class RPGMakerAceParser:
 
     # ── Apply translations back to Ruby data ─────────────────────────
 
-    def _apply_translations(self, data, filename: str, entries: list):
-        """Apply translation entries back into a loaded Ruby object tree."""
+    def _orig_ok(self, current, entry) -> bool:
+        """Does the game still hold *entry*'s original at its position?
+
+        Entries are written by position (ID).  After a game update the
+        text there may be different: then the game's new text is kept,
+        and the skip is counted so the export is reported as incomplete.
+        A translation equal to its original changes nothing, so it is
+        never counted.
+        """
+        if _str(current) == entry.original:
+            return True
+        if entry.translation != entry.original:
+            self._skipped += 1
+        return False
+
+    def _apply_translations(self, data, filename: str, entries: list) -> int:
+        """Apply translation entries back into a loaded Ruby object tree.
+
+        Returns how many translations were not written because the game
+        text at their position no longer matches their original.
+        """
+        self._skipped = 0
         # Build lookup: entry_id → translation
         trans_map = {e.id: e for e in entries
                      if e.translation and e.status in ("translated", "reviewed")}
         if not trans_map:
-            return
+            return 0
 
         if filename.startswith("Map") and filename != "MapInfos.rvdata2":
             self._apply_map(data, filename, trans_map)
@@ -784,6 +831,7 @@ class RPGMakerAceParser:
             self._apply_system(data, filename, trans_map)
         elif filename in DATABASE_FILES:
             self._apply_database(data, filename, trans_map)
+        return self._skipped
 
     def _apply_database(self, data, filename: str, trans_map: dict):
         if not isinstance(data, list):
@@ -796,57 +844,42 @@ class RPGMakerAceParser:
             for fld in fields:
                 eid = f"{filename}/{item_id}/{fld}"
                 entry = trans_map.get(eid)
-                if entry:
+                if entry and self._orig_ok(_attr(item, fld, ""), entry):
                     _set_attr(item, fld, entry.translation)
 
     def _apply_system(self, data, filename: str, trans_map: dict):
-        # Game title
-        e = trans_map.get(f"{filename}/game_title")
-        if e:
-            _set_attr(data, "game_title", e.translation)
+        # Game title / currency
+        for fld in ("game_title", "currency_unit"):
+            e = trans_map.get(f"{filename}/{fld}")
+            if e and self._orig_ok(_attr(data, fld, ""), e):
+                _set_attr(data, fld, e.translation)
 
-        # Currency
-        e = trans_map.get(f"{filename}/currency_unit")
-        if e:
-            _set_attr(data, "currency_unit", e.translation)
-
-        # Elements
-        elements = _attr(data, "elements", [])
-        for i in range(len(elements)):
-            e = trans_map.get(f"{filename}/elements/{i}")
-            if e:
-                elements[i] = e.translation
-
-        # Type lists
-        for list_key in ("skill_types", "weapon_types", "armor_types"):
-            items = _attr(data, list_key, [])
+        def apply_list(items, id_prefix):
             for i in range(len(items)):
-                e = trans_map.get(f"{filename}/{list_key}/{i}")
-                if e:
+                e = trans_map.get(f"{id_prefix}/{i}")
+                if e and self._orig_ok(items[i], e):
                     items[i] = e.translation
+
+        # Elements and type lists
+        for list_key in ("elements", "skill_types", "weapon_types",
+                         "armor_types"):
+            apply_list(_attr(data, list_key, []), f"{filename}/{list_key}")
 
         # Terms
         terms = _attr(data, "terms")
         if terms is not None:
             for term_key in ("basic", "params", "etypes", "commands"):
-                term_list = _attr(terms, term_key, [])
-                for i in range(len(term_list)):
-                    e = trans_map.get(f"{filename}/terms/{term_key}/{i}")
-                    if e:
-                        term_list[i] = e.translation
+                apply_list(_attr(terms, term_key, []),
+                           f"{filename}/terms/{term_key}")
 
         # Switches/variables
         for list_key in ("switches", "variables"):
-            items = _attr(data, list_key, [])
-            for i in range(len(items)):
-                e = trans_map.get(f"{filename}/{list_key}/{i}")
-                if e:
-                    items[i] = e.translation
+            apply_list(_attr(data, list_key, []), f"{filename}/{list_key}")
 
     def _apply_map(self, data, filename: str, trans_map: dict):
         # Display name
         e = trans_map.get(f"{filename}/display_name")
-        if e:
+        if e and self._orig_ok(_attr(data, "display_name", ""), e):
             _set_attr(data, "display_name", e.translation)
 
         events = _attr(data, "events") or {}
@@ -915,6 +948,14 @@ class RPGMakerAceParser:
                 entry_id = f"{prefix}/{dialogue_index}"
                 entry = trans_map.get(entry_id)
                 dialogue_index += 1
+                if entry and entry.translation:
+                    # Same text the parser extracts from this block
+                    full, namebox = _block_text(cmd_list[start_401:j])
+                    if namebox != (entry.namebox or ""):
+                        full = None          # speaker prefix changed too
+                    if not self._orig_ok(full, entry):
+                        i = j
+                        continue
 
                 if entry and entry.translation:
                     # Prepend namebox back if it was stripped
@@ -960,6 +1001,12 @@ class RPGMakerAceParser:
                 entry_id = f"{prefix}/{dialogue_index}"
                 entry = trans_map.get(entry_id)
                 dialogue_index += 1
+                if entry and entry.translation:
+                    full, _nb = _block_text(cmd_list[start_405:j],
+                                            namebox=False)
+                    if not self._orig_ok(full, entry):
+                        i = j
+                        continue
 
                 if entry and entry.translation:
                     trans_lines = entry.translation.split("\n")
@@ -983,7 +1030,8 @@ class RPGMakerAceParser:
                 for ci in range(len(choices)):
                     eid = f"{prefix}/c{dialogue_index}_{ci}"
                     entry = trans_map.get(eid)
-                    if entry and entry.translation:
+                    if (entry and entry.translation
+                            and self._orig_ok(choices[ci], entry)):
                         choices[ci] = entry.translation
                 dialogue_index += 1
                 i += 1
@@ -993,7 +1041,8 @@ class RPGMakerAceParser:
                         CODE_CHANGE_PROFILE):
                 entry_id = f"{prefix}/{dialogue_index}"
                 entry = trans_map.get(entry_id)
-                if entry and entry.translation and len(params) >= 2:
+                if (entry and entry.translation and len(params) >= 2
+                        and self._orig_ok(params[1], entry)):
                     params[1] = entry.translation
                 dialogue_index += 1
                 i += 1

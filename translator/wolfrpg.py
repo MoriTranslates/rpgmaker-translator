@@ -1347,6 +1347,8 @@ class WolfRPGParser:
                 originals[key] = entry.original
         skipped: list[str] = list(self._reload_problems(translations))
         written: list[Path] = []
+        # file -> translations not written because the game text changed
+        changed: dict[str, int] = {}
 
         # Apply to maps
         for wolf_map in self.maps:
@@ -1354,36 +1356,10 @@ class WolfRPGParser:
             modified = False
             for ev in wolf_map.events:
                 for page in ev.pages:
-                    for ci, cmd in enumerate(page.commands):
-                        if cmd.code == CMD_MESSAGE and cmd.string_args:
-                            key = f'{file_name}/Ev{ev.id}/p{page.id}/msg{ci}'
-                            if key in translations:
-                                # Rebuild full message with speaker prefix
-                                original = cmd.string_args[0]
-                                translated = translations[key]
-                                cmd.string_args[0] = self._rebuild_message(
-                                    original, translated, originals.get(key))
-                                modified = True
-
-                        elif cmd.code == CMD_CHOICES:
-                            for si in range(len(cmd.string_args)):
-                                key = f'{file_name}/Ev{ev.id}/p{page.id}/choice{ci}_{si}'
-                                if key in translations:
-                                    cmd.string_args[si] = translations[key]
-                                    modified = True
-
-                        elif cmd.code == CMD_SET_STRING:
-                            for si in range(len(cmd.string_args)):
-                                key = f'{file_name}/Ev{ev.id}/p{page.id}/str{ci}_{si}'
-                                if key in translations:
-                                    cmd.string_args[si] = translations[key]
-                                    modified = True
-
-                        elif cmd.code == CMD_PICTURE:
-                            key = f'{file_name}/Ev{ev.id}/p{page.id}/pic{ci}'
-                            if key in translations and cmd.string_args:
-                                cmd.string_args[0] = translations[key]
-                                modified = True
+                    if self._apply_commands(
+                            page.commands, f'{file_name}/Ev{ev.id}/p{page.id}',
+                            translations, originals, file_name, changed):
+                        modified = True
 
             # Write to live data dir (map was loaded from backup).  An
             # untouched map is copied back from the backup so lines whose
@@ -1403,35 +1379,10 @@ class WolfRPGParser:
             file_name = 'CommonEvents'
             modified = False
             for ce in self.common_events.events:
-                for ci, cmd in enumerate(ce.commands):
-                    if cmd.code == CMD_MESSAGE and cmd.string_args:
-                        key = f'{file_name}/CE{ce.int_id}/msg{ci}'
-                        if key in translations:
-                            original = cmd.string_args[0]
-                            translated = translations[key]
-                            cmd.string_args[0] = self._rebuild_message(
-                                original, translated, originals.get(key))
-                            modified = True
-
-                    elif cmd.code == CMD_CHOICES:
-                        for si in range(len(cmd.string_args)):
-                            key = f'{file_name}/CE{ce.int_id}/choice{ci}_{si}'
-                            if key in translations:
-                                cmd.string_args[si] = translations[key]
-                                modified = True
-
-                    elif cmd.code == CMD_SET_STRING:
-                        for si in range(len(cmd.string_args)):
-                            key = f'{file_name}/CE{ce.int_id}/str{ci}_{si}'
-                            if key in translations:
-                                cmd.string_args[si] = translations[key]
-                                modified = True
-
-                    elif cmd.code == CMD_PICTURE:
-                        key = f'{file_name}/CE{ce.int_id}/pic{ci}'
-                        if key in translations and cmd.string_args:
-                            cmd.string_args[0] = translations[key]
-                            modified = True
+                if self._apply_commands(
+                        ce.commands, f'{file_name}/CE{ce.int_id}',
+                        translations, originals, 'CommonEvent.dat', changed):
+                    modified = True
 
             live_ce = self.data_dir / 'BasicData' / 'CommonEvent.dat'
             try:
@@ -1448,11 +1399,13 @@ class WolfRPGParser:
         for db in self.databases:
             file_name = f'Database/{db.name}'
             db_trans = {}
+            db_orig = {}
             for key, val in translations.items():
                 if key.startswith(file_name + '/'):
                     # key = "Database/DataBase/Type0/Data1/F2"
                     field_part = key[len(file_name) + 1:]
                     db_trans[field_part] = val
+                    db_orig[field_part] = originals.get(key)
             backup_dat = backup_dir / 'BasicData' / f'{db.name}.dat'
             live_dat = self.data_dir / 'BasicData' / f'{db.name}.dat'
             if not backup_dat.is_file():
@@ -1467,7 +1420,9 @@ class WolfRPGParser:
                 continue
             try:
                 reason = self._export_database(
-                    db, backup_dat, live_dat, db_trans)
+                    db, backup_dat, live_dat, db_trans, db_orig)
+                if self._db_changed:
+                    changed[f'{db.name}.dat'] = self._db_changed
             except OSError as exc:
                 reason = str(exc)
             if reason:
@@ -1496,20 +1451,78 @@ class WolfRPGParser:
         if wolf_file.is_file():
             os.replace(wolf_file, self.game_dir / 'Data.wolf.bak')
 
-        game_io.raise_if_problems(
-            skipped,
-            'The export is incomplete. These files could not be written and '
-            'still contain the previous (Japanese or older) text:')
+        game_io.raise_export_problems(skipped, changed)
+
+    def _apply_commands(self, commands, key_prefix: str, translations: dict,
+                        originals: dict, label: str,
+                        changed: dict) -> bool:
+        """Write translations into one event's command list.
+
+        Entries are addressed by command index, so each write first checks
+        that the command still holds the entry's original text.  After a
+        game update a changed command keeps its new text and is counted in
+        *changed* (under *label*) so the export reports it.  Returns True
+        when anything was written.
+        """
+        modified = False
+
+        def still_there(key, raw, message=False):
+            orig = originals.get(key)
+            if orig is None:
+                return True
+            if message:
+                # Older projects cleaned messages differently; the original
+                # still being the tail of the message is good enough
+                # (_rebuild_message keeps whatever precedes it).
+                ok = (self._clean_message(raw) == orig
+                      or raw.rstrip().endswith(orig))
+            else:
+                ok = raw == orig
+            if not ok and translations[key] != orig:
+                changed[label] = changed.get(label, 0) + 1
+            return ok
+
+        for ci, cmd in enumerate(commands):
+            if cmd.code == CMD_MESSAGE and cmd.string_args:
+                key = f'{key_prefix}/msg{ci}'
+                if key in translations and still_there(
+                        key, cmd.string_args[0], message=True):
+                    # Rebuild full message with speaker prefix
+                    cmd.string_args[0] = self._rebuild_message(
+                        cmd.string_args[0], translations[key],
+                        originals.get(key))
+                    modified = True
+
+            elif cmd.code in (CMD_CHOICES, CMD_SET_STRING):
+                kind = 'choice' if cmd.code == CMD_CHOICES else 'str'
+                for si in range(len(cmd.string_args)):
+                    key = f'{key_prefix}/{kind}{ci}_{si}'
+                    if key in translations and still_there(
+                            key, cmd.string_args[si]):
+                        cmd.string_args[si] = translations[key]
+                        modified = True
+
+            elif cmd.code == CMD_PICTURE:
+                key = f'{key_prefix}/pic{ci}'
+                if (key in translations and cmd.string_args
+                        and still_there(key, cmd.string_args[0])):
+                    cmd.string_args[0] = translations[key]
+                    modified = True
+        return modified
 
     def _export_database(self, db: WolfDatabase, src_path: Path,
-                         dst_path: Path, translations: dict[str, str]
+                         dst_path: Path, translations: dict[str, str],
+                         originals: Optional[dict] = None
                          ) -> Optional[str]:
         """Patch database .dat file with translations.
 
         Reads from src_path, replaces strings, writes to dst_path.
-        translations keys are like "Type0/Data1/F2".
+        translations keys are like "Type0/Data1/F2".  With *originals*, a
+        string is only replaced while it still holds its original text;
+        the others are counted in ``self._db_changed``.
         Returns None on success, or a short reason string if skipped.
         """
+        self._db_changed = 0
         data = bytearray(src_path.read_bytes())
 
         # Handle encryption the same way as load
@@ -1567,6 +1580,13 @@ class WolfRPGParser:
                     str_offset = reader.pos  # offset of length prefix
                     text = reader.read_string()
                     key = f'Type{type_idx}/Data{data_idx}/F{si}'
+                    orig = (originals or {}).get(key)
+                    if (key in translations and orig is not None
+                            and text != orig):
+                        # Game updated: keep its new text, report the skip
+                        if translations[key] != orig:
+                            self._db_changed += 1
+                        continue
                     if key in translations:
                         # Stored length prefix includes the trailing NUL that
                         # read_string strips -- use the raw on-disk length.

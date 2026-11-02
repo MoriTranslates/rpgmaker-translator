@@ -325,44 +325,113 @@ def test_recover_does_nothing_when_live_folder_exists(tmp_path):
     assert (tmp_path / "data.rmt-old").is_dir()      # left for restore_tree
 
 
-# ── VX Ace: stale translation lands on an updated line (NOT fixed) ───
+# ── VX Ace: stale translation over an updated line (FIXED) ───────────
 #
-# Ace applies dialogue by command index without checking that the original
-# text is still there (MV/MZ does, since 1.1.1).  After a game update that
-# changes a line, the next export writes the OLD translation over the NEW
-# Japanese line, and the backup refresh does not prevent it.
+# Ace wrote dialogue by command index without checking that the original
+# text was still there.  After a game update that changed a line, the next
+# export wrote the OLD translation over the NEW Japanese line.  Now every
+# write by position checks the original; a changed line keeps the game's
+# text and the export reports it ("Export incomplete").
 
-@pytest.mark.xfail(strict=True, reason="smoke finding: Ace export does not verify the original")
-def test_ace_export_skips_line_whose_original_changed(tmp_path):
+def _ace_map(texts, choices=None):
     from rubymarshal.classes import RubyObject, RubyString
-    from translator.rpgmaker_ace import RPGMakerAceParser, ruby_loads, ruby_writes
 
-    def game_map(text):
-        cmds = [RubyObject("RPG::EventCommand", {"@code": 101, "@indent": 0,
-                                                 "@parameters": [RubyString(""), 0, 0, 2]}),
-                RubyObject("RPG::EventCommand", {"@code": 401, "@indent": 0,
-                                                 "@parameters": [RubyString(text)]}),
-                RubyObject("RPG::EventCommand", {"@code": 0, "@indent": 0,
-                                                 "@parameters": []})]
-        page = RubyObject("RPG::Event::Page", {"@list": cmds})
-        ev = RubyObject("RPG::Event", {"@id": 1, "@name": RubyString("EV"),
-                                       "@pages": [page]})
-        return RubyObject("RPG::Map", {"@display_name": RubyString(""),
-                                       "@events": {1: ev}})
+    def cmd(code, params):
+        return RubyObject("RPG::EventCommand", {"@code": code, "@indent": 0,
+                                                "@parameters": params})
+    cmds = [cmd(101, [RubyString(""), 0, 0, 2])]
+    cmds += [cmd(401, [RubyString(t)]) for t in texts]
+    if choices:
+        cmds.append(cmd(102, [[RubyString(c) for c in choices], 2]))
+    cmds.append(cmd(0, []))
+    page = RubyObject("RPG::Event::Page", {"@list": cmds})
+    ev = RubyObject("RPG::Event", {"@id": 1, "@name": RubyString("EV"),
+                                   "@pages": [page]})
+    return RubyObject("RPG::Map", {"@display_name": RubyString(""),
+                                   "@events": {1: ev}})
+
+
+def _ace_cmds(path):
+    from translator.rpgmaker_ace import ruby_loads
+    out = ruby_loads(path.read_bytes())
+    lst = out.attributes["@events"][1].attributes["@pages"][0].attributes["@list"]
+    return lst
+
+
+def _ace_one_map_game(tmp_path, texts, choices=None):
+    from translator.rpgmaker_ace import ruby_writes
     game = tmp_path / "Game"
     (game / "Data").mkdir(parents=True)
     live = game / "Data" / "Map001.rvdata2"
-    live.write_bytes(ruby_writes(game_map("古い台詞")))
+    live.write_bytes(ruby_writes(_ace_map(texts, choices)))
+    return game, live
+
+
+def test_ace_export_skips_line_whose_original_changed(tmp_path):
+    from translator import game_io
+    from translator.rpgmaker_ace import RPGMakerAceParser, ruby_writes
+    game, live = _ace_one_map_game(tmp_path, ["古い台詞"], ["はい", "いいえ"])
     p = RPGMakerAceParser()
     entries = p.load_project(str(game))
     for e in entries:
-        e.translation, e.status = "Old line EN", "reviewed"
+        e.translation, e.status = "EN " + e.id, "reviewed"
     p.save_project(str(game), entries)
-    live.write_bytes(ruby_writes(game_map("新しい台詞")))    # game update
-    p.save_project(str(game), entries)
-    out = ruby_loads(live.read_bytes())
-    lst = out.attributes["@events"][1].attributes["@pages"][0].attributes["@list"]
+    # game update: the line and one choice change
+    live.write_bytes(ruby_writes(_ace_map(["新しい台詞"], ["はい", "やめる"])))
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(game), entries)
+    assert "Map001.rvdata2: 2 translated line(s) not written" in str(ei.value)
+    lst = _ace_cmds(live)
     assert str(lst[1].attributes["@parameters"][0]) == "新しい台詞"
+    choices = [str(c) for c in lst[2].attributes["@parameters"][0]]
+    assert choices[0].startswith("EN ")       # unchanged choice still written
+    assert choices[1] == "やめる"
+
+
+NAMEBOX = "\\N<リズ>"          # backslash, N, <リズ>  (an RPG Maker namebox)
+
+
+def test_ace_namebox_block_and_noop_export_are_not_flagged(tmp_path):
+    from translator.rpgmaker_ace import RPGMakerAceParser
+    game, live = _ace_one_map_game(tmp_path, [NAMEBOX, "こんにちは", ""])
+    p = RPGMakerAceParser()
+    entries = p.load_project(str(game))
+    dlg = [e for e in entries if e.field == "dialogue"]
+    assert dlg and dlg[0].namebox == NAMEBOX
+    for e in entries:
+        e.translation, e.status = e.original, "translated"
+    p.save_project(str(game), entries)            # no-op: nothing reported
+    for e in dlg:
+        e.translation = "Hello"
+    p.save_project(str(game), entries)            # real translation lands
+    texts = [str(c.attributes["@parameters"][0]) for c in _ace_cmds(live)
+             if c.attributes["@code"] == 401]
+    assert texts[:2] == [NAMEBOX, "Hello"]
+
+
+def test_ace_database_field_changed_by_update_is_kept(tmp_path):
+    from rubymarshal.classes import RubyObject, RubyString
+    from translator import game_io
+    from translator.rpgmaker_ace import RPGMakerAceParser, ruby_loads, ruby_writes
+
+    def items(name):
+        return [None, RubyObject("RPG::Item", {
+            "@id": 1, "@name": RubyString(name),
+            "@description": RubyString(""), "@note": RubyString("")})]
+    game = tmp_path / "Game"
+    (game / "Data").mkdir(parents=True)
+    path = game / "Data" / "Items.rvdata2"
+    path.write_bytes(ruby_writes(items("ポーション")))
+    p = RPGMakerAceParser()
+    entries = p.load_project(str(game))
+    for e in entries:
+        e.translation, e.status = "Potion", "translated"
+    p.save_project(str(game), entries)
+    path.write_bytes(ruby_writes(items("ハイポーション")))      # game update
+    with pytest.raises(game_io.PartialExportError):
+        p.save_project(str(game), entries)
+    out = ruby_loads(path.read_bytes())
+    assert str(out[1].attributes["@name"]) == "ハイポーション"
 
 
 # ── Ren'Py: lines that are never extracted (NOT fixed) ───────────────
@@ -398,3 +467,55 @@ def test_renpy_say_with_trailing_clause_is_extracted(tmp_path):
     })
     originals = {e.original for e in RenPyParser().load_project(str(game))}
     assert "こんにちは" in originals
+
+
+# ── Wolf: stale translation over an updated line (FIXED) ─────────────
+
+def test_wolf_commands_skip_changed_lines_and_count_them():
+    from types import SimpleNamespace as NS
+    from translator import wolfrpg
+    p = wolfrpg.WolfRPGParser()
+    cmds = [NS(code=wolfrpg.CMD_MESSAGE, string_args=["アリス：\n新しい台詞"]),
+            NS(code=wolfrpg.CMD_MESSAGE, string_args=["アリス：\n同じ台詞"]),
+            NS(code=wolfrpg.CMD_CHOICES, string_args=["はい", "やめる"])]
+    tr = {"M/Ev1/p0/msg0": "Old EN", "M/Ev1/p0/msg1": "Same EN",
+          "M/Ev1/p0/choice2_0": "Yes", "M/Ev1/p0/choice2_1": "No"}
+    orig = {"M/Ev1/p0/msg0": "古い台詞", "M/Ev1/p0/msg1": "同じ台詞",
+            "M/Ev1/p0/choice2_0": "はい", "M/Ev1/p0/choice2_1": "いいえ"}
+    changed = {}
+    assert p._apply_commands(cmds, "M/Ev1/p0", tr, orig, "M", changed)
+    assert cmds[0].string_args[0] == "アリス：\n新しい台詞"   # kept
+    assert cmds[1].string_args[0] == "アリス：\nSame EN"     # written
+    assert cmds[2].string_args == ["Yes", "やめる"]
+    assert changed == {"M": 2}
+
+
+def test_wolf_database_skips_changed_strings(tmp_path):
+    import struct
+    from pathlib import Path
+    from translator import wolfrpg
+
+    def wstr(s):
+        b = s.encode("cp932") + b"\x00"
+        return struct.pack("<I", len(b)) + b
+
+    def db_bytes(row):
+        out = bytearray(b"\x00" * 10) + b"\x01" + struct.pack("<I", 1)
+        out += wolfrpg.WolfDatabase.DAT_TYPE_SEP + struct.pack("<I", 0)
+        out += struct.pack("<I", 1 + len(row)) + struct.pack("<I", 0x03E8)
+        for k in range(len(row)):
+            out += struct.pack("<I", 0x07D0 + k)
+        out += struct.pack("<I", 1) + struct.pack("<I", 100)
+        for s in row:
+            out += wstr(s)
+        return bytes(out + b"\x01")
+    src, dst = tmp_path / "s.dat", tmp_path / "d.dat"
+    src.write_bytes(db_bytes(["大剣", "盾"]))          # updated game data
+    db = wolfrpg.WolfDatabase(Path(src))
+    db._types = [{"name": "t", "fields": []}]
+    p = wolfrpg.WolfRPGParser()
+    reason = p._export_database(db, src, dst,
+                                {"Type0/Data0/F0": "Sword", "Type0/Data0/F1": "Shield"},
+                                {"Type0/Data0/F0": "剣", "Type0/Data0/F1": "盾"})
+    assert reason is None and p._db_changed == 1
+    assert dst.read_bytes() == db_bytes(["大剣", "Shield"])
