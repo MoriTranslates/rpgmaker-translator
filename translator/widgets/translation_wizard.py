@@ -612,7 +612,7 @@ class TranslationWizard(QDialog):
             return
         to_polish = [e for e in self.mw.project.entries
                      if e.file in handler.db_files
-                     and e.status in ("translated", "reviewed")
+                     and e.status == "translated"
                      and e.translation and e.translation.strip()]
         if not to_polish:
             self.detail_label.setText("Nothing to polish — skipping.")
@@ -635,11 +635,11 @@ class TranslationWizard(QDialog):
         if handler.has_db_split:
             to_polish = [e for e in entries
                          if e.file not in handler.db_files
-                         and e.status in ("translated", "reviewed")
+                         and e.status == "translated"
                          and e.translation and e.translation.strip()]
         else:
             to_polish = [e for e in entries
-                         if e.status in ("translated", "reviewed")
+                         if e.status == "translated"
                          and e.translation and e.translation.strip()]
         if not to_polish:
             self.detail_label.setText("Nothing to polish — skipping.")
@@ -717,8 +717,8 @@ class TranslationWizard(QDialog):
         # Quote/contraction cleanup
         quotes_fixed = 0
         for entry in self.mw.project.entries:
-            if not entry.translation or entry.status not in ("translated", "reviewed"):
-                continue
+            if not entry.translation or entry.status != "translated":
+                continue  # reviewed entries are never changed automatically
             original_text = entry.translation
             if self.mw._JP_SPEECH_BRACKETS & set(entry.original):
                 t = entry.translation

@@ -4636,20 +4636,23 @@ class MainWindow(QMainWindow):
         if not self._ensure_ollama_ready():
             return
 
+        # Lines the user marked reviewed are their approved text: never
+        # rewritten by a bulk pass.
         to_polish = [
             e for e in self.project.entries
-            if e.status in ("translated", "reviewed")
+            if e.status == "translated"
             and e.translation and e.translation.strip()
         ]
         if not to_polish:
             QMessageBox.information(self, "Nothing to Polish",
-                                    "No translated entries to polish.")
+                                    "No translated (unreviewed) entries to polish.")
             return
 
         reply = QMessageBox.question(
             self, "Polish Grammar",
             f"This will run {len(to_polish)} translated entries through the LLM\n"
-            "to fix grammar and improve fluency (English → English).\n\n"
+            "to fix grammar and improve fluency (English → English).\n"
+            "Entries you marked Reviewed are left untouched.\n\n"
             "Original Japanese text is not changed — only the English translation\n"
             "gets cleaned up. This may take a while.\n\n"
             "Continue?",
@@ -4957,7 +4960,8 @@ class MainWindow(QMainWindow):
         quotes_fixed = 0
         contractions_fixed = 0
         for entry in self.project.entries:
-            if not entry.translation or entry.status not in ("translated", "reviewed"):
+            # Reviewed entries are the user's approved text -- left alone
+            if not entry.translation or entry.status != "translated":
                 continue
             original_text = entry.translation
 
@@ -5067,11 +5071,22 @@ class MainWindow(QMainWindow):
             return 0
 
         from .. import CONTROL_CODE_RE, TYRANO_CODE_RE
-        code_re = TYRANO_CODE_RE if self._project_type == "tyranoscript" else CONTROL_CODE_RE
+        if self._project_type == "tyranoscript":
+            code_re = TYRANO_CODE_RE
+        elif self._project_type == "renpy":
+            # Same tokens Ren'Py extraction protects ({tags} and [vars])
+            from ..ai_client import AIClient
+            code_re = AIClient._EXTRACT_RE_RENPY
+        else:
+            code_re = CONTROL_CODE_RE
 
+        in_flight = getattr(self.engine, "dispatch_state", {})
         fixed = 0
         for entry in self.project.entries:
-            if entry.status not in ("translated", "reviewed"):
+            # Reviewed entries are never changed automatically (a code the
+            # user removed on purpose must stay removed); entries still out
+            # at the LLM are handled when their result arrives.
+            if entry.status != "translated" or entry.id in in_flight:
                 continue
             if not entry.translation:
                 continue
@@ -5901,9 +5916,22 @@ class MainWindow(QMainWindow):
         if not self._is_batch_project_current():
             return
         entry = self.project.get_entry_by_id(entry_id)
+        snap = getattr(self.engine, "dispatch_state", {}).pop(entry_id, None)
+        if entry and snap is not None and (entry.translation, entry.status) != snap:
+            # The user edited or reviewed this line while its request was
+            # running -- their work wins, the late LLM result is dropped.
+            log.info("Dropped LLM result for %s: entry changed since dispatch",
+                     entry_id)
+            self.statusbar.showMessage(
+                "Kept your edit -- a translation that finished afterwards "
+                "was discarded.", 5000)
+            self.queue_panel.mark_entry_done(entry_id, entry.translation,
+                                             source="kept edit")
+            return
         if entry and self._is_polish_run():
-            # Polish only rewrites the English text: keep status (reviewed
-            # stays reviewed), no title-casing, no dupe filling.
+            # Polish only rewrites the English text: keep status, no
+            # title-casing, no dupe filling.  Reviewed entries are never
+            # sent to a polish run in the first place.
             entry.translation = translation
         elif entry:
             # Check for diff with previous translation
