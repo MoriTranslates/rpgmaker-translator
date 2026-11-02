@@ -297,7 +297,7 @@ Per-engine overrides for Context, Batch Size, Workers, Word Wrap, and Model. A *
 | SRPG Studio | data.dts | Supported |
 | Kirikiri | .ks (KAG) + .xp3 archives | Supported |
 | Crowd | .sce | Experimental |
-| Wolf RPG Editor | .wolf / .dat | Experimental |
+| Wolf RPG Editor | .wolf / .dat | Experimental (2.x; 3.x not supported yet) |
 | CSV Game | .x (CSV scripts) | Experimental |
 
 All engines auto-detect when you open a game folder — no manual configuration needed.

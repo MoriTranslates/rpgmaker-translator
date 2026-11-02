@@ -850,6 +850,19 @@ class MainWindow(QMainWindow):
             return
         self._open_project_path(path)
 
+    @staticmethod
+    def _load_warning_text(warnings: list[str], limit: int = 15) -> str:
+        """User-facing text for files the parser skipped while loading."""
+        shown = "\n".join(f"• {w}" for w in warnings[:limit])
+        more = (f"\n… and {len(warnings) - limit} more"
+                if len(warnings) > limit else "")
+        return ("Some of the game could not be read, so its text is NOT in "
+                "this project:\n\n" + shown + more)
+
+    def _show_load_warnings(self, warnings: list[str]):
+        QMessageBox.warning(self, "Some Game Files Could Not Be Read",
+                            self._load_warning_text(warnings))
+
     def _open_recent_project(self, path: str):
         """Open a folder from the recent list (same flow as Open Project)."""
         if not os.path.isdir(path):
@@ -1002,6 +1015,13 @@ class MainWindow(QMainWindow):
             # Close progress dialog if it was opened
             if self._project_type == "wolfrpg" and 'progress' in locals():
                 progress.close()
+
+        # Files the parser could not read (or an engine version it can't
+        # handle): say so, instead of silently showing a partial project.
+        load_warnings = list(
+            getattr(self.handler.parser, "load_warnings", None) or [])
+        if load_warnings:
+            self._show_load_warnings(load_warnings)
 
         if not entries:
             QMessageBox.warning(

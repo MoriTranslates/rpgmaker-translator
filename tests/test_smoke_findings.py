@@ -519,3 +519,96 @@ def test_wolf_database_skips_changed_strings(tmp_path):
                                 {"Type0/Data0/F0": "剣", "Type0/Data0/F1": "盾"})
     assert reason is None and p._db_changed == 1
     assert dst.read_bytes() == db_bytes(["大剣", "Shield"])
+
+
+# ── Wolf RPG Editor 3.x: detected, refused, reported (FIXED) ─────────
+#
+# Asuka (a WOLF RPG Editor 3.x game shipped with GamePro.exe) was not
+# detected; once opened, every map and common event failed to parse (only
+# logged), the UTF-8 database was read as cp932 (garbled text) and an
+# export patched cp932 text into it.
+
+_WOLF2_DAT = b"\x00W\x00\x00OL\x00FM\x00" + b"\x00" * 6
+_WOLF3_DAT = b"\x00W\x00\x00OLUFM\x00" + b"\x00" * 6
+_WOLF3_MPS = b"\x00" * 10 + b"WOLFM\x00" + b"U\x00\x00\x00d\x00\x00\x00"
+
+
+def _wolf_game(tmp_path, dat=_WOLF3_DAT, mps=_WOLF3_MPS, exe="GamePro.exe"):
+    game = tmp_path / "WolfGame"
+    (game / "Data" / "BasicData").mkdir(parents=True)
+    (game / "Data" / "MapData").mkdir()
+    (game / exe).write_bytes(b"MZ")
+    (game / "Data" / "BasicData" / "DataBase.dat").write_bytes(dat)
+    (game / "Data" / "MapData" / "Map001.mps").write_bytes(mps)
+    return game
+
+
+def test_wolf_detects_gamepro_exe(tmp_path):
+    from translator.engine_handler import detect_engine, WolfRPGHandler
+    game = _wolf_game(tmp_path)
+    assert detect_engine(str(game)) is WolfRPGHandler
+
+
+def test_wolf3_marker_tells_versions_apart(tmp_path):
+    from translator import wolfrpg
+    g3 = _wolf_game(tmp_path / "a")
+    assert wolfrpg.wolf3_marker(g3 / "Data") == "BasicData/DataBase.dat"
+    g3map = _wolf_game(tmp_path / "b", dat=_WOLF2_DAT)
+    assert wolfrpg.wolf3_marker(g3map / "Data") == "MapData/Map001.mps"
+    g2 = _wolf_game(tmp_path / "c", dat=_WOLF2_DAT,
+                    mps=b"\x00" * 10 + b"WOLFM\x00" + b"\x00" * 8)
+    assert wolfrpg.wolf3_marker(g2 / "Data") is None
+
+
+def test_wolf3_load_offers_nothing_and_says_why(tmp_path):
+    from translator import wolfrpg
+    p = wolfrpg.WolfRPGParser()
+    assert p.load_project(str(_wolf_game(tmp_path))) == []
+    assert any("Wolf RPG Editor 3.x isn't supported yet" in w
+               for w in p.load_warnings)
+
+
+def test_wolf3_export_is_refused_before_touching_files(tmp_path):
+    from translator import wolfrpg
+    game = _wolf_game(tmp_path)
+    before = {f: f.read_bytes() for f in game.rglob("*") if f.is_file()}
+    entries = [_entry("Database/DataBase/Type0/Data0/F0", "Database/DataBase",
+                      "Type0/Data0/F0", "剣", "Sword")]
+    with pytest.raises(wolfrpg.WolfVersionUnsupported,
+                       match="Wolf RPG Editor 3.x isn't supported yet"):
+        wolfrpg.WolfRPGParser().save_project(str(game), entries)
+    after = {f: f.read_bytes() for f in game.rglob("*") if f.is_file()}
+    assert after == before                       # no backup, nothing written
+
+
+def test_wolf2_map_parse_failure_is_a_load_warning(tmp_path):
+    from translator import wolfrpg
+    game = _wolf_game(tmp_path, dat=_WOLF2_DAT,
+                      mps=b"\x00" * 10 + b"WOLFM\x00" + b"\x00" * 8, exe="Game.exe")
+    (game / "Data" / "MapData" / "Map002.mps").write_bytes(b"garbage")
+    p = wolfrpg.WolfRPGParser()
+    p.load_project(str(game))
+    assert any(w.startswith("MapData/Map002.mps") for w in p.load_warnings)
+
+
+def test_open_project_shows_load_warnings(qapp, monkeypatch, tmp_path):
+    from translator.widgets import main_window as mw
+    settings = tmp_path / "_settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(mw.MainWindow, "_SETTINGS_FILE", str(settings))
+    monkeypatch.setattr(mw.AIClient, "is_available", lambda self: False)
+    monkeypatch.setattr(mw.AIClient, "list_models", lambda self: [])
+    shown = []
+    monkeypatch.setattr(mw.QMessageBox, "warning",
+                        lambda _p, title, text, *a, **k: shown.append((title, text)))
+    win = mw.MainWindow()
+    try:
+        win._open_project_path(str(_wolf_game(tmp_path)))
+    finally:
+        win._closing = True
+        win._autosave_timer.stop()
+        win.hide()
+    titles = [t for t, _ in shown]
+    assert "Some Game Files Could Not Be Read" in titles
+    text = dict(shown)["Some Game Files Could Not Be Read"]
+    assert "Wolf RPG Editor 3.x isn't supported yet" in text

@@ -34,6 +34,52 @@ MAGIC_COMMON = bytes([0x57, 0x00, 0x00, 0x4F, 0x4C, 0x00, 0x46, 0x43, 0x00])
 MAGIC_DB     = bytes([0x57, 0x00, 0x00, 0x4F, 0x4C, 0x00, 0x46, 0x4D, 0x00])
 MAGIC_MAP    = bytes([0x00] * 10 + [0x57, 0x4F, 0x4C, 0x46, 0x4D, 0x00, 0x00, 0x00, 0x00, 0x00])
 
+# WOLF RPG Editor 3.x stores text as UTF-8 and marks its files with 'U'
+# (0x55) where 2.x has 0x00: ".dat" files read "W\0\0OLUF.." instead of
+# "W\0\0OL\0F..", and ".mps" maps have 0x55 right after "WOLFM\0".
+# This parser reads and writes 2.x (cp932) only.
+WOLF3_UNSUPPORTED = (
+    "Wolf RPG Editor 3.x isn't supported yet. This game was made with "
+    "WOLF RPG Editor 3 (its text is stored as UTF-8), which this version "
+    "cannot read or write correctly, so it can't be translated or exported. "
+    "Your game files were not changed.")
+
+
+class WolfVersionUnsupported(RuntimeError):
+    """The game was made with a Wolf RPG Editor version we can't write."""
+
+
+def wolf3_marker(data_dir) -> Optional[str]:
+    """Relative path of a file showing the game is Wolf RPG Editor 3.x.
+
+    Returns None for 2.x games (or when nothing can be checked).  Only a
+    few header bytes of each file are read.
+    """
+    data_dir = Path(data_dir)
+    basic = data_dir / 'BasicData'
+    for name in ('CommonEvent.dat', 'DataBase.dat', 'CDataBase.dat',
+                 'SysDatabase.dat'):
+        path = basic / name
+        try:
+            with open(path, 'rb') as f:
+                head = f.read(16)
+        except OSError:
+            continue    # absent/unreadable: nothing to judge by; load reports it
+        if len(head) > 6 and head[1:6] == b'W\x00\x00OL' and head[6] == 0x55:
+            return f'BasicData/{name}'
+    map_dir = data_dir / 'MapData'
+    if map_dir.is_dir():
+        for mps in sorted(map_dir.glob('*.mps'))[:5]:
+            try:
+                with open(mps, 'rb') as f:
+                    head = f.read(20)
+            except OSError:
+                continue    # unreadable: load_project reports it
+            if head[10:16] == b'WOLFM\x00' and len(head) > 16 and head[16] == 0x55:
+                return f'MapData/{mps.name}'
+    return None
+
+
 # Map structure markers
 MAP_EVENT_INDICATOR = 0x6F
 MAP_EVENT_TERMINATOR = 0x66
@@ -995,6 +1041,8 @@ class WolfRPGParser:
         self.common_events: Optional[WolfCommonEvents] = None
         self.databases: list[WolfDatabase] = []
         self.context_size: int = 3
+        # Files the last load_project() could not read, for the UI
+        self.load_warnings: list[str] = []
 
     # ── Detection ─────────────────────────────────────────────────────
 
@@ -1005,8 +1053,9 @@ class WolfRPGParser:
         has_wolf = (p / 'Data.wolf').is_file()
         has_data = (p / 'Data').is_dir()
 
-        # Check for Game.exe (case-insensitive) or any .exe with Wolf RPG markers
-        has_exe = (p / 'Game.exe').is_file() or (p / 'game.exe').is_file()
+        # Game.exe, or GamePro.exe (WOLF RPG Editor Pro / 3.x runtime)
+        has_exe = any((p / n).is_file() for n in (
+            'Game.exe', 'game.exe', 'GamePro.exe', 'gamepro.exe'))
         if not has_exe:
             # Accept if Data.wolf exists (exe may be renamed)
             if not has_wolf:
@@ -1036,8 +1085,20 @@ class WolfRPGParser:
         # Reset global decryption state
         _reset_proj_key()
 
+        self.load_warnings = []
+
         # Find data directory
         self.data_dir = self._find_data_dir()
+
+        marker = wolf3_marker(self.data_dir)
+        if marker:
+            # Its text would be garbled (UTF-8 read as cp932) and every
+            # map and common event fails to parse: offer nothing rather
+            # than a partial, garbled project.
+            log.warning('Wolf RPG Editor 3.x game (%s): not supported', marker)
+            self.load_warnings.append(
+                f'{WOLF3_UNSUPPORTED} (Detected from {marker}.)')
+            return []
 
         # Parse maps
         map_dir = self.data_dir / 'MapData'
@@ -1050,6 +1111,7 @@ class WolfRPGParser:
                     entries.extend(self._extract_map_entries(wolf_map, self.context_size))
                 except Exception as e:
                     log.warning('Failed to parse %s: %s', mps_file.name, e)
+                    self.load_warnings.append(f'MapData/{mps_file.name}: {e}')
 
         # Parse common events
         basic_dir = self.data_dir / 'BasicData'
@@ -1061,6 +1123,7 @@ class WolfRPGParser:
                 entries.extend(self._extract_ce_entries(self.context_size))
             except Exception as e:
                 log.warning('Failed to parse CommonEvent.dat: %s', e)
+                self.load_warnings.append(f'BasicData/CommonEvent.dat: {e}')
 
         # Parse databases (skip SysDataBaseBasic — system config only, no text)
         if basic_dir and basic_dir.is_dir():
@@ -1075,6 +1138,7 @@ class WolfRPGParser:
                         entries.extend(self._extract_db_entries(db))
                     except Exception as e:
                         log.warning('Failed to parse %s: %s', db_name, e)
+                        self.load_warnings.append(f'BasicData/{db_name}: {e}')
 
         # Assign IDs as string paths (file/field) for event viewer compatibility
         for entry in entries:
@@ -1314,6 +1378,13 @@ class WolfRPGParser:
         # restoring a saved project state.
         self.game_dir = Path(project_dir)
         self.data_dir = self._find_data_dir()
+
+        # Refuse before anything is backed up or written: 3.x files are
+        # UTF-8 and would be patched with cp932 text.
+        marker = wolf3_marker(self.data_dir)
+        if marker:
+            raise WolfVersionUnsupported(
+                f'{WOLF3_UNSUPPORTED} (Detected from {marker}.)')
 
         # Create backup on first export.  Only the BasicData/ and MapData/
         # subtrees are ever written, so only those are backed up -- when the
