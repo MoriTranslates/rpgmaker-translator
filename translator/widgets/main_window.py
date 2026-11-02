@@ -6,7 +6,6 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 import time
 from collections import Counter
 
@@ -23,6 +22,8 @@ from PyQt6.QtGui import QAction, QPalette, QColor, QKeySequence, QShortcut
 
 from ..version import __version__
 from ..resource_paths import app_dir
+from ..game_io import PartialExportError
+from ..utils import create_junction
 from ..ai_client import AIClient, build_system_prompt
 from ..rpgmaker_mv import RPGMakerMVParser
 from ..tyranoscript import TyranoScriptParser
@@ -2336,9 +2337,32 @@ class MainWindow(QMainWindow):
         if self.client.is_cloud:
             return True
         if not self.client.is_available():
+            if not self.client.is_local_server():
+                # A remote server that is down can't be fixed by starting
+                # (or killing) a local Ollama.
+                QMessageBox.warning(
+                    self, "Ollama",
+                    f"Cannot reach Ollama at {self.client.base_url}.\n"
+                    "Check that the server is running and reachable.")
+                return False
+            kill_external = False
+            if (self.client.external_ollama_running()
+                    and not self.client.owns_server()):
+                reply = QMessageBox.question(
+                    self, "Restart Ollama?",
+                    "Ollama is running but not responding.\n\n"
+                    "Force-restart it? This stops every Ollama process on "
+                    "this PC, including jobs other apps are running on it.",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if reply != QMessageBox.StandardButton.Yes:
+                    return False
+                kill_external = True
             self._run_blocking(
                 "Starting Ollama", "Starting Ollama…",
-                self.client.restart_server, self.engine.num_workers)
+                self.client.restart_server, self.engine.num_workers,
+                kill_external)
         if not self.client.is_available():
             QMessageBox.warning(self, "Ollama", "Cannot connect to Ollama. Please start it manually.")
             return False
@@ -3134,15 +3158,27 @@ class MainWindow(QMainWindow):
             # Sync font setting to parser before export
             if hasattr(self.parser, 'game_font'):
                 self.parser.game_font = self._game_font
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            self.statusbar.showMessage("Writing translations to game files…")
-            self.statusbar.repaint()  # paint now; no input re-entrancy
-            try:
-                self.handler.save_project(
-                    self.project.project_path, self.project.entries)
-            finally:
-                QApplication.restoreOverrideCursor()
-                self.statusbar.clearMessage()
+            # Write on a worker thread so the window keeps painting on big
+            # games.  The worker gets a snapshot copy of the entries, so a
+            # translation run finishing meanwhile can't change them mid-write.
+            import copy
+            snapshot = [copy.copy(e) for e in self.project.entries]
+            partial = None
+            outcome = self._run_blocking(
+                "Apply Translation to Game",
+                "Writing translations to game files…",
+                self._export_worker, self.handler,
+                self.project.project_path, snapshot)
+            if outcome is None:
+                raise RuntimeError("The export did not finish.")
+            if outcome[0] == "partial":
+                # Some files were written, some were not: carry on with the
+                # post-export steps but never report "Export Complete".
+                partial = outcome[1]
+            elif outcome[0] == "error":
+                raise outcome[1]
+            notes = list(getattr(self.handler.parser, "last_export_notes",
+                                 None) or [])
 
             # MV/MZ post-export: plugin injection
             plugin_msg = ""
@@ -3176,57 +3212,121 @@ class MainWindow(QMainWindow):
                 if easyrpg_msg:
                     plugin_msg += "\n" + easyrpg_msg
 
+            note_msg = ("\n\n" + "\n\n".join(notes)) if notes else ""
+            if partial is not None:
+                QMessageBox.warning(
+                    self, "Export Incomplete",
+                    "Some files were NOT exported, so parts of the game are "
+                    "still untranslated or show older text:\n\n"
+                    f"{partial}\n\nFix the problem (close the game, free "
+                    "disk space…) and export again." + plugin_msg + note_msg)
+                return
             QMessageBox.information(
                 self, "Export Complete",
                 self.handler.get_export_message(len(translated)) + plugin_msg
+                + note_msg
             )
             if not self._wizard_active:
                 self.pipeline_bar.mark_done("export")
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", str(e))
 
+    @staticmethod
+    def _export_worker(handler, project_path, entries):
+        """Run an export off the UI thread; return (kind, exception)."""
+        try:
+            handler.save_project(project_path, entries)
+        except PartialExportError as exc:
+            return ("partial", exc)
+        except Exception as exc:  # noqa: BLE001 -- shown to the user
+            log.exception("Export failed")
+            return ("error", exc)
+        return ("ok", None)
+
     # ── EasyRPG Player auto-download ─────────────────────────────
 
     _EASYRPG_URL = ("https://easyrpg.org/downloads/player/0.8.1.1/"
                     "easyrpg-player-0.8.1.1-windows-x64.zip")
+    # Pinned hashes of that exact release (no checksum is published, so
+    # these were taken from the archive when the URL was pinned).  The zip
+    # is verified before extraction and the exe before every use, so a
+    # tampered download or a swapped cached copy is never run.
+    _EASYRPG_ZIP_SHA256 = (
+        "49590bd595f60cd3a2833f9bea7dcb4b2f90b9a0d86ebf57423378fcdd50cd88")
+    _EASYRPG_EXE_SHA256 = (
+        "f9d295c2b913fe8decf366ca2a7957407ca987124f9d895de68a6b076e68775b")
+    _EASYRPG_EXE_NAME = "Player.exe"
+
+    @classmethod
+    def _download_easyrpg(cls, cached: str) -> None:
+        """Download, verify and cache EasyRPG Player (runs off the UI thread)."""
+        import hashlib
+        import io
+        import urllib.request
+        import zipfile
+        from ..game_io import atomic_write_bytes
+        with urllib.request.urlopen(cls._EASYRPG_URL, timeout=30) as r:
+            zip_data = r.read(64 * 1024 * 1024)
+        if hashlib.sha256(zip_data).hexdigest() != cls._EASYRPG_ZIP_SHA256:
+            raise ValueError("downloaded archive failed the SHA-256 check")
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+            exe = zf.read(cls._EASYRPG_EXE_NAME)
+        if hashlib.sha256(exe).hexdigest() != cls._EASYRPG_EXE_SHA256:
+            raise ValueError("Player.exe failed the SHA-256 check")
+        os.makedirs(os.path.dirname(cached), exist_ok=True)
+        atomic_write_bytes(cached, exe)
+
+    @classmethod
+    def _easyrpg_cache_ok(cls, cached: str) -> bool:
+        from ..game_io import sha256_file
+        try:
+            return sha256_file(cached) == cls._EASYRPG_EXE_SHA256
+        except OSError:
+            return False
 
     def _ensure_easyrpg_player(self, game_dir: str) -> str:
-        """Copy EasyRPG Player into the game folder for locale-free play.
+        """Offer to copy EasyRPG Player into the game folder for locale-free play.
 
-        Downloads on first use, caches in tools/ next to main.py.
-        Returns a status message string, or empty if already present.
+        Asks first (it downloads and adds an executable), verifies the
+        pinned SHA-256 of the archive and the exe, downloads on a worker
+        thread, and caches the verified exe in tools/.  Returns a status
+        message string, or empty if nothing was done.
         """
         dest = os.path.join(game_dir, "Player.exe")
-        if os.path.isfile(dest):
+        if os.path.isfile(dest) or getattr(self, "_easyrpg_declined", False):
             return ""
 
-        # Check local cache
         tools_dir = os.path.join(app_dir(), "tools")
         cached = os.path.join(tools_dir, "easyrpg-player.exe")
+        have_cache = self._easyrpg_cache_ok(cached)
 
-        if not os.path.isfile(cached):
-            # Download
+        reply = QMessageBox.question(
+            self, "Add EasyRPG Player?",
+            "RPG Maker 2000/2003 games often show garbled text on non-"
+            "Japanese Windows. EasyRPG Player (free, open source) runs them "
+            "correctly.\n\n"
+            + ("Copy the verified EasyRPG Player into the game folder as "
+               "Player.exe?" if have_cache else
+               "Download EasyRPG Player 0.8.1.1 (about 8 MB) from easyrpg.org, "
+               "verify its checksum and copy it into the game folder as "
+               "Player.exe?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if reply != QMessageBox.StandardButton.Yes:
+            self._easyrpg_declined = True   # don't ask again this session
+            return ""
+
+        if not have_cache:
             try:
-                import io
-                import zipfile
-                import urllib.request
                 log.info("Downloading EasyRPG Player…")
-                with urllib.request.urlopen(self._EASYRPG_URL, timeout=30) as r:
-                    zip_data = r.read()
-                with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
-                    # Find the exe inside the zip
-                    exe_names = [n for n in zf.namelist()
-                                 if n.lower().endswith(".exe")]
-                    if not exe_names:
-                        log.warning("No exe found in EasyRPG zip")
-                        return ""
-                    os.makedirs(tools_dir, exist_ok=True)
-                    with open(cached, "wb") as f:
-                        f.write(zf.read(exe_names[0]))
-                log.info("EasyRPG Player cached at %s", cached)
+                self._run_blocking("EasyRPG Player", "Downloading EasyRPG Player…",
+                                   self._download_easyrpg, cached)
             except Exception as exc:
                 log.warning("Failed to download EasyRPG Player: %s", exc)
-                return ""
+                return f"EasyRPG Player was not added: {exc}"
+            if not self._easyrpg_cache_ok(cached):
+                return "EasyRPG Player was not added: download failed."
+            log.info("EasyRPG Player cached at %s", cached)
 
         # Copy to game folder
         try:
@@ -3295,32 +3395,10 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            import shutil
-            # Atomic swap: rename current → temp, copy backup → data, delete temp
-            temp_dir = data_dir + "_restoring"
-            # Clean up leftover temp dir from a previously interrupted restore
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-            os.rename(data_dir, temp_dir)
-            try:
-                shutil.copytree(backup_dir, data_dir)
-            except Exception:
-                # Copy failed — restore the original data dir
-                os.rename(temp_dir, data_dir)
-                raise
-            shutil.rmtree(temp_dir)
-
-            # RPG Maker: also restore plugins.js if backup exists
-            plugins_restored = False
-            plugins_path = self.parser._find_plugins_file(self.project.project_path)
-            if plugins_path:
-                backup_path = os.path.join(
-                    os.path.dirname(plugins_path),
-                    os.path.basename(plugins_path).replace("plugins.", "plugins_original.")
-                )
-                if os.path.isfile(backup_path):
-                    shutil.copy2(backup_path, plugins_path)
-                    plugins_restored = True
+            # Copy the backup aside first, then swap it in: a failed copy
+            # leaves the live data/ folder exactly as it was.
+            plugins_restored = self.parser.restore_originals(
+                self.project.project_path)
 
             # Clean up injected word wrap plugin
             self.parser.remove_wordwrap_plugin(self.project.project_path)
@@ -3379,15 +3457,12 @@ class MainWindow(QMainWindow):
             if os.path.exists(link):
                 continue  # Junction already exists
             try:
-                # mklink /J creates a directory junction (no admin needed)
-                result = subprocess.run(
-                    ["cmd", "/c", "mklink", "/J", link, source],
-                    capture_output=True, text=True, check=True,
-                )
-            except subprocess.CalledProcessError as e:
+                # Directory junction via the Win32 API (no shell, no admin)
+                create_junction(link, source)
+            except OSError as e:
                 QMessageBox.critical(
                     self, "Junction Error",
-                    f"Failed to create directory junction for {dirname}:\n{e.stderr}"
+                    f"Failed to create directory junction for {dirname}:\n{e}"
                 )
                 return
 
@@ -4640,20 +4715,23 @@ class MainWindow(QMainWindow):
         if not self._ensure_ollama_ready():
             return
 
+        # Lines the user marked reviewed are their approved text: never
+        # rewritten by a bulk pass.
         to_polish = [
             e for e in self.project.entries
-            if e.status in ("translated", "reviewed")
+            if e.status == "translated"
             and e.translation and e.translation.strip()
         ]
         if not to_polish:
             QMessageBox.information(self, "Nothing to Polish",
-                                    "No translated entries to polish.")
+                                    "No translated (unreviewed) entries to polish.")
             return
 
         reply = QMessageBox.question(
             self, "Polish Grammar",
             f"This will run {len(to_polish)} translated entries through the LLM\n"
-            "to fix grammar and improve fluency (English → English).\n\n"
+            "to fix grammar and improve fluency (English → English).\n"
+            "Entries you marked Reviewed are left untouched.\n\n"
             "Original Japanese text is not changed — only the English translation\n"
             "gets cleaned up. This may take a while.\n\n"
             "Continue?",
@@ -4961,7 +5039,8 @@ class MainWindow(QMainWindow):
         quotes_fixed = 0
         contractions_fixed = 0
         for entry in self.project.entries:
-            if not entry.translation or entry.status not in ("translated", "reviewed"):
+            # Reviewed entries are the user's approved text -- left alone
+            if not entry.translation or entry.status != "translated":
                 continue
             original_text = entry.translation
 
@@ -5071,11 +5150,22 @@ class MainWindow(QMainWindow):
             return 0
 
         from .. import CONTROL_CODE_RE, TYRANO_CODE_RE
-        code_re = TYRANO_CODE_RE if self._project_type == "tyranoscript" else CONTROL_CODE_RE
+        if self._project_type == "tyranoscript":
+            code_re = TYRANO_CODE_RE
+        elif self._project_type == "renpy":
+            # Same tokens Ren'Py extraction protects ({tags} and [vars])
+            from ..ai_client import AIClient
+            code_re = AIClient._EXTRACT_RE_RENPY
+        else:
+            code_re = CONTROL_CODE_RE
 
+        in_flight = getattr(self.engine, "dispatch_state", {})
         fixed = 0
         for entry in self.project.entries:
-            if entry.status not in ("translated", "reviewed"):
+            # Reviewed entries are never changed automatically (a code the
+            # user removed on purpose must stay removed); entries still out
+            # at the LLM are handled when their result arrives.
+            if entry.status != "translated" or entry.id in in_flight:
                 continue
             if not entry.translation:
                 continue
@@ -5905,9 +5995,22 @@ class MainWindow(QMainWindow):
         if not self._is_batch_project_current():
             return
         entry = self.project.get_entry_by_id(entry_id)
+        snap = getattr(self.engine, "dispatch_state", {}).pop(entry_id, None)
+        if entry and snap is not None and (entry.translation, entry.status) != snap:
+            # The user edited or reviewed this line while its request was
+            # running -- their work wins, the late LLM result is dropped.
+            log.info("Dropped LLM result for %s: entry changed since dispatch",
+                     entry_id)
+            self.statusbar.showMessage(
+                "Kept your edit -- a translation that finished afterwards "
+                "was discarded.", 5000)
+            self.queue_panel.mark_entry_done(entry_id, entry.translation,
+                                             source="kept edit")
+            return
         if entry and self._is_polish_run():
-            # Polish only rewrites the English text: keep status (reviewed
-            # stays reviewed), no title-casing, no dupe filling.
+            # Polish only rewrites the English text: keep status, no
+            # title-casing, no dupe filling.  Reviewed entries are never
+            # sent to a polish run in the first place.
             entry.translation = translation
         elif entry:
             # Check for diff with previous translation

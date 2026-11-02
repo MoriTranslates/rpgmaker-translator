@@ -1085,7 +1085,8 @@ def run_post_processing(entries: list, verbose: bool = False,
     """Run all post-processing fixes on a list of TranslationEntry objects.
 
     Modifies entries in-place. Returns a summary of fixes applied.
-    Only processes entries with status 'translated' or 'reviewed'.
+    Only processes entries with status 'translated' -- entries the user
+    marked 'reviewed' are never altered, cleared or re-queued.
 
     Args:
         glossary: Optional JP→EN glossary for reconstructing collapsed
@@ -1106,7 +1107,7 @@ def run_post_processing(entries: list, verbose: bool = False,
                 _glossary_words.add(word.lower())
 
     for entry in entries:
-        if entry.status not in ("translated", "reviewed"):
+        if entry.status != "translated":
             continue
         if not entry.translation:
             continue

@@ -446,6 +446,9 @@ class TranslationEngine(QObject):
         self.max_history = 10  # translation history window (0 = disabled)
         self._threads = []
         self._workers = []
+        # entry id -> (translation, status) when it was sent to the LLM.
+        # The UI drops a result if the user changed the entry meanwhile.
+        self.dispatch_state: dict[str, tuple] = {}
         self._total = 0
         self._progress_count = 0
         self._translate_count = 0
@@ -538,6 +541,7 @@ class TranslationEngine(QObject):
         self._finished_workers = 0
         self._threads = []
         self._workers = []
+        self.dispatch_state = {e.id: (e.translation, e.status) for e in to_translate}
 
         event_buckets, flat = _group_by_event(to_translate)
         n = min(self.num_workers, max(1, len(event_buckets) + (1 if flat else 0)))
@@ -596,6 +600,7 @@ class TranslationEngine(QObject):
         self._finished_workers = 0
         self._threads = []
         self._workers = []
+        self.dispatch_state = {e.id: (e.translation, e.status) for e in to_polish}
         self._cancelled = False
         self._connection_failures = []
         self._server_down_emitted = False

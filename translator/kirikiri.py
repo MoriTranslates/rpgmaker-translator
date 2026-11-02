@@ -30,11 +30,11 @@ XP3 archive format:
 import logging
 import os
 import re
-import shutil
 import struct
 import zlib
 from pathlib import Path
 
+from . import game_io
 from .project_model import TranslationEntry
 from . import JAPANESE_RE
 
@@ -334,15 +334,24 @@ class KirikiriParser:
         """Export translations back into .ks files."""
         scenario_dir = self._find_scenario_dir(project_dir)
         if not scenario_dir:
-            log.error("No scenario directory found for export")
-            return
+            raise FileNotFoundError(
+                f"No scenario folder found in {project_dir} -- nothing was "
+                "exported.")
 
         backup_dir = os.path.join(os.path.dirname(scenario_dir), "scenario_original")
 
-        # Create backup on first export
-        if not os.path.exists(backup_dir):
-            shutil.copytree(scenario_dir, backup_dir)
-            log.info("Backed up scenario/ to scenario_original/")
+        # Create backup on first export (built under a temp name, so an
+        # interrupted copy is never mistaken for a complete backup)
+        manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
+        if game_io.backup_tree_once(scenario_dir, backup_dir):
+            manifest.save()
+        self.last_export_notes: list[str] = []
+        pairs = game_io.tree_pairs(scenario_dir, backup_dir, (".ks",))
+        refreshed = game_io.refresh_changed_originals(pairs, manifest)
+        if refreshed:
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+        problems: list[str] = []
+        written: list[tuple[str, str]] = []
 
         # Group entries by file
         by_file: dict[str, list[TranslationEntry]] = {}
@@ -356,8 +365,12 @@ class KirikiriParser:
             rel_path = str(ks.relative_to(Path(backup_dir))).replace("\\", "/")
             if rel_path not in by_file:
                 live_path = os.path.join(scenario_dir, rel_path)
-                os.makedirs(os.path.dirname(live_path), exist_ok=True)
-                shutil.copy2(str(ks), live_path)
+                try:
+                    os.makedirs(os.path.dirname(live_path), exist_ok=True)
+                    game_io.atomic_copy(str(ks), live_path)
+                    written.append((rel_path, live_path))
+                except OSError as exc:
+                    problems.append(f"{rel_path} ({exc})")
 
         export_count = 0
         for rel_path, file_entries in by_file.items():
@@ -368,10 +381,16 @@ class KirikiriParser:
 
             if not os.path.exists(source):
                 log.warning("Source file not found: %s", source)
+                problems.append(f"{rel_path} (file not found, "
+                                f"{len(file_entries)} translations)")
                 continue
 
             encoding = self._detect_encoding(source)
-            content = self._read_file(source)
+            # surrogateescape keeps any undecodable byte exactly as it was
+            # (errors="replace" turned it into '?' in the whole file).
+            raw_errors = "replace" if encoding == "utf-16" else "surrogateescape"
+            with open(source, "r", encoding=encoding, errors=raw_errors) as f:
+                content = f.read()
             lines = content.split("\n")
 
             # Re-parse the source exactly like load did to recover the real
@@ -386,13 +405,23 @@ class KirikiriParser:
 
             # Keep the source encoding — the engine decides how to read the
             # file from its bytes (BOM / none), so never switch it silently.
-            os.makedirs(os.path.dirname(live_path), exist_ok=True)
-            with open(live_path, "w", encoding=encoding, errors="replace") as f:
-                f.write(translated_content)
+            try:
+                os.makedirs(os.path.dirname(live_path), exist_ok=True)
+                game_io.atomic_write_text(
+                    live_path, translated_content, encoding=encoding,
+                    errors=game_io.PRESERVE_OR_REPLACE)
+                written.append((rel_path, live_path))
+            except OSError as exc:
+                problems.append(f"{rel_path} ({exc})")
+                continue
 
             export_count += len(file_entries)
 
+        for rel_path, live_path in written:
+            manifest.record(rel_path, live_path)
+        manifest.finish()
         log.info("Exported %d translations to scenario/", export_count)
+        game_io.raise_if_problems(problems)
 
     def restore_originals(self, project_dir: str):
         """Restore original scenario files from backup."""
@@ -402,8 +431,7 @@ class KirikiriParser:
         if not backup_dir or not os.path.isdir(backup_dir):
             raise FileNotFoundError(
                 "No scenario_original/ backup exists. Export to game first to create one.")
-        shutil.rmtree(scenario_dir)
-        shutil.copytree(backup_dir, scenario_dir)
+        game_io.restore_tree(backup_dir, scenario_dir)
         log.info("Restored scenario/ from backup")
 
     def get_game_title(self, project_dir: str) -> str:

@@ -33,14 +33,13 @@ Ruby Marshal objects use @-prefixed attribute names:
 import logging
 import os
 import re
-import shutil
 from collections import deque
 from typing import Optional
 
 from rubymarshal.reader import loads as ruby_loads
 from rubymarshal.writer import writes as ruby_writes
 
-from . import JAPANESE_RE
+from . import JAPANESE_RE, game_io
 from .project_model import TranslationEntry
 
 log = logging.getLogger(__name__)
@@ -258,33 +257,57 @@ class RPGMakerAceParser:
                 f"Could not find Data/ folder in {project_dir}."
             )
 
-        # Backup originals on first export
-        self._backup_data_dir(data_dir)
-
         backup_dir = data_dir + "_original"
+        manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
+        # Backup originals on first export
+        if self._backup_data_dir(data_dir):
+            manifest.save()
         source_dir = backup_dir if os.path.isdir(backup_dir) else data_dir
 
         # Build lookup: file → [entries]
         by_file: dict[str, list] = {}
+        all_files: set[str] = set()
         for e in entries:
+            all_files.add(e.file)
             if not (e.translation and e.status in ("translated", "reviewed")):
                 continue
             by_file.setdefault(e.file, []).append(e)
 
-        for filename, file_entries in by_file.items():
+        # Only files that hold game text are ever written (Scripts.rvdata2
+        # is left to the script patchers, which keep their own backup).
+        self.last_export_notes: list[str] = []
+        refreshed = game_io.refresh_changed_originals(
+            [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
+             for fn in sorted(all_files)], manifest)
+        if refreshed:
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+
+        problems: list[str] = []
+        for filename in sorted(all_files):
+            file_entries = by_file.get(filename, [])
             source_path = os.path.join(source_dir, filename)
+            out_path = os.path.join(data_dir, filename)
             if not os.path.exists(source_path):
+                if file_entries:
+                    problems.append(f"{filename} (file not found, "
+                                    f"{len(file_entries)} translations)")
                 continue
             try:
-                data = self._read_rvdata2(source_path)
+                if not file_entries:
+                    # No (remaining) translations: put the original back
+                    # so reverted lines don't keep stale English.
+                    if source_path != out_path:
+                        game_io.atomic_copy(source_path, out_path)
+                else:
+                    data = self._read_rvdata2(source_path)
+                    self._apply_translations(data, filename, file_entries)
+                    self._write_rvdata2(out_path, data)
+                manifest.record(filename, out_path)
             except Exception as exc:
-                log.error("Failed to read %s: %s", source_path, exc)
-                continue
-
-            self._apply_translations(data, filename, file_entries)
-
-            out_path = os.path.join(data_dir, filename)
-            self._write_rvdata2(out_path, data)
+                log.error("Failed to export %s: %s", filename, exc)
+                problems.append(f"{filename} ({exc})")
+        manifest.finish()
+        game_io.raise_if_problems(problems)
 
     def restore_originals(self, project_dir: str):
         """Restore Data_original/ → Data/."""
@@ -297,8 +320,8 @@ class RPGMakerAceParser:
             raise FileNotFoundError(
                 f"No backup found at {backup_dir}. Export the game at "
                 "least once before restoring.")
-        shutil.rmtree(data_dir)
-        shutil.copytree(backup_dir, data_dir)
+        # Copy-then-swap: a failed restore leaves Data/ untouched.
+        game_io.restore_tree(backup_dir, data_dir)
 
     # ── Ruby Marshal I/O ─────────────────────────────────────────────
 
@@ -309,8 +332,9 @@ class RPGMakerAceParser:
 
     @staticmethod
     def _write_rvdata2(path: str, data):
-        with open(path, "wb") as f:
-            f.write(ruby_writes(data))
+        # Serialise first, then replace atomically: a serialiser error or
+        # crash never leaves a truncated .rvdata2 behind.
+        game_io.atomic_write_bytes(path, ruby_writes(data))
 
     # ── Data dir discovery ───────────────────────────────────────────
 
@@ -323,11 +347,8 @@ class RPGMakerAceParser:
         return None
 
     @staticmethod
-    def _backup_data_dir(data_dir: str):
-        backup = data_dir + "_original"
-        if not os.path.isdir(backup):
-            shutil.copytree(data_dir, backup)
-            log.info("Backed up %s → %s", data_dir, backup)
+    def _backup_data_dir(data_dir: str) -> bool:
+        return game_io.backup_tree_once(data_dir, data_dir + "_original")
 
     # ── Actor lookup helpers ─────────────────────────────────────────
 

@@ -18,10 +18,9 @@ File format:
 import logging
 import os
 import re
-import shutil
 
 from .project_model import TranslationEntry
-from . import JAPANESE_RE
+from . import JAPANESE_RE, game_io
 
 log = logging.getLogger(__name__)
 
@@ -177,12 +176,21 @@ class CrowdParser:
         """Export translations back into all .sce files."""
         sce_files = self._find_sce_files(project_dir)
         if not sce_files:
-            log.error("No .sce file found for export")
-            return
+            raise FileNotFoundError(
+                f"No .sce file found in {project_dir} -- nothing was exported.")
 
         backup_dir = os.path.join(project_dir, "sce_original")
         if not os.path.exists(backup_dir):
             os.makedirs(backup_dir)
+        manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
+        self.last_export_notes: list[str] = []
+        refreshed = game_io.refresh_changed_originals(
+            [(os.path.basename(p), p,
+              os.path.join(backup_dir, os.path.basename(p)))
+             for p in sce_files], manifest)
+        if refreshed:
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+        problems: list[str] = []
 
         # Detect the key here too: export may run after restoring a saved
         # state without load_project. Prefer the pristine backup copy.
@@ -204,8 +212,7 @@ class CrowdParser:
 
             # Create backup on first export
             backup_path = os.path.join(backup_dir, sce_name)
-            if not os.path.exists(backup_path):
-                shutil.copy2(sce_path, backup_path)
+            if game_io.backup_file_once(sce_path, backup_path):
                 log.info("Backed up %s to sce_original/", sce_name)
 
             # Always read from backup for idempotent re-export
@@ -229,21 +236,29 @@ class CrowdParser:
                         line_num = int(parts[-1])
                         trans_map[(field, line_num)] = entry
 
-            if not trans_map:
-                continue
+            try:
+                if not trans_map:
+                    # Nothing translated (any more): put the original back
+                    # so reverted lines don't keep stale English.
+                    if source != sce_path:
+                        game_io.atomic_copy(source, sce_path)
+                else:
+                    # Reconstruct the script with translations
+                    translated_text = self._rebuild_script(text, trans_map)
 
-            # Reconstruct the script with translations
-            translated_text = self._rebuild_script(text, trans_map)
-
-            # Encode and encrypt
-            translated_bytes = translated_text.encode(
-                "cp932", errors="surrogateescape")
-            encrypted = encrypt_sce(translated_bytes, self._key, self._mod)
-
-            with open(sce_path, "wb") as f:
-                f.write(encrypted)
-
-            log.info("Exported %d translations to %s", len(trans_map), sce_name)
+                    # Encode and encrypt
+                    translated_bytes = translated_text.encode(
+                        "cp932", errors="surrogateescape")
+                    encrypted = encrypt_sce(
+                        translated_bytes, self._key, self._mod)
+                    game_io.atomic_write_bytes(sce_path, encrypted)
+                    log.info("Exported %d translations to %s",
+                             len(trans_map), sce_name)
+                manifest.record(sce_name, sce_path)
+            except (OSError, ValueError) as exc:
+                problems.append(f"{sce_name} ({exc})")
+        manifest.finish()
+        game_io.raise_if_problems(problems)
 
     def restore_originals(self, project_dir: str):
         """Restore original .sce from backup."""
@@ -256,7 +271,7 @@ class CrowdParser:
         for name in os.listdir(backup_dir):
             src = os.path.join(backup_dir, name)
             dst = os.path.join(project_dir, name)
-            shutil.copy2(src, dst)
+            game_io.atomic_copy(src, dst)
             log.info("Restored %s from backup", name)
 
     def get_game_title(self, project_dir: str) -> str:
@@ -558,9 +573,6 @@ class CrowdParser:
         text = CrowdParser._CMD_STRIP_RE.sub('', text)
         # Strip * (choice separator in SELECT commands)
         text = re.sub(r'\s*\*\s*', ' ', text)
-        # Double quotes are reserved for SS "title" syntax in Crowd engine.
-        # Any " in translations risks breaking the parser — replace with single quotes.
-        text = text.replace('"', "'")
         # Replace non-cp932 characters with safe equivalents
         text = text.replace('\u2014', '--')   # em dash
         text = text.replace('\u2013', '-')    # en dash
@@ -568,8 +580,13 @@ class CrowdParser:
         text = text.replace('\u2026', '...')  # horizontal ellipsis
         text = text.replace('\u2018', "'")    # left single quote
         text = text.replace('\u2019', "'")    # right single quote
-        text = text.replace('\u201c', '"')    # left double quote
-        text = text.replace('\u201d', '"')    # right double quote
+        text = text.replace('\u201c', "'")    # left double quote
+        text = text.replace('\u201d', "'")    # right double quote
+        # Double quotes are reserved for SS "title" syntax in Crowd engine.
+        # Any " in translations risks breaking the parser -- replace with
+        # single quotes.  Done AFTER the curly-quote mapping above, which
+        # used to turn “...” back into bare ".
+        text = text.replace('"', "'").replace('\uff02', "'")
         # Catch any remaining non-cp932 characters
         try:
             text.encode('cp932')

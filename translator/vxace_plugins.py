@@ -12,7 +12,7 @@ Plugins:
 
 import logging
 import os
-import shutil
+from translator import game_io
 import zlib
 
 log = logging.getLogger(__name__)
@@ -678,8 +678,7 @@ def inject_plugins(scripts_path: str,
 
     # Backup
     backup = scripts_path.replace("Scripts.rvdata2", "Scripts_preplugins.rvdata2")
-    if not os.path.exists(backup):
-        shutil.copy2(scripts_path, backup)
+    if game_io.backup_file_once(scripts_path, backup):
         log.info("Backed up Scripts.rvdata2 → Scripts_preplugins.rvdata2")
 
     # Remove any existing injected plugins
@@ -706,15 +705,16 @@ def inject_plugins(scripts_path: str,
         log.info("Injected plugin: %s", name)
 
     try:
-        with open(scripts_path, "wb") as f:
-            rubymarshal.writer.write(f, scripts)
+        # Serialise first, then replace atomically: a failed write
+        # never leaves a truncated Scripts.rvdata2 (game won't boot).
+        game_io.atomic_write_bytes(
+            scripts_path, rubymarshal.writer.writes(scripts))
         return injected
     except Exception as e:
         log.error("Failed to write Scripts.rvdata2: %s", e)
         # Put back exactly what was there (the first-time backup may predate
         # the window scaler or other changes)
-        with open(scripts_path, "wb") as f:
-            f.write(original_bytes)
+        game_io.atomic_write_bytes(scripts_path, original_bytes)
         return []
 
 
@@ -732,8 +732,10 @@ def remove_plugins(scripts_path: str) -> bool:
         kept = [s for s in scripts if _TAG not in str(s[1])]
         if len(kept) == len(scripts):
             return False
-        with open(scripts_path, "wb") as f:
-            rubymarshal.writer.write(f, kept)
+        # Serialise first, then replace atomically: a failed write
+        # never leaves a truncated Scripts.rvdata2 (game won't boot).
+        game_io.atomic_write_bytes(
+            scripts_path, rubymarshal.writer.writes(kept))
         log.info("Removed %d injected plugins", len(scripts) - len(kept))
         return True
     except Exception as e:

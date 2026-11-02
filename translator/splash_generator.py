@@ -111,5 +111,6 @@ def _inject_plugin_entry(plugins_js_path: str) -> bool:
 
     if new_text == text:
         return False
-    Path(plugins_js_path).write_text(new_text, encoding="utf-8")
+    from .game_io import atomic_write_text
+    atomic_write_text(plugins_js_path, new_text)
     return True

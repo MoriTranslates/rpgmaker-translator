@@ -8,7 +8,7 @@ options, and injects a small Ruby script that:
 
 import logging
 import os
-import shutil
+from translator import game_io
 import zlib
 
 log = logging.getLogger(__name__)
@@ -270,8 +270,7 @@ def inject_scaler(scripts_path: str, default_scale: float = 2.0) -> bool:
 
     # Backup (only first time)
     backup = scripts_path.replace("Scripts.rvdata2", "Scripts_prescaler.rvdata2")
-    if not os.path.exists(backup):
-        shutil.copy2(scripts_path, backup)
+    if game_io.backup_file_once(scripts_path, backup):
         log.info("Backed up Scripts.rvdata2 → Scripts_prescaler.rvdata2")
 
     # Remove any existing scaler script
@@ -299,8 +298,10 @@ def inject_scaler(scripts_path: str, default_scale: float = 2.0) -> bool:
     scripts.insert(insert_idx, new_entry)
 
     try:
-        with open(scripts_path, "wb") as f:
-            rubymarshal.writer.write(f, scripts)
+        # Serialise first, then replace atomically: a failed write
+        # never leaves a truncated Scripts.rvdata2 (game won't boot).
+        game_io.atomic_write_bytes(
+            scripts_path, rubymarshal.writer.writes(scripts))
         base_w, base_h = detect_resolution(scripts_path)
         log.info("Injected window scaler: %dx%d default %sx, "
                  "PgUp/PgDn=scale, F3=borderless cycle",
@@ -310,8 +311,7 @@ def inject_scaler(scripts_path: str, default_scale: float = 2.0) -> bool:
         log.error("Failed to write Scripts.rvdata2: %s", e)
         # Put back exactly what was there (the first-time backup may predate
         # other injected scripts)
-        with open(scripts_path, "wb") as f:
-            f.write(original_bytes)
+        game_io.atomic_write_bytes(scripts_path, original_bytes)
         return False
 
 
@@ -327,8 +327,10 @@ def remove_scaler(scripts_path: str) -> bool:
         with open(scripts_path, "rb") as f:
             scripts = rubymarshal.reader.load(f)
         scripts = [s for s in scripts if SCRIPT_NAME not in str(s[1])]
-        with open(scripts_path, "wb") as f:
-            rubymarshal.writer.write(f, scripts)
+        # Serialise first, then replace atomically: a failed write
+        # never leaves a truncated Scripts.rvdata2 (game won't boot).
+        game_io.atomic_write_bytes(
+            scripts_path, rubymarshal.writer.writes(scripts))
         return True
     except Exception:
         return False

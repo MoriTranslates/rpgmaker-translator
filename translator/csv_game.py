@@ -12,11 +12,19 @@ import io
 import logging
 import os
 import re
-import shutil
 from pathlib import Path
 
 from .project_model import TranslationEntry
-from . import JAPANESE_RE
+from . import JAPANESE_RE, game_io
+
+
+def _looks_like_free_text_cell(cell: str) -> bool:
+    """Empty, or English prose (letters + a space) -- never an id/number."""
+    cell = cell.strip()
+    if not cell:
+        return True
+    return (cell.isascii() and " " in cell
+            and any(ch.isalpha() for ch in cell))
 
 log = logging.getLogger(__name__)
 
@@ -167,26 +175,48 @@ class CSVGameParser:
         data_dir = os.path.join(project_dir, "data")
         backup_dir = os.path.join(project_dir, "data_original")
 
-        # Group entries by file
+        # Group entries by file.  Only translated/reviewed lines are
+        # written; every file the project knows is rewritten from the backup
+        # so reverted lines don't keep English from an earlier export.
         entries_by_file: dict[str, list[TranslationEntry]] = {}
+        all_files: set[str] = set()
         for entry in entries:
-            if entry.translation:
+            all_files.add(entry.file)
+            if entry.translation and entry.status in ("translated", "reviewed"):
                 entries_by_file.setdefault(entry.file, []).append(entry)
 
-        for filename, file_entries in entries_by_file.items():
+        manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
+        self.last_export_notes: list[str] = []
+        refreshed = game_io.refresh_changed_originals(
+            [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
+             for fn in sorted(all_files)], manifest)
+        if refreshed:
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+        problems: list[str] = []
+
+        for filename in sorted(all_files):
+            file_entries = entries_by_file.get(filename, [])
             fpath = os.path.join(data_dir, filename)
             if not os.path.isfile(fpath):
+                if file_entries:
+                    problems.append(f"{filename} (file not found)")
                 continue
 
-            # Backup on first export
+            # Backup on first export (atomic copy)
             os.makedirs(backup_dir, exist_ok=True)
             backup = os.path.join(backup_dir, filename)
-            if not os.path.isfile(backup):
-                shutil.copy2(fpath, backup)
+            if game_io.backup_file_once(fpath, backup):
                 log.info("Backed up %s to data_original/", filename)
+                if not manifest.exists:
+                    manifest.save()
 
             # Read from backup for idempotent re-export
             source = backup if os.path.isfile(backup) else fpath
+            if not file_entries:
+                if source != fpath:
+                    game_io.atomic_copy(source, fpath)
+                manifest.record(filename, fpath)
+                continue
             with open(source, "rb") as f:
                 has_bom = f.read(3) == codecs.BOM_UTF8
             # newline="" keeps the source's line terminators intact
@@ -204,7 +234,12 @@ class CSVGameParser:
                 log.warning("%s: no safe English column found — not exported "
                             "(adjacent column holds non-English data)", filename)
                 if source != fpath:
-                    shutil.copy2(source, fpath)  # undo any older export
+                    game_io.atomic_copy(source, fpath)  # undo any older export
+                manifest.record(filename, fpath)
+                problems.append(
+                    f"{filename} (no empty English column next to the "
+                    f"Japanese text -- not written, to avoid overwriting game "
+                    f"data; {len(file_entries)} translations)")
                 continue
 
             # Build translation lookup: row_idx -> translation
@@ -232,13 +267,18 @@ class CSVGameParser:
                     applied += 1
 
             # Write back, keeping the source's BOM and line terminator
-            with open(fpath, "w", encoding="utf-8-sig" if has_bom else "utf-8",
-                      newline="") as f:
-                writer = csv.writer(f, lineterminator=line_term)
-                for row in rows:
-                    writer.writerow(row)
+            buf = io.StringIO(newline="")
+            writer = csv.writer(buf, lineterminator=line_term)
+            for row in rows:
+                writer.writerow(row)
+            game_io.atomic_write_text(
+                fpath, buf.getvalue(),
+                encoding="utf-8-sig" if has_bom else "utf-8", newline="")
+            manifest.record(filename, fpath)
 
             log.info("Exported %d translations to %s", applied, filename)
+        manifest.finish()
+        game_io.raise_if_problems(problems)
 
     def restore_originals(self, project_dir: str):
         """Restore original files from backup."""
@@ -250,7 +290,7 @@ class CSVGameParser:
         for name in os.listdir(backup_dir):
             src = os.path.join(backup_dir, name)
             dst = os.path.join(data_dir, name)
-            shutil.copy2(src, dst)
+            game_io.atomic_copy(src, dst)
             log.info("Restored %s", name)
 
     def get_game_title(self, project_dir: str) -> str:
@@ -303,16 +343,18 @@ class CSVGameParser:
                 jp_col = col_jp_count.index(max(col_jp_count))
 
         # EN column is typically right after JP column — but only trust the
-        # guess if that column is empty/ASCII in >= 90% of the JP rows,
-        # otherwise export would overwrite real game data.
+        # guess if that column is empty (or already holds English prose) in
+        # >= 90% of the JP rows.  Plain ASCII is not enough: sound-effect
+        # ids ("se_01") and numeric flags ("0") are ASCII too, and export
+        # would overwrite them.
         if jp_col >= 0 and en_col < 0:
             candidate = jp_col + 1
             if candidate < width:
                 jp_rows = [r for r in data_rows
                            if jp_col < len(r) and JAPANESE_RE.search(r[jp_col])]
                 safe = sum(1 for r in jp_rows
-                           if candidate >= len(r) or not r[candidate].strip()
-                           or r[candidate].isascii())
+                           if candidate >= len(r)
+                           or _looks_like_free_text_cell(r[candidate]))
                 if jp_rows and safe >= 0.9 * len(jp_rows):
                     en_col = candidate
 

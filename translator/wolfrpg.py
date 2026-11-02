@@ -19,7 +19,11 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+from . import game_io
 from .project_model import TranslationEntry
+
+# The only data folders the exporter writes (and backs up / restores).
+_WOLF_DATA_SUBDIRS = ('BasicData', 'MapData')
 
 log = logging.getLogger(__name__)
 
@@ -429,7 +433,7 @@ class WolfMap:
             ev.write(writer)
         writer.write_byte(MAP_EVENT_TERMINATOR)
         target = path or self.path
-        target.write_bytes(writer.getvalue())
+        game_io.atomic_write_bytes(target, writer.getvalue())
 
 
 class WolfEvent:
@@ -694,7 +698,7 @@ class WolfCommonEvents:
             ce.write(writer)
         writer.write_byte(self._terminator)
         target = path or self.path
-        target.write_bytes(writer.getvalue())
+        game_io.atomic_write_bytes(target, writer.getvalue())
 
 
 # ── Database parsing ─────────────────────────────────────────────────────
@@ -1311,10 +1315,23 @@ class WolfRPGParser:
         self.game_dir = Path(project_dir)
         self.data_dir = self._find_data_dir()
 
-        # Create backup on first export
-        backup_dir = self.data_dir.parent / (self.data_dir.name + '_original')
-        if not backup_dir.exists():
-            shutil.copytree(self.data_dir, backup_dir)
+        # Create backup on first export.  Only the BasicData/ and MapData/
+        # subtrees are ever written, so only those are backed up -- when the
+        # data sits in the game root this must never copy (or later restore)
+        # the whole game folder with its save files.
+        backup_dir = self._backup_dir_for(self.data_dir)
+        manifest = game_io.ExportManifest(str(backup_dir) + '.manifest.json')
+        if game_io.backup_tree_once(str(self.data_dir), str(backup_dir),
+                                    only=list(_WOLF_DATA_SUBDIRS)):
+            manifest.save()
+        self.last_export_notes: list[str] = []
+
+        # A game update after the first export must not be rolled back:
+        # re-baseline any live file that is neither the original nor ours.
+        refreshed = game_io.refresh_changed_originals(
+            self._data_file_pairs(backup_dir), manifest)
+        if refreshed:
+            self.last_export_notes.append(game_io.refreshed_note(refreshed))
 
         # Re-read maps, common events and DB structure from backup for
         # idempotent re-export
@@ -1328,7 +1345,8 @@ class WolfRPGParser:
                 key = f'{entry.file}/{entry.field}'
                 translations[key] = entry.translation
                 originals[key] = entry.original
-        skipped: list[str] = []
+        skipped: list[str] = list(self._reload_problems(translations))
+        written: list[Path] = []
 
         # Apply to maps
         for wolf_map in self.maps:
@@ -1367,10 +1385,18 @@ class WolfRPGParser:
                                 cmd.string_args[0] = translations[key]
                                 modified = True
 
-            if modified:
-                # Write to live data dir (map was loaded from backup)
-                live_path = self.data_dir / 'MapData' / wolf_map.path.name
-                wolf_map.save(live_path)
+            # Write to live data dir (map was loaded from backup).  An
+            # untouched map is copied back from the backup so lines whose
+            # translation was reverted don't keep stale English.
+            live_path = self.data_dir / 'MapData' / wolf_map.path.name
+            try:
+                if modified:
+                    wolf_map.save(live_path)
+                else:
+                    game_io.atomic_copy(str(wolf_map.path), str(live_path))
+                written.append(live_path)
+            except OSError as exc:
+                skipped.append(f'MapData/{wolf_map.path.name} ({exc})')
 
         # Apply to common events
         if self.common_events:
@@ -1407,9 +1433,16 @@ class WolfRPGParser:
                             cmd.string_args[0] = translations[key]
                             modified = True
 
-            if modified:
-                live_ce = self.data_dir / 'BasicData' / 'CommonEvent.dat'
-                self.common_events.save(live_ce)
+            live_ce = self.data_dir / 'BasicData' / 'CommonEvent.dat'
+            try:
+                if modified:
+                    self.common_events.save(live_ce)
+                else:
+                    game_io.atomic_copy(str(self.common_events.path),
+                                        str(live_ce))
+                written.append(live_ce)
+            except OSError as exc:
+                skipped.append(f'CommonEvent.dat ({exc})')
 
         # Apply to databases
         for db in self.databases:
@@ -1420,16 +1453,29 @@ class WolfRPGParser:
                     # key = "Database/DataBase/Type0/Data1/F2"
                     field_part = key[len(file_name) + 1:]
                     db_trans[field_part] = val
-            if db_trans:
-                backup_dat = backup_dir / 'BasicData' / f'{db.name}.dat'
-                live_dat = self.data_dir / 'BasicData' / f'{db.name}.dat'
-                if backup_dat.is_file():
-                    reason = self._export_database(
-                        db, backup_dat, live_dat, db_trans)
-                    if reason:
-                        log.warning('DB %s not exported: %s', db.name, reason)
-                        skipped.append(f'{db.name}.dat ({reason}, '
-                                       f'{len(db_trans)} translations)')
+            backup_dat = backup_dir / 'BasicData' / f'{db.name}.dat'
+            live_dat = self.data_dir / 'BasicData' / f'{db.name}.dat'
+            if not backup_dat.is_file():
+                continue
+            if not db_trans:
+                # Nothing translated (any more): put the original back.
+                try:
+                    game_io.atomic_copy(str(backup_dat), str(live_dat))
+                    written.append(live_dat)
+                except OSError as exc:
+                    skipped.append(f'{db.name}.dat ({exc})')
+                continue
+            try:
+                reason = self._export_database(
+                    db, backup_dat, live_dat, db_trans)
+            except OSError as exc:
+                reason = str(exc)
+            if reason:
+                log.warning('DB %s not exported: %s', db.name, reason)
+                skipped.append(f'{db.name}.dat ({reason}, '
+                               f'{len(db_trans)} translations)')
+            else:
+                written.append(live_dat)
         loaded_dbs = {f'Database/{db.name}/' for db in self.databases}
         unloaded = sorted({
             key.split('/')[1] for key in translations
@@ -1438,16 +1484,22 @@ class WolfRPGParser:
         for name in unloaded:
             skipped.append(f'{name}.dat (could not be re-read from backup)')
 
-        # Delete Data.wolf so game reads from folder
+        # Remember what we wrote so a later game update can be told apart
+        for path in written:
+            manifest.record(self._manifest_key(path), str(path))
+        manifest.finish()
+
+        # Move Data.wolf aside so the game reads from the folder.
+        # os.replace: a stale .bak from an earlier export must not make
+        # this fail on Windows.
         wolf_file = self.game_dir / 'Data.wolf'
         if wolf_file.is_file():
-            wolf_file.rename(self.game_dir / 'Data.wolf.bak')
+            os.replace(wolf_file, self.game_dir / 'Data.wolf.bak')
 
-        if skipped:
-            raise RuntimeError(
-                'Maps and common events were exported, but these database '
-                'files could not be written and are still in Japanese:\n  '
-                + '\n  '.join(skipped))
+        game_io.raise_if_problems(
+            skipped,
+            'The export is incomplete. These files could not be written and '
+            'still contain the previous (Japanese or older) text:')
 
     def _export_database(self, db: WolfDatabase, src_path: Path,
                          dst_path: Path, translations: dict[str, str]
@@ -1532,12 +1584,44 @@ class WolfRPGParser:
             pass
 
         dst_path.parent.mkdir(parents=True, exist_ok=True)
-        dst_path.write_bytes(bytes(data))
+        game_io.atomic_write_bytes(dst_path, bytes(data))
         log.info("Exported DB translations to %s", dst_path.name)
         return None
 
+    @staticmethod
+    def _backup_dir_for(data_dir: Path) -> Path:
+        return data_dir.parent / (data_dir.name + '_original')
+
+    def _manifest_key(self, live_path: Path) -> str:
+        return live_path.relative_to(self.data_dir).as_posix()
+
+    def _data_file_pairs(self, backup_dir: Path):
+        """(key, live, backup) for every data file the exporter writes."""
+        wanted = {'BasicData/CommonEvent.dat', 'BasicData/DataBase.dat',
+                  'BasicData/CDataBase.dat', 'BasicData/SysDatabase.dat'}
+        for sub, pattern in (('MapData', '*.mps'), ('BasicData', '*.dat')):
+            seen = set()
+            for base in (self.data_dir / sub, backup_dir / sub):
+                if base.is_dir():
+                    seen.update(f.name for f in base.glob(pattern))
+            for name in sorted(seen):
+                key = f'{sub}/{name}'
+                if sub == 'MapData' or key in wanted:
+                    yield (key, str(self.data_dir / key), str(backup_dir / key))
+
+    def _reload_problems(self, translations: dict) -> list[str]:
+        """Files that failed to re-read from backup and have translations."""
+        out = []
+        for label, prefix in self._reload_failures:
+            n = sum(1 for k in translations if k.startswith(prefix))
+            if n:
+                out.append(f'{label} (could not be re-read from backup, '
+                           f'{n} translations)')
+        return out
+
     def _reload_from_backup(self, backup_dir: Path):
         """Re-read maps and common events from backup for idempotent re-export."""
+        self._reload_failures: list[tuple[str, str]] = []
         # Reload maps
         self.maps = []
         map_dir = backup_dir / 'MapData'
@@ -1548,7 +1632,9 @@ class WolfRPGParser:
                     wolf_map.load()
                     self.maps.append(wolf_map)
                 except Exception:
-                    log.debug("Skip map %s on reload", mps.name, exc_info=True)
+                    log.warning("Skip map %s on reload", mps.name, exc_info=True)
+                    self._reload_failures.append(
+                        (f'MapData/{mps.name}', f'MapData/{mps.name}/'))
 
         # Reload common events (same BasicData/ layout as load_project)
         _reset_proj_key()
@@ -1560,7 +1646,9 @@ class WolfRPGParser:
                 self.common_events.load()
             except Exception:
                 self.common_events = None
-                log.debug("Skip CE reload", exc_info=True)
+                log.warning("Skip CE reload", exc_info=True)
+                self._reload_failures.append(
+                    ('CommonEvent.dat', 'CommonEvents/'))
 
         # Reload database structure (.project types) — needed when export
         # runs after restoring a saved state without load_project.
@@ -1605,13 +1693,16 @@ class WolfRPGParser:
         self.game_dir = game_dir
         data_dir = self._find_data_dir()
         self.data_dir = data_dir
-        backup_dir = data_dir.parent / (data_dir.name + '_original')
+        backup_dir = self._backup_dir_for(data_dir)
         if not backup_dir.is_dir():
             raise FileNotFoundError(
                 f'No backup found at {backup_dir}. Export the game at least '
                 'once before restoring.')
-        shutil.rmtree(data_dir)
-        shutil.copytree(backup_dir, data_dir)
+        # Only the subtrees the exporter writes are swapped back.  Never
+        # delete data_dir itself: in the root layout it IS the game folder
+        # (save files, the translation state, everything).
+        game_io.restore_tree(str(backup_dir), str(data_dir),
+                             only=list(_WOLF_DATA_SUBDIRS))
 
         # Restore Data.wolf if we renamed it
         wolf_bak = game_dir / 'Data.wolf.bak'

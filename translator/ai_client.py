@@ -10,7 +10,7 @@ import time
 import requests
 
 from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
-from .renpy import RENPY_TAG_RE
+from .renpy import RENPY_INTERP_RE, RENPY_TAG_RE
 
 log = logging.getLogger(__name__)
 
@@ -49,9 +49,14 @@ _THINK_UNCLOSED_RE = re.compile(r'<think>.*', re.DOTALL)
 # Matches common patterns at the end of the output.  Bare "Note:" lines are
 # NOT stripped — they can be legitimate dialogue ("Note: the door is locked").
 _NOTE_LABELS = r"(?:Translation [Nn]ote|Translator'?s? [Nn]ote|TL [Nn]ote)s?"
+# A ---/*** separator line only counts as a note marker when the text after
+# it is labelled as a note.  A bare separator is often a real scene break
+# (the source may use ━━━, ＊＊＊, ═══ ... which the LLM renders as ---), and
+# stripping everything after it silently deleted the rest of the line.
+_NOTE_AFTER_SEP = (r'\s*[(\[*]?\s*(?:Note|Notes|' + _NOTE_LABELS
+                   + r'|Commentary|Explanation|Literally|Lit\.)\b')
 _NOTE_SEPARATOR_PATTERNS = (
-    r'\n\s*[-—–]{2,}\s*\n.*'                     # --- separator followed by notes
-    r'|\n\s*\*{2,}\s*\n.*'                        # *** separator followed by notes
+    r'\n\s*(?:[-—–]{2,}|\*{2,})\s*\n(?=' + _NOTE_AFTER_SEP + r').*'
 )
 _NOTE_LABEL_PATTERNS = (
     r'\n\s*(?:' + _NOTE_LABELS + r'|Commentary|Explanation)\s*[:：].*'
@@ -63,14 +68,15 @@ _NOTE_STRIP_RE = re.compile(
     r'(?:' + _NOTE_SEPARATOR_PATTERNS + r'|' + _NOTE_LABEL_PATTERNS + r')',
     re.DOTALL | re.IGNORECASE,
 )
-# Variant used when the source itself has a separator line (e.g. a "——"
-# dramatic-pause line) — separators are then real content, not note markers.
-_NOTE_STRIP_NO_SEP_RE = re.compile(
-    r'(?:' + _NOTE_LABEL_PATTERNS + r')',
-    re.DOTALL | re.IGNORECASE,
-)
+# Only labelled notes are stripped by regex; a bare separator is handled
+# in _strip_notes (kept whenever the source has its own separator line).
+_NOTE_STRIP_NO_SEP_RE = _NOTE_STRIP_RE
+# A bare ---/*** line in the output (see _strip_notes for when it counts)
+_BARE_SEP_LINE_RE = re.compile(r'\n\s*(?:[-—–]{2,}|\*{2,})\s*\n')
 # A line in the source made only of dash-like / asterisk characters
-_SOURCE_SEP_LINE_RE = re.compile(r'^\s*(?:[-—–―─ー]{2,}|\*{2,})\s*$', re.MULTILINE)
+_SOURCE_SEP_LINE_RE = re.compile(
+    r'^\s*(?:[-—–―─━═＝=－‐ー~～・]{2,}|[*＊※★☆◆◇■□]{2,})\s*$',
+    re.MULTILINE)
 
 # LLM-mangled placeholder variants: <<CODE1>>, [CODE1], « CODE 1 », «CODE1>> ...
 _PLACEHOLDER_NORMALIZE_RE = re.compile(
@@ -1038,8 +1044,42 @@ class AIClient:
 
     # ── Ollama process management ─────────────────────────────────
 
-    def stop_server(self):
-        """Stop any running Ollama process (service or managed subprocess)."""
+    def is_local_server(self) -> bool:
+        """True when base_url points at this machine (only then can a
+        local start/restart help)."""
+        from urllib.parse import urlparse
+        try:
+            host = (urlparse(self.base_url).hostname or "").lower()
+        except ValueError:
+            return False
+        return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+    def owns_server(self) -> bool:
+        """True while an Ollama we started ourselves is running."""
+        return bool(self._managed_proc and self._managed_proc.poll() is None)
+
+    @staticmethod
+    def external_ollama_running() -> bool:
+        """True if an ollama.exe is running (Windows; False elsewhere)."""
+        if os.name != "nt":
+            return False
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq ollama.exe", "/NH"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            ).stdout
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return False
+        return "ollama.exe" in out.lower()
+
+    def stop_server(self, kill_external: bool = False):
+        """Stop the Ollama this app started.
+
+        Only with ``kill_external`` (which callers pass solely after the
+        user confirmed it) is the OllamaService stopped and every other
+        ollama.exe killed -- that also stops Ollama for any other app.
+        """
         # 1. Kill our own managed subprocess if we started one
         if self._managed_proc and self._managed_proc.poll() is None:
             log.info("Stopping managed Ollama subprocess (PID %d)", self._managed_proc.pid)
@@ -1050,6 +1090,10 @@ class AIClient:
                 self._managed_proc.kill()
                 self._managed_proc.wait(timeout=3)
             self._managed_proc = None
+
+        if not kill_external:
+            time.sleep(0.5)
+            return
 
         # 2. Stop the Windows service (if running)
         try:
@@ -1072,13 +1116,21 @@ class AIClient:
         # Brief pause to let ports release
         time.sleep(0.5)
 
-    def restart_server(self, num_parallel: int = 2) -> bool:
-        """Restart Ollama with OLLAMA_NUM_PARALLEL set.
+    def restart_server(self, num_parallel: int = 2,
+                       kill_external: bool = False) -> bool:
+        """(Re)start Ollama with OLLAMA_NUM_PARALLEL set.
 
-        Stops any existing Ollama process, then starts a new one as a
+        Stops the Ollama this app started (and, only with
+        ``kill_external``, every other one), then starts a new one as a
         managed subprocess. Returns True if the server becomes reachable.
+        Without ``kill_external`` an Ollama started by someone else is
+        never touched -- if one is still running, nothing is started.
         """
-        self.stop_server()
+        self.stop_server(kill_external=kill_external)
+        if not kill_external and self.external_ollama_running():
+            log.warning("Another Ollama is running; not killing it without "
+                        "the user's permission")
+            return self.is_available()
 
         # Find ollama executable
         ollama_exe = self._find_ollama_exe()
@@ -1294,8 +1346,23 @@ class AIClient:
         are stripped.
         """
         if original and _SOURCE_SEP_LINE_RE.search(original):
-            return _NOTE_STRIP_NO_SEP_RE.sub('', text).rstrip()
-        return _NOTE_STRIP_RE.sub('', text).rstrip()
+            out = _NOTE_STRIP_NO_SEP_RE.sub('', text).rstrip()
+        else:
+            out = _NOTE_STRIP_RE.sub('', text).rstrip()
+            # Unlabelled text after a bare separator is only treated as a
+            # note when everything before the separator already accounts
+            # for every source line -- otherwise it is the rest of the
+            # translation (a scene break the source drew differently).
+            m = _BARE_SEP_LINE_RE.search(out)
+            if m:
+                before = out[:m.start()]
+                src_lines = len(original.split("\n")) if original else 1
+                if before.count("\n") + 1 >= src_lines:
+                    out = before.rstrip()
+        if out != text.rstrip():
+            log.info("Stripped translator note/commentary: %r",
+                     text[len(out):].strip()[:200])
+        return out
 
     @staticmethod
     def _contains_japanese(text: str) -> bool:
@@ -1320,8 +1387,11 @@ class AIClient:
         r'(?:' + TYRANO_CODE_RE.pattern + r')( ?)',
         re.IGNORECASE,
     )
+    # Ren'Py: text tags AND [variable] interpolations are protected -- a
+    # translated "[player]" would break the substitution in-game.
     _EXTRACT_RE_RENPY = re.compile(
-        r'(?:' + RENPY_TAG_RE.pattern + r')( ?)',
+        r'(?:' + RENPY_TAG_RE.pattern + r'|' + RENPY_INTERP_RE.pattern
+        + r')( ?)',
     )
 
     def _extract_codes(self, text: str) -> tuple:
@@ -1735,6 +1805,12 @@ class AIClient:
                 except (requests.RequestException, ConnectionError, ValueError) as exc:
                     log.debug("Japanese-retry failed, keeping original: %s", exc)
 
+            # A placeholder the model invented or mangled beyond
+            # normalisation would be written into the game as "«CODE7»".
+            # Same rule as translate_batch(): reject, never ship it.
+            if _PLACEHOLDER_RE.search(result):
+                raise ValueError(
+                    "LLM output contains an unknown «CODE» placeholder")
             return result
         except (ConnectionError, ValueError):
             raise  # keep subclass (ServerUnreachable / RateLimited) intact

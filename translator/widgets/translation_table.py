@@ -878,10 +878,12 @@ class TranslationTable(QWidget):
 
         Pass ``emit=False`` from bulk loops and notify once at the end.
         """
+        # View refresh only: callers set translation/status on the entry.
+        # Setting status here demoted every visible reviewed row to
+        # "translated" during a polish run.
         for row, entry in enumerate(self._visible_entries):
             if entry.id == entry_id:
                 entry.translation = translation
-                entry.status = "translated"
                 self._model.refresh_row(row)
                 # Also update editor panel if this row is selected
                 if row == self._selected_row:
