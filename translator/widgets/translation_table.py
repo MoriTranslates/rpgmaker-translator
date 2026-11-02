@@ -346,6 +346,8 @@ class TranslationTable(QWidget):
 
         # Column widths
         header = self.table.horizontalHeader()
+        header.setDefaultAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(COL_STATUS, 30)
         self._status_delegate = StatusDelegate(self.table)

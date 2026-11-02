@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QStyle, QStyledItemDelegate
 from . import theme
 
 STATUS_ROLE = Qt.ItemDataRole.UserRole + 41
-STRIPE_WIDTH = 3
+STRIPE_WIDTH = 5
 
 
 class StatusDelegate(QStyledItemDelegate):
@@ -26,7 +26,8 @@ class StatusDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = option.rect
-        if option.state & QStyle.StateFlag.State_Selected:
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        if selected:
             painter.fillRect(rect, theme.qcolor("selection"))
         else:
             bg = index.data(Qt.ItemDataRole.BackgroundRole)
@@ -34,10 +35,13 @@ class StatusDelegate(QStyledItemDelegate):
                 painter.fillRect(rect, bg)
 
         color = theme.status_fg(status)
-        painter.fillRect(rect.x(), rect.y(), STRIPE_WIDTH, rect.height(), color)
+        # The selected row's stripe takes the accent so the cursor is easy
+        # to follow; the marker still shows the status.
+        painter.fillRect(rect.x(), rect.y(), STRIPE_WIDTH, rect.height(),
+                         theme.qcolor("accent") if selected else color)
 
-        # Marker centered in the remaining space
-        size = 11.0
+        # Marker centered in the remaining space, sized from the font
+        size = max(9.0, option.fontMetrics.height() * 0.62)
         cx = rect.x() + STRIPE_WIDTH + (rect.width() - STRIPE_WIDTH) / 2
         cy = rect.y() + rect.height() / 2
         box = QRectF(cx - size / 2, cy - size / 2, size, size)

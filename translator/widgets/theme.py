@@ -1,7 +1,7 @@
-"""Central theme: Catppuccin palettes, the app stylesheet and shared status visuals.
+"""Central theme: the "candlelit study" palettes, the app stylesheet and shared status visuals.
 
 Every widget pulls colors from here instead of hard-coding hex values, so
-dark (Mocha) and light (Latte) mode stay consistent.  ``apply()`` is called
+dark (ink night) and light (parchment) mode stay consistent.  ``apply()`` is called
 by the main window at startup and whenever the user toggles dark mode;
 widgets that paint per-item colors re-read ``qcolor()`` when they refresh.
 """
@@ -25,80 +25,122 @@ except ImportError:  # pragma: no cover — older checkout without the helper
 
 # ── Palettes ───────────────────────────────────────────────────────
 
-# Semantic tokens → Catppuccin Mocha (dark)
+# "Candlelit study" — colors taken from the app's logo: ink-navy night,
+# parchment text, candle-amber as the one primary accent, the navy coat's
+# blue as a cool secondary.
+
+# Semantic tokens → dark theme (default)
 DARK = {
-    "window":       "#1e1e2e",  # base
-    "panel":        "#181825",  # mantle — menubar/toolbar/statusbar
-    "field":        "#181825",  # inputs, tables, trees
-    "field_alt":    "#1f1f30",  # alternate rows
-    "raised":       "#232336",  # cards, menus, popups
-    "border":       "#2c2d40",  # hairlines between surfaces
-    "border_strong": "#45475a",  # surface1 — input outlines, splitters
-    "control_border": "#7f849c",  # checkbox/radio outlines (3:1 on field)
-    "button":       "#313244",
-    "button_hover": "#45475a",
-    "button_pressed": "#585b70",
-    "selection":    "#313b5c",  # accent-tinted
-    "selection_text": "#cdd6f4",
-    "text":         "#cdd6f4",
-    "text_soft":    "#bac2de",  # subtext1
-    "text_muted":   "#a6adc8",  # subtext0
-    "text_dim":     "#8a90aa",  # 4.5:1+ on window/panel
-    "accent":       "#89b4fa",  # blue
-    "accent_hover": "#74c7ec",  # sapphire
-    "on_accent":    "#1e1e2e",
-    "accent_alt":   "#89dceb",  # sky
-    "accent_soft":  "#283250",  # accent wash for the current step
-    "error_soft":   "#3a2233",
-    "ok":           "#a6e3a1",  # green
-    "warn":         "#f9e2af",  # yellow
-    "caution":      "#fab387",  # peach
-    "error":        "#f38ba8",  # red
-    "special":      "#cba6f7",  # mauve
-    "tooltip":      "#313244",
+    "window":       "#0f1424",  # ink night
+    "panel":        "#131a2c",  # menubar/toolbar/statusbar
+    "field":        "#111729",  # inputs, tables, trees
+    "field_alt":    "#151c31",  # alternate rows / hover
+    "raised":       "#1c2440",  # cards, menus, popups
+    "border":       "#222b45",  # hairlines between surfaces
+    "border_strong": "#35405f",  # input outlines, splitters
+    "control_border": "#8a8fa8",  # checkbox/radio outlines (3:1+ on field)
+    "button":       "#1f2842",
+    "button_hover": "#2a3556",
+    "button_pressed": "#35426a",
+    "selection":    "#2b3456",
+    "selection_text": "#f4eddf",
+    "text":         "#ece4d4",  # parchment
+    "text_soft":    "#d8cfbd",
+    "text_muted":   "#a9a294",  # 6.8:1 on panel
+    "text_dim":     "#969080",  # 5.8:1 on window
+    "accent":       "#f2a93b",  # candle amber — the one primary accent
+    "accent_hover": "#f7bd5e",
+    "accent_pressed": "#d98f22",
+    "accent_fill":  "#f2a93b",  # primary button fill
+    "accent_fill_hover": "#f7bd5e",
+    "on_accent":    "#1a1206",
+    "accent_alt":   "#6ea8ff",  # navy-coat blue: info, links, translated
+    "accent_soft":  "#33291a",  # amber wash for the current step
+    "error_soft":   "#3a1f1c",
+    "ok_soft":      "#17302a",
+    "ok":           "#8fd18a",
+    "status_translated": "#6ea8ff",
+    "warn":         "#f2c14e",
+    "caution":      "#f2994a",
+    "error":        "#f26b4f",  # ember
+    "special":      "#b79cf7",
+    "tooltip":      "#1c2440",
+    "glow":         "#3a2a12",  # candlelight behind the welcome logo
     # Row tints by entry status — kept faint; the status stripe carries meaning
-    "row_untranslated": "#241b2b",
-    "row_translated":   "#24222b",
-    "row_reviewed":     "#1b2a26",
-    "row_skipped":      "#1e1e2c",
+    "row_untranslated": "#1e1722",
+    "row_translated":   "#111729",
+    "row_reviewed":     "#112222",
+    "row_skipped":      "#121827",
 }
 
-# Semantic tokens → Catppuccin Latte (light)
+# Semantic tokens → light theme (parchment)
 LIGHT = {
-    "window":       "#eff1f5",
-    "panel":        "#e6e9ef",
-    "field":        "#ffffff",
-    "field_alt":    "#f6f7fa",
-    "raised":       "#ffffff",
-    "border":       "#dce0e8",
-    "border_strong": "#bcc0cc",
-    "control_border": "#8c8fa1",
-    "button":       "#e6e9ef",
-    "button_hover": "#dce0e8",
-    "button_pressed": "#ccd0da",
-    "selection":    "#c5d5f7",
-    "selection_text": "#1e2030",
-    "text":         "#4c4f69",
-    "text_soft":    "#4c4f69",
-    "text_muted":   "#5c5f77",
-    "text_dim":     "#6c6f85",  # 4.5:1+ on white
-    "accent":       "#1e66f5",
-    "accent_hover": "#3b7af7",
-    "on_accent":    "#ffffff",
-    "accent_alt":   "#209fb5",
-    "accent_soft":  "#dbe6fd",
-    "error_soft":   "#fbe3e8",
-    "ok":           "#2e7d1f",
-    "warn":         "#8f5400",  # darker than Latte yellow — readable on white
-    "caution":      "#fe640b",
-    "error":        "#d20f39",
-    "special":      "#8839ef",
-    "tooltip":      "#ffffff",
-    "row_untranslated": "#fdf1f3",
-    "row_translated":   "#fdf8ec",
-    "row_reviewed":     "#eff8ec",
-    "row_skipped":      "#f4f5f8",
+    "window":       "#f6f0e2",
+    "panel":        "#efe6d2",
+    "field":        "#fffaf0",
+    "field_alt":    "#f9f2e3",
+    "raised":       "#fffaf0",
+    "border":       "#e3d7bd",
+    "border_strong": "#cdbd9a",
+    "control_border": "#857760",
+    "button":       "#efe6d2",
+    "button_hover": "#e6dac0",
+    "button_pressed": "#dccfb0",
+    "selection":    "#f3dfb3",
+    "selection_text": "#1b2238",
+    "text":         "#1b2238",  # ink navy
+    "text_soft":    "#2b3350",
+    "text_muted":   "#4f5670",
+    "text_dim":     "#6b6658",  # 4.6:1+ on panel
+    "accent":       "#9a5500",  # deep amber — 5:1 as text on parchment
+    "accent_hover": "#b36400",
+    "accent_pressed": "#7f4600",
+    "accent_fill":  "#e9a23b",  # primary button fill, ink text on it
+    "accent_fill_hover": "#f0b255",
+    "on_accent":    "#1b1206",
+    "accent_alt":   "#2f5fb3",
+    "accent_soft":  "#f6e3bd",
+    "error_soft":   "#fbe1d6",
+    "ok_soft":      "#e1f0dc",
+    "ok":           "#2e7d32",
+    "status_translated": "#2f5fb3",
+    "warn":         "#8f5400",
+    "caution":      "#b45309",
+    "error":        "#c2410c",
+    "special":      "#7c3aed",
+    "tooltip":      "#fffaf0",
+    "glow":         "#f3d9a6",
+    "row_untranslated": "#fbece3",
+    "row_translated":   "#fffaf0",
+    "row_reviewed":     "#eef5e6",
+    "row_skipped":      "#f3ede0",
 }
+
+# Speaker chips: (background, text) per theme, picked by a hash of the name
+SPEAKER_CHIPS = {
+    True: [("#3a2c14", "#f6c76e"),   # amber
+           ("#3a1d2a", "#f4a3bd"),   # rose
+           ("#123331", "#7fd8cc"),   # teal
+           ("#16294a", "#8fbcff"),   # sky
+           ("#2a2147", "#c3adff"),   # violet
+           ("#21301a", "#b3d98c")],  # moss
+    False: [("#f8e3b8", "#6b4200"),
+            ("#f8dbe4", "#8a2148"),
+            ("#d4efea", "#14594f"),
+            ("#dbe7fb", "#1f4c94"),
+            ("#e6defb", "#4b2c94"),
+            ("#e2efd6", "#38591d")],
+}
+
+
+def speaker_chip(name: str) -> tuple[str, str]:
+    """Stable (background, text) colors for a speaker name."""
+    palette = SPEAKER_CHIPS[is_dark()]
+    h = 0
+    for ch in name:
+        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    return palette[h % len(palette)]
+
 
 _state = {"dark": True}
 
@@ -139,7 +181,7 @@ STATUS_LABELS = {
 
 _STATUS_FG = {
     "untranslated": "error",
-    "translated":   "warn",
+    "translated":   "status_translated",
     "reviewed":     "ok",
     "skipped":      "text_dim",
 }
@@ -319,7 +361,7 @@ QHeaderView::section {{
     background-color: {panel};
     color: {text_muted};
     border: none;
-    border-bottom: 1px solid {border};
+    border-bottom: 1px solid {border_strong};
     padding: 6px 8px;
     font-weight: 600;
 }}
@@ -386,14 +428,18 @@ QPushButton:disabled {{
     border-color: {border};
 }}
 QPushButton[primary="true"] {{
-    background-color: {accent};
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {accent_fill_hover}, stop:1 {accent_fill});
     color: {on_accent};
-    border: 1px solid {accent};
+    border: 1px solid {accent_fill};
     font-weight: 600;
 }}
 QPushButton[primary="true"]:hover {{
-    background-color: {accent_hover};
-    border-color: {accent_hover};
+    background-color: {accent_fill_hover};
+    border-color: {accent_fill_hover};
+}}
+QPushButton[primary="true"]:pressed {{
+    background-color: {accent_pressed};
 }}
 QPushButton[primary="true"]:focus {{
     border: 2px solid {text};
@@ -567,6 +613,26 @@ QRadioButton::indicator:checked {{
         fx:0.5, fy:0.5, stop:0 {accent}, stop:0.5 {accent},
         stop:0.6 {field}, stop:1 {field});
 }}
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    width: 18px;
+    border: none;
+    border-left: 1px solid {border};
+    background: transparent;
+}}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
+    subcontrol-position: top right;
+    border-top-right-radius: 6px;
+}}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-position: bottom right;
+    border-bottom-right-radius: 6px;
+}}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
+    background-color: {button_hover};
+}}
 QScrollArea {{
     border: none;
 }}
@@ -588,13 +654,16 @@ QToolButton[step]:hover {{
     background-color: {button};
     color: {text};
 }}
-QToolButton[step="active"] {{
+QToolButton[step="pending"] {{
+    color: {text_dim};
+}}
+QToolButton[step="next"], QToolButton[step="active"] {{
     background-color: {accent_soft};
     color: {accent};
     font-weight: 600;
 }}
 QToolButton[step="done"] {{
-    color: {text};
+    color: {ok};
 }}
 QToolButton#stopButton {{
     background: transparent;
@@ -605,7 +674,23 @@ QToolButton#stopButton {{
 }}
 QToolButton#stopButton:enabled {{
     color: {error};
+    background-color: {error_soft};
     border-color: {error};
+    font-weight: 600;
+}}
+QToolButton#applyButton {{
+    border: 1px solid {ok};
+    border-radius: 6px;
+    padding: 5px 12px;
+    color: {ok};
+    font-weight: 600;
+}}
+QToolButton#applyButton:hover {{
+    background-color: {ok_soft};
+}}
+QToolButton#applyButton:disabled {{
+    color: {text_dim};
+    border-color: {border};
 }}
 QToolButton#stopButton:enabled:hover {{
     background-color: {error_soft};

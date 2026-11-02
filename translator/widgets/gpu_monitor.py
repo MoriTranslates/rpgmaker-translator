@@ -195,15 +195,12 @@ class GPUMonitorPanel(QWidget):
 
     @staticmethod
     def _color_bar(bar: QProgressBar, pct: int):
-        """Color the progress bar based on percentage (theme palette)."""
-        if pct >= 90:
-            token = "error"
-        elif pct >= 70:
-            token = "caution"
-        elif pct >= 50:
-            token = "warn"
-        else:
-            token = "ok"
+        """Accent while there is room; warn only when the GPU is nearly full.
+
+        A model filling most of the VRAM is normal, so high-but-fine usage
+        must not look like an alarm.
+        """
+        token = "error" if pct >= 95 else "caution" if pct >= 90 else "accent"
         bar.setStyleSheet(
             f"QProgressBar::chunk {{ background: {theme.c(token)}; "
             f"border-radius: 3px; }}")

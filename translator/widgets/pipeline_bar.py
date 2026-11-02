@@ -22,7 +22,8 @@ _STEP_ICONS = {
     "export": "gamepad-2",
 }
 
-_STATE_TIPS = {"done": "Done", "active": "In progress", "pending": "Not started"}
+_STATE_TIPS = {"done": "Done", "active": "In progress", "next": "Up next",
+               "pending": "Not started"}
 
 
 class _StepButton(QToolButton):
@@ -33,7 +34,7 @@ class _StepButton(QToolButton):
         self.number = number
         self.key = key
         self.name = name
-        self._state = "pending"  # pending | active | done
+        self._state = "pending"  # pending | next | active | done
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.setIconSize(QSize(16, 16))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -43,7 +44,7 @@ class _StepButton(QToolButton):
     def _refresh(self):
         if self._state == "done":
             self.setIcon(theme.icon("check", "ok"))
-        elif self._state == "active":
+        elif self._state in ("active", "next"):
             self.setIcon(theme.icon(_STEP_ICONS.get(self.key, "circle"), "accent"))
         else:
             self.setIcon(theme.icon(_STEP_ICONS.get(self.key, "circle"), "text_dim"))
@@ -132,6 +133,9 @@ class PipelineBar(QWidget):
         self.next_btn.setVisible(False)
         self._layout.addWidget(self.next_btn)
 
+        # Apply-to-game shortcut (wired to the window's action later)
+        self.apply_button = None
+
         self._layout.addStretch()
 
         # Status hint
@@ -150,6 +154,30 @@ class PipelineBar(QWidget):
         self.stop_button.setIconSize(QSize(16, 16))
         self._layout.addSpacing(8)
         self._layout.addWidget(self.stop_button)
+
+    def set_apply_action(self, action):
+        """Show "Apply to Game" right after the Next button.
+
+        Mirrors the window's Apply Translation to Game action (enabled state,
+        tooltip) but keeps a short label so the bar fits small screens.
+        """
+        btn = QToolButton()
+        btn.setObjectName("applyButton")
+        btn.setText("Apply to Game")
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        btn.setIconSize(QSize(16, 16))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(action.trigger)
+
+        def sync():
+            btn.setEnabled(action.isEnabled())
+            btn.setToolTip(action.toolTip())
+        action.changed.connect(sync)
+        sync()
+        self.apply_button = btn
+        self._layout.insertSpacing(self._layout.indexOf(self.next_btn) + 1, 6)
+        self._layout.insertWidget(self._layout.indexOf(self.next_btn) + 2, btn)
+        self.apply_theme()
 
     def _rebuild_steps(self):
         """Create step buttons for the current step list."""
@@ -184,6 +212,8 @@ class PipelineBar(QWidget):
         for arrow in self._arrow_labels:
             arrow.setPixmap(theme.icon("chevron-right", "text_dim").pixmap(14, 14))
         self.next_btn.setIcon(theme.icon("arrow-right", "on_accent"))
+        if self.apply_button is not None:
+            self.apply_button.setIcon(theme.icon("gamepad-2", "ok"))
 
     def set_engine(self, engine_key_or_steps):
         """Switch pipeline steps for the given engine.
@@ -221,7 +251,7 @@ class PipelineBar(QWidget):
         if step_key not in self._step_labels:
             return
         for key, label in self._step_labels.items():
-            if label.state == "active":
+            if label.state in ("active", "next"):
                 label.state = "pending"
         self._step_labels[step_key].state = "active"
         idx = [k for k, _ in self._steps].index(step_key)
@@ -249,8 +279,12 @@ class PipelineBar(QWidget):
 
     def _nudge_next(self):
         """Find next pending step and show the nudge button."""
+        for label in self._step_labels.values():
+            if label.state == "next":
+                label.state = "pending"
         for i, (key, name) in enumerate(self._steps):
             if self._step_labels[key].state == "pending":
+                self._step_labels[key].state = "next"
                 self._current_index = i
                 self.next_btn.setText(f"Next: {name}")
                 self.next_btn.setVisible(True)
@@ -262,6 +296,6 @@ class PipelineBar(QWidget):
     def _on_next_clicked(self):
         """Emit the step key for the next pending step."""
         for key, _ in self._steps:
-            if self._step_labels[key].state == "pending":
+            if self._step_labels[key].state in ("next", "pending"):
                 self.step_requested.emit(key)
                 return

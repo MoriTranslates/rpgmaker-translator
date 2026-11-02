@@ -746,6 +746,7 @@ class MainWindow(QMainWindow):
         the pipeline bar's buttons, so there is no separate toolbar.
         """
         self.pipeline_bar.set_stop_action(self.stop_action)
+        self.pipeline_bar.set_apply_action(self.export_action)
         # Step actions show their shortcut in menu tooltips too
         for action in (self.batch_db_action, self.batch_dialogue_action,
                        self.export_action):
