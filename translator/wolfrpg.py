@@ -41,8 +41,7 @@ MAGIC_MAP    = bytes([0x00] * 10 + [0x57, 0x4F, 0x4C, 0x46, 0x4D, 0x00, 0x00, 0x
 WOLF3_UNSUPPORTED = (
     "Wolf RPG Editor 3.x isn't supported yet. This game was made with "
     "WOLF RPG Editor 3 (its text is stored as UTF-8), which this version "
-    "cannot read or write correctly, so it can't be translated or exported. "
-    "Your game files were not changed.")
+    "cannot read or write correctly, so it can't be translated or exported.")
 
 
 class WolfVersionUnsupported(RuntimeError):
@@ -67,6 +66,9 @@ def wolf3_marker(data_dir) -> Optional[str]:
             continue    # absent/unreadable: nothing to judge by; load reports it
         if len(head) > 6 and head[1:6] == b'W\x00\x00OL' and head[6] == 0x55:
             return f'BasicData/{name}'
+        if len(head) > 5 and head[1] == 0x50 and head[5] >= 0x55:
+            # encrypted .dat, 3.x encryption (2.x uses lower versions)
+            return f'BasicData/{name} (encrypted)'
     map_dir = data_dir / 'MapData'
     if map_dir.is_dir():
         for mps in sorted(map_dir.glob('*.mps'))[:5]:
@@ -1101,6 +1103,7 @@ class WolfRPGParser:
         self.load_warnings = []
 
         # Find data directory
+        existed = self._unpack_targets_existing()
         self.data_dir = self._find_data_dir()
 
         marker = wolf3_marker(self.data_dir)
@@ -1109,8 +1112,7 @@ class WolfRPGParser:
             # map and common event fails to parse: offer nothing rather
             # than a partial, garbled project.
             log.warning('Wolf RPG Editor 3.x game (%s): not supported', marker)
-            self.load_warnings.append(
-                f'{WOLF3_UNSUPPORTED} (Detected from {marker}.)')
+            self.load_warnings.append(self._refusal_message(marker, existed))
             return []
 
         src = self.data_dir
@@ -1399,14 +1401,14 @@ class WolfRPGParser:
         # Don't rely on load_project state — export can run straight after
         # restoring a saved project state.
         self.game_dir = Path(project_dir)
+        existed = self._unpack_targets_existing()
         self.data_dir = self._find_data_dir()
 
         # Refuse before anything is backed up or written: 3.x files are
         # UTF-8 and would be patched with cp932 text.
         marker = wolf3_marker(self.data_dir)
         if marker:
-            raise WolfVersionUnsupported(
-                f'{WOLF3_UNSUPPORTED} (Detected from {marker}.)')
+            raise WolfVersionUnsupported(self._refusal_message(marker, existed))
 
         # Create backup on first export.  Only the BasicData/ and MapData/
         # subtrees are ever written, so only those are backed up -- when the
@@ -1827,6 +1829,36 @@ class WolfRPGParser:
         if match:
             return match.group(0) + translated
         return translated
+
+    def _unpack_targets_existing(self) -> set:
+        """Folders an unpack of Data.wolf would create, that exist now."""
+        return {p for p in (self.game_dir / 'Data',
+                            self.game_dir / 'decompiled_temp') if p.exists()}
+
+    def _refusal_message(self, marker: str, existed: set) -> str:
+        """The Wolf 3 refusal, true about what happened to the game folder.
+
+        Finding the version may need Data.wolf unpacked into Data/ first.
+        A Data/ folder next to Data.wolf can be loaded by the engine instead
+        of the archive, so folders this call created are removed again.
+        """
+        leftover = []
+        for path in (self.game_dir / 'Data', self.game_dir / 'decompiled_temp'):
+            if path in existed or not path.exists():
+                continue
+            try:
+                shutil.rmtree(path)          # created by this call: ours
+            except OSError as exc:
+                log.warning('Could not remove %s: %s', path, exc)
+                leftover.append(path.name)
+        if leftover:
+            tail = (f" The folder(s) {', '.join(leftover)}/ unpacked from "
+                    "Data.wolf to check the version could not be removed: "
+                    "delete them before playing (the game itself uses "
+                    "Data.wolf).")
+        else:
+            tail = " Your game files were not changed."
+        return f'{WOLF3_UNSUPPORTED}{tail} (Detected from {marker}.)'
 
     def refresh_backups(self, folder: str) -> list[str]:
         """Before a resume merge: put a game update into the backup.

@@ -160,7 +160,8 @@ class TyranoScriptParser:
             manifest.save()
         self.last_export_notes: list[str] = []
         refreshed = game_io.refresh_changed_originals(
-            game_io.tree_pairs(scenario_dir, original_dir, (".ks",)), manifest)
+            game_io.tree_pairs(scenario_dir, original_dir, (".ks",))
+            + self._system_pairs(project_dir, manifest), manifest)
         if refreshed:
             self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
         problems: list[str] = []
@@ -308,8 +309,53 @@ class TyranoScriptParser:
             changed_lines["tyrano/lang.js"] = n
         if self._export_config_title(project_dir, entries):
             changed_lines["system/Config.tjs"] = 1
+        # Remember what we wrote, so a game update to these files is told
+        # apart from our own output next time (and refreshes their .bak)
+        for key, live, bak in self._system_files(project_dir):
+            if os.path.isfile(bak):
+                manifest.record(key, live)
+        manifest.save()
         self._patch_game_fonts(project_dir)
         game_io.raise_export_problems(problems, changed_lines)
+
+    def _system_files(self, project_dir: str) -> list:
+        """(key, live, .bak) for lang.js and Config.tjs where they exist."""
+        out = []
+        for sub in (project_dir, os.path.join(project_dir, "extracted")):
+            lang = os.path.join(sub, "tyrano", "lang.js")
+            if os.path.isfile(lang):
+                out.append(("_system/lang.js", lang, lang + ".bak"))
+                break
+        scenario_dir = self._find_scenario_dir(project_dir)
+        if scenario_dir:
+            cfg = os.path.join(os.path.dirname(scenario_dir), "system",
+                               "Config.tjs")
+            if os.path.isfile(cfg):
+                out.append(("_system/Config.tjs", cfg, cfg + ".bak"))
+        return out
+
+    def _system_pairs(self, project_dir: str, manifest) -> list:
+        """System files the refresh may update: only those this version
+        has recorded writing.  (A lang.js translated by an older version
+        is English but unknown to the manifest; treating it as a game
+        update would copy the English over the original .bak.)"""
+        return [p for p in self._system_files(project_dir)
+                if p[0] in manifest.files]
+
+    def refresh_backups(self, project_dir: str) -> list[str]:
+        """Before a resume merge: put a game update into the backups."""
+        scenario_dir = self._find_scenario_dir(project_dir)
+        if not scenario_dir:
+            return []
+        original_dir = os.path.join(os.path.dirname(scenario_dir),
+                                    "scenario_original")
+        if not os.path.isdir(original_dir):
+            return []
+        manifest_path = original_dir + ".manifest.json"
+        manifest = game_io.ExportManifest(manifest_path)
+        return game_io.refresh_on_resume(
+            game_io.tree_pairs(scenario_dir, original_dir, (".ks",))
+            + self._system_pairs(project_dir, manifest), manifest_path)
 
     @staticmethod
     def _patch_game_fonts(project_dir: str):

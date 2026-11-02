@@ -648,3 +648,87 @@ def test_plugin_identifier_in_old_project_is_not_exported(mv_game, mv_parser):
     plugins = mv_parser._load_plugins_js(os.path.join(mv_game, "js", "plugins.js"))
     assert plugins[0]["parameters"]["形状"] == "斜めな形"
     assert mv_parser.plugin_identifiers_skipped == 1
+
+
+# ── Tyrano lang.js / Config.tjs .bak follow game updates (fix 12) ────
+
+def test_tyrano_lang_js_update_is_not_rolled_back(tmp_path):
+    from test_smoke_findings import _tyrano_game
+    from translator.tyranoscript import TyranoScriptParser
+    _ks, lang = _tyrano_game(tmp_path, "*start\n台詞です[p]\n")
+    p = TyranoScriptParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN", "translated"
+    p.save_project(str(tmp_path), entries)
+    # game update: lang.js gains a key (the .bak still has the old file)
+    lang.write_text('var tyrano_lang = {"word":{"go":"進む","back":"戻る"}};\n',
+                    encoding="utf-8")
+    p.save_project(str(tmp_path), entries)
+    text = lang.read_text(encoding="utf-8")
+    assert '"back":"戻る"' in text                 # update kept
+    assert '"go":"EN"' in text                     # translation still applied
+    assert '"back":"戻る"' in (lang.parent / "lang.js.bak").read_text(encoding="utf-8")
+
+
+def test_tyrano_old_export_lang_js_is_never_taken_as_update(tmp_path):
+    """A lang.js an older version translated (not in the manifest) must not
+    be copied over the original .bak."""
+    from test_smoke_findings import _tyrano_game
+    from translator.tyranoscript import TyranoScriptParser
+    _ks, lang = _tyrano_game(tmp_path, "*start\n台詞です[p]\n")
+    p = TyranoScriptParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN", "translated"
+    p.save_project(str(tmp_path), entries)
+    manifest = tmp_path / "data" / "scenario_original.manifest.json"
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data["files"].pop("_system/lang.js")             # as an older version left it
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    p.save_project(str(tmp_path), entries)
+    assert '"go":"進む"' in (lang.parent / "lang.js.bak").read_text(encoding="utf-8")
+
+
+# ── Wolf 3 refusal after unpacking Data.wolf; encrypted 3.x (fix 15) ─
+
+def test_wolf3_refusal_removes_what_it_unpacked(tmp_path, monkeypatch):
+    from translator import wolfrpg
+    game = tmp_path / "W"
+    game.mkdir()
+    (game / "Game.exe").write_bytes(b"MZ")
+    (game / "Data.wolf").write_bytes(b"archive")
+
+    def fake_unpack(game_dir):
+        data = game_dir / "Data" / "BasicData"
+        data.mkdir(parents=True)
+        (data / "DataBase.dat").write_bytes(b"\x00W\x00\x00OLUFM\x00" + b"\x00" * 6)
+        (game_dir / "Data" / "MapData").mkdir()
+        return game_dir / "Data"
+    monkeypatch.setattr(wolfrpg, "unpack_data_wolf", fake_unpack)
+    p = wolfrpg.WolfRPGParser()
+    assert p.load_project(str(game)) == []
+    assert "Your game files were not changed" in p.load_warnings[0]
+    assert sorted(x.name for x in game.iterdir()) == ["Data.wolf", "Game.exe"]
+
+
+def test_wolf3_refusal_keeps_a_data_folder_that_was_already_there(tmp_path):
+    from translator import wolfrpg
+    game = tmp_path / "W"
+    (game / "Data" / "BasicData").mkdir(parents=True)
+    (game / "Data" / "MapData").mkdir()
+    (game / "Data" / "BasicData" / "DataBase.dat").write_bytes(
+        b"\x00W\x00\x00OLUFM\x00" + b"\x00" * 6)
+    (game / "Game.exe").write_bytes(b"MZ")
+    wolfrpg.WolfRPGParser().load_project(str(game))
+    assert (game / "Data" / "BasicData" / "DataBase.dat").is_file()
+
+
+def test_wolf3_encrypted_dat_is_detected_and_wolf2_encrypted_is_not(tmp_path):
+    from translator import wolfrpg
+    basic = tmp_path / "Data" / "BasicData"
+    basic.mkdir(parents=True)
+    (basic / "DataBase.dat").write_bytes(b"\x00P\x00\x00\x00\x57" + b"\x00" * 10)
+    assert "encrypted" in wolfrpg.wolf3_marker(tmp_path / "Data")
+    (basic / "DataBase.dat").write_bytes(b"\x00P\x00\x00\x00\x50" + b"\x00" * 10)
+    assert wolfrpg.wolf3_marker(tmp_path / "Data") is None
