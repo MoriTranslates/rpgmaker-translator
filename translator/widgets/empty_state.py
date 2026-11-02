@@ -7,7 +7,7 @@ real content so panels never show a bare grid.
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QLabel, QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import theme
@@ -42,8 +42,12 @@ class EmptyState(QWidget):
         self.text.setObjectName("hint")
         self.text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.text.setWordWrap(True)
-        self.text.setMaximumWidth(460)
+        # A fixed width lets the wrapped label report its real height
+        self.text.setFixedWidth(460)
+        self.text.setSizePolicy(QSizePolicy.Policy.Fixed,
+                                QSizePolicy.Policy.Minimum)
         self.text.setVisible(bool(text))
+        self._fit_text()
         layout.addWidget(self.text, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.button = QPushButton(button)
@@ -58,6 +62,19 @@ class EmptyState(QWidget):
         self.title.setText(title)
         self.text.setText(text)
         self.text.setVisible(bool(text))
+        self._fit_text()
+
+    def _fit_text(self):
+        """Reserve the wrapped help text's full height (QLabel's own
+        height-for-width is unreliable inside centered layouts)."""
+        rect = self.text.fontMetrics().boundingRect(
+            0, 0, self.text.width(), 10_000,
+            int(Qt.TextFlag.TextWordWrap), self.text.text())
+        self.text.setMinimumHeight(rect.height() + 6)
+
+    def showEvent(self, event):
+        self._fit_text()   # the stylesheet font is known by now
+        super().showEvent(event)
 
 
 class EmptyStack(QStackedWidget):
