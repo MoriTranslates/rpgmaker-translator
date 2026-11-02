@@ -13,18 +13,21 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableView, QApplication,
     QLineEdit, QComboBox, QLabel, QMenu, QAbstractItemView, QHeaderView,
     QInputDialog, QMessageBox, QTextEdit, QSplitter, QGroupBox, QCheckBox,
-    QPushButton, QTableWidget, QTableWidgetItem, QTabWidget,
+    QPushButton, QTableWidget, QTableWidgetItem, QTabWidget, QToolButton,
+    QSizePolicy,
 )
 from PyQt6.QtCore import (
     pyqtSignal, Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent,
 )
 from PyQt6.QtGui import (
-    QColor, QAction, QTextCursor, QShortcut, QKeySequence, QKeyEvent,
+    QColor, QAction, QTextCursor, QShortcut, QKeySequence, QKeyEvent, QFont,
 )
 
 from ..project_model import TranslationEntry
 from .. import CONTROL_CODE_RE, JAPANESE_RE
 from . import theme
+from .empty_state import EmptyStack, EmptyState
+from .speaker_delegate import SPEAKER_ROLE, SpeakerDelegate
 from .status_delegate import STATUS_ROLE, StatusDelegate
 
 _CODE_RE = CONTROL_CODE_RE  # local alias
@@ -43,6 +46,9 @@ COL_TRANSLATION = 4
 
 _COLUMN_HEADERS = ["", "File", "Event", "Original (JP)", "Translation (EN)"]
 
+_SPEAKER_RE = re.compile(r'\[Speaker:\s*(.+?)\]')
+_NAMEBOX_RE = re.compile(r'\\[Nn]<(.+)>')
+
 
 # Backward-compatible alias — shared implementation in translator.utils
 _extract_event_context = extract_event_context
@@ -55,6 +61,7 @@ class TranslationTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._entries: list[TranslationEntry] = []
         self._dark_mode = True
+        self.speaker_lookup: dict = {}  # JP speaker -> EN name (set by the table)
 
     def set_entries(self, entries: list, dupe_counts: dict = None):
         self.beginResetModel()
@@ -77,6 +84,10 @@ class TranslationTableModel(QAbstractTableModel):
 
         entry = self._entries[row]
 
+        if (role == Qt.ItemDataRole.DisplayRole and col == COL_TRANSLATION
+                and not entry.translation):
+            return "Not translated yet"
+
         if role == Qt.ItemDataRole.DisplayRole or role == Qt.ItemDataRole.EditRole:
             if col == COL_STATUS:
                 return STATUS_ICONS.get(entry.status, "")
@@ -89,9 +100,13 @@ class TranslationTableModel(QAbstractTableModel):
                     label = f"{label} (\u00d7{count})"
                 return label
             elif col == COL_ORIGINAL:
-                return entry.original
+                return (" ".join(entry.original.split())
+                        if role == Qt.ItemDataRole.DisplayRole
+                        else entry.original)
             elif col == COL_TRANSLATION:
-                return entry.translation
+                return (" ".join(entry.translation.split())
+                        if role == Qt.ItemDataRole.DisplayRole
+                        else entry.translation)
 
         elif role == Qt.ItemDataRole.ToolTipRole:
             if col == COL_FIELD:
@@ -103,6 +118,16 @@ class TranslationTableModel(QAbstractTableModel):
             if col == COL_STATUS:
                 return entry.status
 
+        elif role == SPEAKER_ROLE:
+            if col == COL_ORIGINAL:
+                return self._speaker_of(entry)
+
+        elif role == Qt.ItemDataRole.FontRole:
+            if col == COL_TRANSLATION and not entry.translation:
+                font = QFont()
+                font.setItalic(True)
+                return font
+
         elif role == Qt.ItemDataRole.BackgroundRole:
             # Rows stay neutral; only work still to do gets a faint wash
             if entry.status == "untranslated":
@@ -111,12 +136,31 @@ class TranslationTableModel(QAbstractTableModel):
         elif role == Qt.ItemDataRole.ForegroundRole:
             if col == COL_STATUS:
                 return theme.status_fg(entry.status)
+            if col in (COL_FILE, COL_FIELD):
+                return theme.qcolor("text_muted")
+            if col == COL_ORIGINAL:
+                return theme.qcolor("text_soft")
+            if col == COL_TRANSLATION:
+                return theme.qcolor("text" if entry.translation else "text_dim")
 
         elif role == Qt.ItemDataRole.TextAlignmentRole:
             if col == COL_STATUS:
                 return Qt.AlignmentFlag.AlignCenter
 
         return None
+
+    def _speaker_of(self, entry) -> str:
+        """English (else Japanese) speaker name of a dialogue line, or ''."""
+        name = ""
+        if entry.context:
+            m = _SPEAKER_RE.search(entry.context)
+            if m:
+                name = m.group(1).strip()
+        if not name:
+            m = _NAMEBOX_RE.fullmatch((getattr(entry, "namebox", "") or "").strip())
+            if m and "\\" not in m.group(1):
+                name = m.group(1).strip()
+        return self.speaker_lookup.get(name, name) if name else ""
 
     def setData(self, index: QModelIndex, value, role=Qt.ItemDataRole.EditRole):
         if not index.isValid() or role != Qt.ItemDataRole.EditRole:
@@ -213,36 +257,49 @@ class TranslationTable(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # ── Filter bar ─────────────────────────────────────────────
-        filter_row = QHBoxLayout()
-        filter_row.setContentsMargins(4, 4, 4, 2)
+        # ── Filter bar: one search box + compact filter chips ─────
+        filter_bar = QWidget()
+        filter_bar.setObjectName("filterBar")
+        filter_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        filter_row = QHBoxLayout(filter_bar)
+        filter_row.setContentsMargins(8, 6, 8, 6)
         filter_row.setSpacing(6)
 
-        filter_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Search all files (Ctrl+F) — Alice+she = both")
+        self.search_edit.setPlaceholderText(
+            "Search Japanese or English (Ctrl+F)  \u2014  Alice+she finds both")
         self.search_edit.setToolTip(
             "Searches original and translated text across every file.\n"
             "Control codes are ignored. Join terms with + to require all of them.\n"
             "Esc clears the search.")
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setMinimumWidth(140)
+        search_icon = self.search_edit.addAction(
+            theme.icon("search", "text_dim"),
+            QLineEdit.ActionPosition.LeadingPosition)
+        theme.bind_icon(search_icon.setIcon, "search", "text_dim")
         self.search_edit.textChanged.connect(self._schedule_filter)
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self.search_edit,
                   activated=self.search_edit.clear,
                   context=Qt.ShortcutContext.WidgetShortcut)
         filter_row.addWidget(self.search_edit, 1)
 
-        filter_row.addWidget(QLabel("Status:"))
-        self.status_filter = QComboBox()
-        self.status_filter.addItems(["All", "Untranslated", "Translated", "Reviewed", "Skipped"])
-        self.status_filter.currentTextChanged.connect(self._on_filter_changed)
-        filter_row.addWidget(self.status_filter)
+        def chip_combo(items, tip):
+            combo = QComboBox()
+            combo.setProperty("chip", True)
+            combo.addItems(items)
+            combo.setToolTip(tip)
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToContents)
+            combo.currentTextChanged.connect(self._on_filter_changed)
+            filter_row.addWidget(combo)
+            return combo
 
-        filter_row.addWidget(QLabel("Field:"))
-        self.field_filter = QComboBox()
-        self.field_filter.addItems([
-            "All Fields",
+        self.status_filter = chip_combo(
+            ["All statuses", "Untranslated", "Translated", "Reviewed", "Skipped"],
+            "Show only lines with this status")
+        self.field_filter = chip_combo([
+            "All fields",
             "Dialogue",
             "Choices",
             "Scroll Text",
@@ -253,39 +310,39 @@ class TranslationTable(QWidget):
             "Plugin Commands",
             "Plugin Params",
             "Map Names",
-        ])
-        self.field_filter.setToolTip(
-            "Filter entries by field type.\n"
-            "Useful for reviewing all choices, spotting plugin commands, etc."
-        )
-        self.field_filter.currentTextChanged.connect(self._on_filter_changed)
-        filter_row.addWidget(self.field_filter)
-
-        filter_row.addWidget(QLabel("Speaker:"))
-        self.speaker_filter = QComboBox()
-        self.speaker_filter.addItem("All Speakers")
-        self.speaker_filter.setToolTip("Filter dialogue by speaker (from event headers)")
+        ], "Filter entries by field type.\n"
+           "Useful for reviewing all choices, spotting plugin commands, etc.")
+        self.speaker_filter = chip_combo(
+            ["All speakers"], "Filter dialogue by speaker (from event headers)")
         # Long speaker names must not push the filter bar off-screen
         self.speaker_filter.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.speaker_filter.setMinimumContentsLength(10)
-        self.speaker_filter.currentTextChanged.connect(self._on_filter_changed)
-        filter_row.addWidget(self.speaker_filter)
+        self.speaker_filter.setMinimumContentsLength(9)
 
-        self.jp_check = QCheckBox("JP left")
-        self.jp_check.setToolTip(
+        def chip_toggle(text, icon, tip):
+            btn = QToolButton()
+            btn.setProperty("chip", True)
+            btn.setText(text)
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            theme.bind_icon(btn.setIcon, icon)
+            btn.toggled.connect(self._on_filter_changed)
+            filter_row.addWidget(btn)
+            return btn
+
+        self.jp_check = chip_toggle(
+            "JP left", "languages",
             "JP left in translation: show only entries whose translation "
             "still contains Japanese characters")
-        self.jp_check.stateChanged.connect(self._on_filter_changed)
-        filter_row.addWidget(self.jp_check)
+        self.master_check = chip_toggle(
+            "Unique", "copy",
+            "Master view: show each unique text once. "
+            "Edits propagate to all duplicates.")
 
-        self.master_check = QCheckBox("Master View")
-        self.master_check.setToolTip(
-            "Show each unique text once. Edits propagate to all duplicates.")
-        self.master_check.stateChanged.connect(self._on_filter_changed)
-        filter_row.addWidget(self.master_check)
-
-        layout.addLayout(filter_row)
+        filter_bar.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                 QSizePolicy.Policy.Fixed)
+        layout.addWidget(filter_bar)
 
         # ── Find & Replace bar (hidden by default, Ctrl+H to toggle) ─
         self._replace_bar = QWidget()
@@ -329,8 +386,9 @@ class TranslationTable(QWidget):
         # Track position for one-by-one replacement
         self._replace_index = 0
 
-        # ── Vertical splitter: table on top, editor on bottom ─────
-        vsplit = QSplitter(Qt.Orientation.Vertical)
+        # ── Splitter: table (full height) | editor pane on the right ─
+        vsplit = QSplitter(Qt.Orientation.Horizontal)
+        self.editor_splitter = vsplit
 
         # ── Table (QTableView + model) ────────────────────────────
         self._model = TranslationTableModel(self)
@@ -352,10 +410,17 @@ class TranslationTable(QWidget):
         self.table.setColumnWidth(COL_STATUS, 30)
         self._status_delegate = StatusDelegate(self.table)
         self.table.setItemDelegateForColumn(COL_STATUS, self._status_delegate)
-        header.setSectionResizeMode(COL_FILE, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(COL_FIELD, QHeaderView.ResizeMode.ResizeToContents)
+        # File / Event are compact reference columns; the text gets the room
+        header.setSectionResizeMode(COL_FILE, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(COL_FIELD, QHeaderView.ResizeMode.Interactive)
+        self.table.setColumnWidth(COL_FILE, 130)
+        self.table.setColumnWidth(COL_FIELD, 110)
         header.setSectionResizeMode(COL_ORIGINAL, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(COL_TRANSLATION, QHeaderView.ResizeMode.Stretch)
+        self._speaker_delegate = SpeakerDelegate(self.table)
+        self.table.setItemDelegateForColumn(COL_ORIGINAL, self._speaker_delegate)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.table.setWordWrap(False)  # one line per row; the pane shows all
 
         vsplit.addWidget(self.table)
 
@@ -370,10 +435,10 @@ class TranslationTable(QWidget):
         # ── Tabbed bottom panel: Editor + Event Context ─────────────
         self.bottom_tabs = QTabWidget()
 
-        # Tab 0: side-by-side editors
+        # Tab 0: original above the editable translation
         editor_widget = QWidget()
-        editor_layout = QHBoxLayout(editor_widget)
-        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout = QVBoxLayout(editor_widget)
+        editor_layout.setContentsMargins(8, 4, 8, 4)
 
         # Left: original (read-only)
         orig_group = QGroupBox("Original (JP)")
@@ -385,10 +450,10 @@ class TranslationTable(QWidget):
         self.orig_editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.orig_editor.customContextMenuRequested.connect(self._show_orig_context_menu)
         orig_box.addWidget(self.orig_editor)
-        editor_layout.addWidget(orig_group)
+        editor_layout.addWidget(orig_group, 2)
 
         # Right: translation (editable, with code-insert right-click menu)
-        trans_group = QGroupBox("Translation (EN) \u2014 editable")
+        trans_group = QGroupBox("Translation (EN) \u2014 Ctrl+Enter: next untranslated")
         trans_box = QVBoxLayout(trans_group)
         self.trans_editor = QTextEdit()
         self.trans_editor.setAcceptRichText(False)
@@ -399,7 +464,11 @@ class TranslationTable(QWidget):
         self.trans_editor.customContextMenuRequested.connect(self._show_editor_context_menu)
         self._spell = SpellHighlighter(self.trans_editor.document())
         trans_box.addWidget(self.trans_editor)
-        editor_layout.addWidget(trans_group)
+        editor_layout.addWidget(trans_group, 3)
+        for keys in ("Ctrl+Return", "Ctrl+Enter"):
+            QShortcut(QKeySequence(keys), self.trans_editor,
+                      activated=self._commit_and_next,
+                      context=Qt.ShortcutContext.WidgetShortcut)
 
         self.bottom_tabs.addTab(editor_widget, "Editor")
 
@@ -439,13 +508,24 @@ class TranslationTable(QWidget):
         self.bottom_tabs.addTab(context_widget, "Event Context")
         self.bottom_tabs.currentChanged.connect(self._on_tab_changed)
 
-        vsplit.addWidget(self.bottom_tabs)
+        self._editor_empty = EmptyState(
+            "mouse-pointer-click", "Select a line to edit it",
+            "The full Japanese text shows here with the English below it. "
+            "Edits save as you type; Ctrl+Enter jumps to the next "
+            "untranslated line.")
+        self.editor_stack = EmptyStack(self.bottom_tabs, self._editor_empty)
+        self.editor_stack.setObjectName("editorPane")
+        self.editor_stack.set_empty(True)
+        self.editor_stack.setMinimumWidth(260)
+        vsplit.addWidget(self.editor_stack)
 
-        # Default split: 70% table, 30% editor+context
-        vsplit.setStretchFactor(0, 7)
-        vsplit.setStretchFactor(1, 3)
+        # Table takes the spare room; the pane keeps ~420px and can collapse
+        vsplit.setStretchFactor(0, 1)
+        vsplit.setStretchFactor(1, 0)
+        vsplit.setCollapsible(0, False)
+        vsplit.setSizes([1000, 420])
 
-        layout.addWidget(vsplit)
+        layout.addWidget(vsplit, 1)
 
         # Track current selection
         self._selected_row = -1
@@ -499,7 +579,7 @@ class TranslationTable(QWidget):
         self.speaker_filter.blockSignals(True)
         current = self.speaker_filter.currentText()
         self.speaker_filter.clear()
-        self.speaker_filter.addItem("All Speakers")
+        self.speaker_filter.addItem("All speakers")
         self.speaker_filter.addItem("(No speaker)")
         for name in sorted(speakers):
             self.speaker_filter.addItem(name)
@@ -535,6 +615,13 @@ class TranslationTable(QWidget):
     def _on_filter_changed(self):
         """Filter dropdown changed — clear pinned ID filter and re-apply."""
         self._id_filter = None
+        for combo in (self.status_filter, self.field_filter,
+                      self.speaker_filter):
+            active = combo.currentIndex() > 0
+            if combo.property("active") != active:
+                combo.setProperty("active", active)
+                combo.style().unpolish(combo)
+                combo.style().polish(combo)
         self._apply_filter()
 
     @staticmethod
@@ -544,7 +631,7 @@ class TranslationTable(QWidget):
 
     # Field filter dropdown → set of matching entry.field values
     _FIELD_FILTER_MAP = {
-        "All Fields":        None,  # no filtering
+        "All fields":        None,  # no filtering
         "Dialogue":          {"dialog"},
         "Choices":           {"choice"},
         "Scroll Text":       {"scroll_text"},
@@ -586,12 +673,13 @@ class TranslationTable(QWidget):
             return
 
         query = self.search_edit.text().lower()
-        status = self.status_filter.currentText().lower()
+        status = ("" if self.status_filter.currentIndex() <= 0
+                  else self.status_filter.currentText().lower())
         field_label = self.field_filter.currentText()
         field_set = self._FIELD_FILTER_MAP.get(field_label)
         jp_only = self.jp_check.isChecked()
         speaker = self.speaker_filter.currentText()
-        speaker_active = speaker not in ("All Speakers", "")
+        speaker_active = self.speaker_filter.currentIndex() > 0
 
         # Search all entries when query, field filter, speaker, or JP filter is active
         use_all = query or jp_only or field_set is not None or speaker_active
@@ -599,7 +687,7 @@ class TranslationTable(QWidget):
 
         self._visible_entries = []
         for e in source:
-            if status != "all" and e.status != status:
+            if status and e.status != status:
                 continue
             if field_set is not None:
                 if field_label == "System / Terms":
@@ -649,8 +737,29 @@ class TranslationTable(QWidget):
             self._visible_entries = list(seen.values())
 
         self._model.set_entries(self._visible_entries, self._dupe_counts)
+        self._sync_file_column()
         self._restore_selection(prev_entry)
         self._update_stats()
+
+    def _sync_file_column(self):
+        """Hide the File column while every listed line is from one file."""
+        files = {e.file for e in self._visible_entries}
+        self.table.setColumnHidden(COL_FILE, len(files) == 1)
+
+    def _commit_and_next(self):
+        """Ctrl+Enter: keep the edit (already saved) and go to the next
+        untranslated line below, wrapping to the top."""
+        n = len(self._visible_entries)
+        if n == 0:
+            return
+        start = self._selected_row if self._selected_row >= 0 else -1
+        for step in range(1, n + 1):
+            row = (start + step) % n
+            if self._visible_entries[row].status == "untranslated":
+                self.table.setCurrentIndex(self._model.index(row, COL_TRANSLATION))
+                self.table.scrollTo(self._model.index(row, COL_TRANSLATION))
+                self.trans_editor.setFocus()
+                return
 
     def _restore_selection(self, prev_entry):
         """Re-select *prev_entry* after a model reset, or clear the editor."""
@@ -671,6 +780,7 @@ class TranslationTable(QWidget):
             self.table.setCurrentIndex(self._model.index(row, 0))
         else:
             self._selected_row = -1
+            self.editor_stack.set_empty(True)
             self.trans_editor.blockSignals(True)
             self.orig_editor.clear()
             self.trans_editor.clear()
@@ -1101,7 +1211,9 @@ class TranslationTable(QWidget):
             self.orig_editor.clear()
             self.trans_editor.clear()
             self.context_table.setRowCount(0)
+            self.editor_stack.set_empty(True)
             return
+        self.editor_stack.set_empty(False)
 
         self._selected_row = row
         entry = self._visible_entries[row]
@@ -1130,6 +1242,7 @@ class TranslationTable(QWidget):
                 self._speaker_lookup[e.original.strip()] = e.translation.strip()
             elif e.field == "name" and e.file == "Actors.json" and e.translation:
                 self._speaker_lookup[e.original.strip()] = e.translation.strip()
+        self._model.speaker_lookup = self._speaker_lookup
 
     def _show_context_pane(self):
         """Switch to the Event Context tab and populate it."""
@@ -1599,8 +1712,8 @@ class TranslationTable(QWidget):
                     "(Ctrl+O) to load a game folder.")
         else:
             text = ("No entries match the current filters\n\n"
-                    "Clear the search box or set Status / Field / Speaker "
-                    "back to All.")
+                    "Clear the search box or set the status, field and "
+                    "speaker filters back to All.")
         self._empty_label.setText(text)
         self._empty_label.setStyleSheet(theme.hint_css() + " font-size: 11pt;")
         self._empty_label.setGeometry(self.table.viewport().rect())

@@ -636,6 +636,73 @@ QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
 QScrollArea {{
     border: none;
 }}
+QWidget#filterBar {{
+    background-color: {panel};
+    border-bottom: 1px solid {border};
+}}
+QComboBox[chip="true"], QToolButton[chip="true"] {{
+    background-color: {button};
+    border: 1px solid {border_strong};
+    border-radius: 14px;
+    padding: 3px 12px;
+    color: {text_muted};
+    min-height: 20px;
+}}
+QComboBox[chip="true"]:hover, QToolButton[chip="true"]:hover {{
+    color: {text};
+    border-color: {control_border};
+}}
+QComboBox[chip="true"]:focus, QToolButton[chip="true"]:focus {{
+    border: 2px solid {accent};
+    padding: 2px 11px;
+}}
+QComboBox[chip="true"][active="true"], QToolButton[chip="true"]:checked {{
+    background-color: {accent_soft};
+    border-color: {accent};
+    color: {accent};
+    font-weight: 600;
+}}
+QComboBox[chip="true"]::drop-down {{
+    border: none;
+    width: 18px;
+}}
+QStackedWidget#editorPane {{
+    background-color: {panel};
+}}
+QStackedWidget#editorPane QTabWidget::pane {{
+    border-top: 1px solid {border};
+}}
+QWidget#projectHeader {{
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {accent_soft}, stop:0.45 {panel}, stop:1 {panel});
+    border-bottom: 1px solid {border};
+}}
+QLabel#projectTitle {{
+    font-size: 12pt;
+    font-weight: 600;
+    color: {text};
+}}
+QLabel#engineBadge {{
+    background-color: {raised};
+    color: {accent};
+    border: 1px solid {border_strong};
+    border-radius: 9px;
+    padding: 1px 8px;
+    font-size: 8.5pt;
+    font-weight: 600;
+}}
+QLabel#projectCounts {{
+    color: {text_soft};
+}}
+QProgressBar#headerProgress {{
+    background-color: {button};
+    border-radius: 4px;
+}}
+QProgressBar#headerProgress::chunk {{
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {accent_pressed}, stop:1 {accent});
+    border-radius: 4px;
+}}
 QLabel#emptyTitle {{
     font-size: 14pt;
     font-weight: 600;
