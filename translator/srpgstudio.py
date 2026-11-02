@@ -188,13 +188,19 @@ class SRPGStudioParser:
         blob_len = len(blob)
         while i < blob_len - 6:
             str_len = struct.unpack_from("<I", blob, i)[0]
-            # Valid string: even byte count, reasonable length, fits in blob
+            # Valid string: even byte count, reasonable length, fits in blob,
+            # and -- like every string SRPG Studio (and our writer) stores --
+            # ends with exactly one UTF-16 NUL terminator and has no NUL
+            # inside.  Without the terminator check, two plain integer
+            # fields such as (4, 0x30443042) read as the "string" あい, and
+            # translating it overwrote game data.
             if (str_len >= 4 and str_len <= 8000
                     and str_len % 2 == 0
-                    and i + 4 + str_len <= blob_len):
+                    and i + 4 + str_len <= blob_len
+                    and blob[i + 2 + str_len:i + 4 + str_len] == b"\x00\x00"):
                 try:
-                    text = blob[i + 4:i + 4 + str_len].decode("utf-16-le")
-                    text = text.rstrip("\x00")
+                    raw = blob[i + 4:i + 2 + str_len].decode("utf-16-le")
+                    text = raw if "\x00" not in raw else ""
                     if text and self._should_extract(text) and _CLEAN_RE.match(text):
                         results.append((i, str_len, text))
                         i += 4 + str_len

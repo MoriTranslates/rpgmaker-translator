@@ -49,9 +49,14 @@ _THINK_UNCLOSED_RE = re.compile(r'<think>.*', re.DOTALL)
 # Matches common patterns at the end of the output.  Bare "Note:" lines are
 # NOT stripped — they can be legitimate dialogue ("Note: the door is locked").
 _NOTE_LABELS = r"(?:Translation [Nn]ote|Translator'?s? [Nn]ote|TL [Nn]ote)s?"
+# A ---/*** separator line only counts as a note marker when the text after
+# it is labelled as a note.  A bare separator is often a real scene break
+# (the source may use ━━━, ＊＊＊, ═══ ... which the LLM renders as ---), and
+# stripping everything after it silently deleted the rest of the line.
+_NOTE_AFTER_SEP = (r'\s*[(\[*]?\s*(?:Note|Notes|' + _NOTE_LABELS
+                   + r'|Commentary|Explanation|Literally|Lit\.)\b')
 _NOTE_SEPARATOR_PATTERNS = (
-    r'\n\s*[-—–]{2,}\s*\n.*'                     # --- separator followed by notes
-    r'|\n\s*\*{2,}\s*\n.*'                        # *** separator followed by notes
+    r'\n\s*(?:[-—–]{2,}|\*{2,})\s*\n(?=' + _NOTE_AFTER_SEP + r').*'
 )
 _NOTE_LABEL_PATTERNS = (
     r'\n\s*(?:' + _NOTE_LABELS + r'|Commentary|Explanation)\s*[:：].*'
@@ -63,14 +68,15 @@ _NOTE_STRIP_RE = re.compile(
     r'(?:' + _NOTE_SEPARATOR_PATTERNS + r'|' + _NOTE_LABEL_PATTERNS + r')',
     re.DOTALL | re.IGNORECASE,
 )
-# Variant used when the source itself has a separator line (e.g. a "——"
-# dramatic-pause line) — separators are then real content, not note markers.
-_NOTE_STRIP_NO_SEP_RE = re.compile(
-    r'(?:' + _NOTE_LABEL_PATTERNS + r')',
-    re.DOTALL | re.IGNORECASE,
-)
+# Only labelled notes are stripped by regex; a bare separator is handled
+# in _strip_notes (kept whenever the source has its own separator line).
+_NOTE_STRIP_NO_SEP_RE = _NOTE_STRIP_RE
+# A bare ---/*** line in the output (see _strip_notes for when it counts)
+_BARE_SEP_LINE_RE = re.compile(r'\n\s*(?:[-—–]{2,}|\*{2,})\s*\n')
 # A line in the source made only of dash-like / asterisk characters
-_SOURCE_SEP_LINE_RE = re.compile(r'^\s*(?:[-—–―─ー]{2,}|\*{2,})\s*$', re.MULTILINE)
+_SOURCE_SEP_LINE_RE = re.compile(
+    r'^\s*(?:[-—–―─━═＝=－‐ー~～・]{2,}|[*＊※★☆◆◇■□]{2,})\s*$',
+    re.MULTILINE)
 
 # LLM-mangled placeholder variants: <<CODE1>>, [CODE1], « CODE 1 », «CODE1>> ...
 _PLACEHOLDER_NORMALIZE_RE = re.compile(
@@ -1294,8 +1300,23 @@ class AIClient:
         are stripped.
         """
         if original and _SOURCE_SEP_LINE_RE.search(original):
-            return _NOTE_STRIP_NO_SEP_RE.sub('', text).rstrip()
-        return _NOTE_STRIP_RE.sub('', text).rstrip()
+            out = _NOTE_STRIP_NO_SEP_RE.sub('', text).rstrip()
+        else:
+            out = _NOTE_STRIP_RE.sub('', text).rstrip()
+            # Unlabelled text after a bare separator is only treated as a
+            # note when everything before the separator already accounts
+            # for every source line -- otherwise it is the rest of the
+            # translation (a scene break the source drew differently).
+            m = _BARE_SEP_LINE_RE.search(out)
+            if m:
+                before = out[:m.start()]
+                src_lines = len(original.split("\n")) if original else 1
+                if before.count("\n") + 1 >= src_lines:
+                    out = before.rstrip()
+        if out != text.rstrip():
+            log.info("Stripped translator note/commentary: %r",
+                     text[len(out):].strip()[:200])
+        return out
 
     @staticmethod
     def _contains_japanese(text: str) -> bool:

@@ -97,6 +97,39 @@ def _is_parsed_data_file(filename: str) -> bool:
             or bool(_MAP_FILE_RE.match(filename)))
 
 
+_EVENT_ID_TAIL_RE = re.compile(
+    r'(dialog|scroll|comment)_(\d+)|choice_(\d+)_(\d+)')
+_EVENT_KIND_FIELD = {"dialog": "dialog", "scroll": "scroll_text",
+                     "comment": "comment", "choice": "choice"}
+
+
+def _event_entry_key(entry):
+    """Positional key of an event-command entry, from its ID.
+
+    ``Map001.json/Ev3(Name)/p0/dialog_2`` -> ``("Ev3(Name)/p0", "dialog", 2)``
+    and ``.../choice_1_0`` -> ``(scope, "choice", 1, 0)``.  The numbering
+    is the parser's per-list, per-kind counter (ID scheme 2).  Returns None
+    for anything else, which is then matched by text instead.
+    """
+    eid = entry.id or ""
+    head = (entry.file or "") + "/"
+    if not eid.startswith(head):
+        return None
+    rest = eid[len(head):]
+    if "/" not in rest:
+        return None
+    scope, tail = rest.rsplit("/", 1)
+    m = _EVENT_ID_TAIL_RE.fullmatch(tail)
+    if not m:
+        return None
+    kind = m.group(1) or "choice"
+    if _EVENT_KIND_FIELD[kind] != entry.field:
+        return None
+    if kind == "choice":
+        return (scope, "choice", int(m.group(3)), int(m.group(4)))
+    return (scope, kind, int(m.group(2)))
+
+
 # ── Plugin command whitelists (based on DazedMTL's proven approach) ──
 # Only these known plugins/commands have display text safe to translate.
 # Everything else is internal identifiers that break games if translated.
@@ -2348,6 +2381,38 @@ class RPGMakerMVParser:
         """
         from collections import deque
 
+        # Collect every command list with the scope prefix the parser used.
+        # Done first: DB entries below may rename a troop, and the scope
+        # must be the original (Japanese) name the entry IDs were built from.
+        lists: list[tuple] = []   # (cmd_list, scope)
+        if isinstance(data, dict):
+            for event in (data.get("events") or []):
+                if not event or not isinstance(event, dict):
+                    continue
+                ev_scope = f"Ev{event.get('id', 0)}({event.get('name', '')})"
+                for page_idx, page in enumerate(event.get("pages") or []):
+                    if page and isinstance(page, dict):
+                        lists.append((page.get("list", []),
+                                      f"{ev_scope}/p{page_idx}"))
+            if "list" in data:
+                lists.append((data.get("list", []), None))
+        elif isinstance(data, list):
+            for item in data:
+                if not item or not isinstance(item, dict):
+                    continue
+                # CommonEvents — top-level "list"
+                if item.get("list"):
+                    lists.append((item.get("list", []),
+                                  f"CE{item.get('id', 0)}({item.get('name', '')})"))
+                # Troops — pages with nested "list"
+                for page_idx, page in enumerate(item.get("pages") or []):
+                    if page and isinstance(page, dict):
+                        lists.append((
+                            page.get("list", []),
+                            f"Troop{item.get('id', 0)}({item.get('name', '')})"
+                            f"/p{page_idx}"))
+
+
         scan_entries = []
         speaker_lookup = dict(global_speakers) if global_speakers else {}
         for entry in entries:
@@ -2362,16 +2427,24 @@ class RPGMakerMVParser:
         if not scan_entries and not speaker_lookup:
             return
 
-        # Build lookup dicts keyed by first original line
-        dialog_lookup = {}   # first_line -> deque of (orig_lines, trans_lines)
-        scroll_lookup = {}
-        comment_lookup = {}
-        choice_lookup = {}   # original_text -> deque of translation_text
+        # ── Prepare each block entry: (orig_lines, trans_lines) ──
+        # Each dialog / scroll / comment / choice entry is applied at the
+        # exact place its ID points to (event page + per-kind counter, the
+        # same structural numbering the parser uses), and only if the text
+        # found there is the entry's original.  Matching purely by text
+        # (first-in-first-out) let a translated line land on an identical
+        # untranslated line in another event, leaving the translated one in
+        # Japanese, or swapped context-specific translations.  Text matching
+        # remains only as a fallback for entries whose position no longer
+        # holds their original (e.g. a game update), and only within the
+        # same event page.
+        positional = {}          # (scope, kind, n[, ci]) -> payload
+        fallback = []            # (scope, field, payload) for text matching
 
         for entry in scan_entries:
-            orig_lines = entry.original.split("\n")
-            trans_lines = entry.translation.split("\n")
             if entry.field in ("dialog", "scroll_text", "comment"):
+                orig_lines = entry.original.split("\n")
+                trans_lines = entry.translation.split("\n")
                 while len(trans_lines) < len(orig_lines):
                     trans_lines.append("")
                 # Restore namebox prefix for export matching & output
@@ -2392,15 +2465,14 @@ class RPGMakerMVParser:
                             and trans_lines[0][0].isalpha()):
                         sep = " "
                     trans_lines[0] = nb_translated + sep + trans_lines[0]
-                # Allow extra lines — export inserts extra 401/405 commands
-                first = orig_lines[0] if orig_lines else ""
-                lk = {"dialog": dialog_lookup, "scroll_text": scroll_lookup,
-                       "comment": comment_lookup}[entry.field]
-                lk.setdefault(first, deque()).append(
-                    (orig_lines, trans_lines))
-            elif entry.field == "choice":
-                choice_lookup.setdefault(entry.original, deque()).append(
-                    entry.translation)
+                payload = (orig_lines, trans_lines)
+            else:
+                payload = (entry.original, entry.translation)
+            key = _event_entry_key(entry)
+            if key is not None:
+                positional[key] = (entry.field, payload)
+            else:
+                fallback.append((None, entry.field, payload))
 
         code_dialog = CODE_SHOW_TEXT
         code_scroll = CODE_SCROLL_TEXT
@@ -2428,7 +2500,65 @@ class RPGMakerMVParser:
             nxt = cmd_list[end]
             return not (isinstance(nxt, dict) and nxt.get("code") == code)
 
-        def process_commands(cmd_list):
+        def run_end(cmd_list, i, code):
+            j = i
+            while (j < len(cmd_list) and isinstance(cmd_list[j], dict)
+                   and cmd_list[j].get("code") == code):
+                j += 1
+            return j
+
+        def text_at(c):
+            return str((c.get("parameters") or [""])[0])
+
+        def block_matches(cmd_list, i, ol, code, cont_code=None):
+            """Do the commands at i hold exactly the lines *ol*?"""
+            if i + len(ol) > len(cmd_list):
+                return False
+            if cont_code is None and not is_block_end(cmd_list, i + len(ol), code):
+                return False  # would leave trailing JP lines
+            for j, orig_line in enumerate(ol):
+                c = cmd_list[i + j]
+                expected = code if (j == 0 or cont_code is None) else cont_code
+                if not isinstance(c, dict) or c.get("code") != expected:
+                    return False
+                if text_at(c) != orig_line:
+                    return False
+            return True
+
+        def apply_block(cmd_list, i, ol, tl, code, comment=False):
+            """Write *tl* over the matched block at i; return the advance."""
+            done.add(id(cmd_list[i]))
+            if comment:
+                for j in range(len(ol)):
+                    cmd_list[i + j]["parameters"][0] = tl[j]
+                return len(ol)
+            if single_401:
+                # Merge all lines into first 401
+                cmd_list[i]["parameters"][0] = "\n".join(tl)
+                # Remove remaining original 401s
+                del cmd_list[i + 1:i + len(ol)]
+                return 1
+            # Replace text in existing 401 commands
+            for j in range(len(ol)):
+                cmd_list[i + j]["parameters"][0] = tl[j]
+            # Insert extra 401 commands for overflow
+            extra = tl[len(ol):]
+            if extra:
+                indent = cmd_list[i].get("indent", 0)
+                ins = i + len(ol)
+                for k, et in enumerate(extra):
+                    cmd_list.insert(ins + k, {
+                        "code": code,
+                        "indent": indent,
+                        "parameters": [et],
+                    })
+            return len(ol) + len(extra)
+
+        done: set[int] = set()   # id() of first command of applied blocks
+
+        def positional_pass(cmd_list, scope):
+            """Apply entries at the position their ID names (pass 1)."""
+            counters = {"dialog": 0, "scroll": 0, "comment": 0, "choice": 0}
             i = 0
             while i < len(cmd_list):
                 cmd = cmd_list[i]
@@ -2445,159 +2575,93 @@ class RPGMakerMVParser:
                     i += 1
                     continue
 
-                # Dialog block (401)
-                if code == code_dialog and dialog_lookup:
-                    first_text = str(
-                        (cmd.get("parameters") or [""])[0])
-                    candidates = dialog_lookup.get(first_text)
-                    if candidates and not is_block_start(cmd_list, i, code_dialog):
+                if code in (code_dialog, code_scroll):
+                    kind = "dialog" if code == code_dialog else "scroll"
+                    end = run_end(cmd_list, i, code)
+                    if not is_block_start(cmd_list, i, code):
+                        i = end
+                        continue
+                    counters[kind] += 1
+                    hit = positional.get((scope, kind, counters[kind]))
+                    if hit is not None:
+                        ol, tl = hit[1]
+                        if block_matches(cmd_list, i, ol, code):
+                            del positional[(scope, kind, counters[kind])]
+                            i += apply_block(cmd_list, i, ol, tl, code)
+                            continue
+                    i = end
+                    continue
+
+                if code == code_comment:
+                    counters["comment"] += 1
+                    key = (scope, "comment", counters["comment"])
+                    hit = positional.get(key)
+                    if hit is not None:
+                        ol, tl = hit[1]
+                        if block_matches(cmd_list, i, ol, code_comment,
+                                         cont_code=code_comment_cont):
+                            del positional[key]
+                            i += apply_block(cmd_list, i, ol, tl, code_comment,
+                                             comment=True)
+                            continue
+                    i += 1
+                    continue
+
+                if code == code_choice:
+                    params = cmd.get("parameters", [])
+                    if params:
+                        counters["choice"] += 1
+                        if isinstance(params[0], list):
+                            for ci, ch in enumerate(params[0]):
+                                key = (scope, "choice", counters["choice"], ci)
+                                hit = positional.get(key)
+                                if hit is not None and ch == hit[1][0]:
+                                    params[0][ci] = hit[1][1]
+                                    del positional[key]
+                    i += 1
+                    continue
+                i += 1
+
+        def fallback_pass(cmd_list, lookups):
+            """Text-match leftovers within one scope (pass 2)."""
+            dialog_lookup = lookups.get("dialog") or {}
+            scroll_lookup = lookups.get("scroll_text") or {}
+            comment_lookup = lookups.get("comment") or {}
+            choice_lookup = lookups.get("choice") or {}
+            i = 0
+            while i < len(cmd_list):
+                cmd = cmd_list[i]
+                if not isinstance(cmd, dict):
+                    i += 1
+                    continue
+                code = cmd.get("code", 0)
+                if id(cmd) in done:
+                    i += 1
+                    continue
+                if code in (code_dialog, code_scroll, code_comment):
+                    lookup = {code_dialog: dialog_lookup,
+                              code_scroll: scroll_lookup,
+                              code_comment: comment_lookup}[code]
+                    candidates = lookup.get(text_at(cmd)) if lookup else None
+                    if (candidates and code != code_comment
+                            and not is_block_start(cmd_list, i, code)):
                         candidates = None  # mid-block — never a parsed block start
-                    if candidates:
-                        applied = False
-                        for idx, (ol, tl) in enumerate(candidates):
-                            if i + len(ol) > len(cmd_list):
-                                continue
-                            if not is_block_end(cmd_list, i + len(ol), code_dialog):
-                                continue  # would leave trailing JP lines
-                            match = True
-                            for j, orig_line in enumerate(ol):
-                                c = cmd_list[i + j]
-                                if (not isinstance(c, dict)
-                                        or c.get("code") != code_dialog):
-                                    match = False
-                                    break
-                                ct = str((c.get("parameters") or [""])[0])
-                                if ct != orig_line:
-                                    match = False
-                                    break
-                            if match:
-                                if single_401:
-                                    # Merge all lines into first 401
-                                    cmd_list[i]["parameters"][0] = "\n".join(tl)
-                                    # Remove remaining original 401s
-                                    del cmd_list[i + 1:i + len(ol)]
-                                    advance = 1
-                                else:
-                                    # Replace text in existing 401 commands
-                                    for j in range(len(ol)):
-                                        cmd_list[i + j]["parameters"][0] = tl[j]
-                                    # Insert extra 401 commands for overflow
-                                    extra = tl[len(ol):]
-                                    if extra:
-                                        indent = cmd_list[i].get("indent", 0)
-                                        ins = i + len(ol)
-                                        for k, et in enumerate(extra):
-                                            cmd_list.insert(ins + k, {
-                                                "code": code_dialog,
-                                                "indent": indent,
-                                                "parameters": [et],
-                                            })
-                                    advance = len(ol) + len(extra)
-                                del candidates[idx]
-                                if not candidates:
-                                    del dialog_lookup[first_text]
-                                i += advance
-                                applied = True
-                                break
-                        if not applied:
-                            i += 1
-                    else:
+                    applied = False
+                    for idx, (ol, tl) in enumerate(candidates or ()):
+                        cont = code_comment_cont if code == code_comment else None
+                        if block_matches(cmd_list, i, ol, code, cont_code=cont):
+                            first_text = text_at(cmd)
+                            i += apply_block(cmd_list, i, ol, tl, code,
+                                             comment=(code == code_comment))
+                            del candidates[idx]
+                            if not candidates:
+                                del lookup[first_text]
+                            applied = True
+                            break
+                    if not applied:
                         i += 1
-
-                # Scroll text block (405)
-                elif code == code_scroll and scroll_lookup:
-                    first_text = str(
-                        (cmd.get("parameters") or [""])[0])
-                    candidates = scroll_lookup.get(first_text)
-                    if candidates and not is_block_start(cmd_list, i, code_scroll):
-                        candidates = None  # mid-block — never a parsed block start
-                    if candidates:
-                        applied = False
-                        for idx, (ol, tl) in enumerate(candidates):
-                            if i + len(ol) > len(cmd_list):
-                                continue
-                            if not is_block_end(cmd_list, i + len(ol), code_scroll):
-                                continue  # would leave trailing JP lines
-                            match = True
-                            for j, orig_line in enumerate(ol):
-                                c = cmd_list[i + j]
-                                if (not isinstance(c, dict)
-                                        or c.get("code") != code_scroll):
-                                    match = False
-                                    break
-                                ct = str((c.get("parameters") or [""])[0])
-                                if ct != orig_line:
-                                    match = False
-                                    break
-                            if match:
-                                if single_401:
-                                    cmd_list[i]["parameters"][0] = "\n".join(tl)
-                                    del cmd_list[i + 1:i + len(ol)]
-                                    advance = 1
-                                else:
-                                    for j in range(len(ol)):
-                                        cmd_list[i + j]["parameters"][0] = tl[j]
-                                    extra = tl[len(ol):]
-                                    if extra:
-                                        indent = cmd_list[i].get("indent", 0)
-                                        ins = i + len(ol)
-                                        for k, et in enumerate(extra):
-                                            cmd_list.insert(ins + k, {
-                                                "code": code_scroll,
-                                                "indent": indent,
-                                                "parameters": [et],
-                                            })
-                                    advance = len(ol) + len(extra)
-                                del candidates[idx]
-                                if not candidates:
-                                    del scroll_lookup[first_text]
-                                i += advance
-                                applied = True
-                                break
-                        if not applied:
-                            i += 1
-                    else:
-                        i += 1
-
-                # Comment block (108 + 408 continuations)
-                elif code == code_comment and comment_lookup:
-                    first_text = str(
-                        (cmd.get("parameters") or [""])[0])
-                    candidates = comment_lookup.get(first_text)
-                    if candidates:
-                        applied = False
-                        for idx, (ol, tl) in enumerate(candidates):
-                            if i + len(ol) > len(cmd_list):
-                                continue
-                            match = True
-                            for j, orig_line in enumerate(ol):
-                                c = cmd_list[i + j]
-                                expected_code = code_comment if j == 0 else code_comment_cont
-                                if (not isinstance(c, dict)
-                                        or c.get("code") != expected_code):
-                                    match = False
-                                    break
-                                ct = str((c.get("parameters") or [""])[0])
-                                if ct != orig_line:
-                                    match = False
-                                    break
-                            if match:
-                                for j in range(len(ol)):
-                                    cmd_list[i + j]["parameters"][0] = tl[j]
-                                advance = len(ol)
-                                del candidates[idx]
-                                if not candidates:
-                                    del comment_lookup[first_text]
-                                i += advance
-                                applied = True
-                                break
-                        if not applied:
-                            i += 1
-                    else:
-                        i += 1
-
-                # Choices (102)
-                elif code == code_choice and choice_lookup:
+                    continue
+                if code == code_choice and choice_lookup:
                     params = cmd.get("parameters", [])
                     if params and isinstance(params[0], list):
                         for ci, ch in enumerate(params[0]):
@@ -2606,32 +2670,36 @@ class RPGMakerMVParser:
                                 params[0][ci] = q.popleft()
                                 if not q:
                                     del choice_lookup[ch]
-                    i += 1
+                i += 1
 
-                else:
-                    i += 1
+        # Pass 1: exact position, verified by text
+        for cmd_list, scope in lists:
+            positional_pass(cmd_list if isinstance(cmd_list, list) else [],
+                            scope)
 
-        # Walk all events / pages
-        if isinstance(data, dict):
-            for event in (data.get("events") or []):
-                if not event or not isinstance(event, dict):
-                    continue
-                for page in (event.get("pages") or []):
-                    if page and isinstance(page, dict):
-                        process_commands(page.get("list", []))
-            if "list" in data:
-                process_commands(data.get("list", []))
-        elif isinstance(data, list):
-            for item in data:
-                if not item or not isinstance(item, dict):
-                    continue
-                # CommonEvents — top-level "list"
-                if item.get("list"):
-                    process_commands(item.get("list", []))
-                # Troops — pages with nested "list"
-                for page in (item.get("pages") or []):
-                    if page and isinstance(page, dict):
-                        process_commands(page.get("list", []))
+        # Pass 2: entries whose position no longer holds their text (or whose
+        # ID isn't positional) — text match, restricted to their own page.
+        # Entries without a parsable ID (scope None) may match anywhere.
+        for (scope, kind, *_rest), (field, payload) in positional.items():
+            fallback.append((scope, field, payload))
+        if not fallback:
+            return
+        by_scope: dict = {}
+        for scope, field, payload in fallback:
+            lk = by_scope.setdefault(scope, {}).setdefault(field, {})
+            if field == "choice":
+                lk.setdefault(payload[0], deque()).append(payload[1])
+            else:
+                ol, _tl = payload
+                lk.setdefault(ol[0] if ol else "", deque()).append(payload)
+        global_lookups = by_scope.pop(None, None)
+        for cmd_list, scope in lists:
+            if not isinstance(cmd_list, list):
+                continue
+            if scope in by_scope:
+                fallback_pass(cmd_list, by_scope[scope])
+            if global_lookups:
+                fallback_pass(cmd_list, global_lookups)
 
     @staticmethod
     def _apply_note_tag(item: dict, tag_name: str, value_idx: int,

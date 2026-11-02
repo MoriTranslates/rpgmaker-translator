@@ -33,9 +33,10 @@ def _entry(id_, file, field, original, translation="", status="translated"):
 
 # ── Risk 1: MV export matches dialogue by text (FIFO), not by entry ID ─────
 
-def test_repro_risk1_mv_fifo_steals_translation():
-    """Event A's line is untranslated, Event B's identical line is translated.
-    Export writes B's translation into A and leaves B in Japanese."""
+def test_fixed_risk1_mv_translation_stays_on_its_own_event():
+    """FIXED: event A's line is untranslated, event B's identical line is
+    translated.  B gets its English; A stays Japanese (it used to be the
+    other way round)."""
     from translator.rpgmaker_mv import RPGMakerMVParser
     data = {"events": [
         None,
@@ -46,18 +47,18 @@ def test_repro_risk1_mv_fifo_steals_translation():
     ]}
     # Only event B's line is translated (event A's entry is untranslated and
     # therefore filtered out before _apply_translations_fast, as save_project does).
-    entries = [_entry("Map001.json/Ev2(B)/p0/dialog_0", "Map001.json",
+    entries = [_entry("Map001.json/Ev2(B)/p0/dialog_1", "Map001.json",
                       "dialog", "はい", "Yes (event B)")]
     RPGMakerMVParser()._apply_translations_fast(data, entries)
     a_text = data["events"][1]["pages"][0]["list"][1]["parameters"][0]
     b_text = data["events"][2]["pages"][0]["list"][1]["parameters"][0]
-    assert a_text == "Yes (event B)"   # A got B's translation
-    assert b_text == "はい"             # B — the one the user translated — stays JP
+    assert a_text == "はい"
+    assert b_text == "Yes (event B)"
 
 
-def test_repro_risk1_mv_fifo_swaps_context_specific_translations():
-    """Same JP line translated differently per event; entry order != file
-    order (e.g. B listed first) -> translations land on the wrong events."""
+def test_fixed_risk1_mv_context_specific_translations_not_swapped():
+    """FIXED: same JP line translated differently per event, entries listed
+    in a different order than the file -> each lands on its own event."""
     from translator.rpgmaker_mv import RPGMakerMVParser
     data = {"events": [
         None,
@@ -67,32 +68,89 @@ def test_repro_risk1_mv_fifo_swaps_context_specific_translations():
             _cmd(401, ["そうか"]), _cmd(0, [])]}]},
     ]}
     entries = [
-        _entry("Map001.json/Ev2(B)/p0/dialog_0", "Map001.json", "dialog",
+        _entry("Map001.json/Ev2(B)/p0/dialog_1", "Map001.json", "dialog",
                "そうか", "I see... (sad, B)"),
-        _entry("Map001.json/Ev1(A)/p0/dialog_0", "Map001.json", "dialog",
+        _entry("Map001.json/Ev1(A)/p0/dialog_1", "Map001.json", "dialog",
                "そうか", "Oh, really? (A)"),
     ]
     RPGMakerMVParser()._apply_translations_fast(data, entries)
-    assert data["events"][1]["pages"][0]["list"][0]["parameters"][0] == "I see... (sad, B)"
-    assert data["events"][2]["pages"][0]["list"][0]["parameters"][0] == "Oh, really? (A)"
+    assert data["events"][1]["pages"][0]["list"][0]["parameters"][0] == "Oh, really? (A)"
+    assert data["events"][2]["pages"][0]["list"][0]["parameters"][0] == "I see... (sad, B)"
+
+
+def test_fixed_risk1_mv_same_page_duplicate_and_choices_by_position():
+    """Two identical lines on one page, only the second translated; two
+    identical choice lists, only the second translated."""
+    from translator.rpgmaker_mv import RPGMakerMVParser
+    data = {"events": [None, {"id": 1, "name": "A", "pages": [{"list": [
+        _cmd(401, ["はい"]), _cmd(102, [["行く", "やめる"], 1]),
+        _cmd(101, ["", 0, 0, 2]),
+        _cmd(401, ["はい"]), _cmd(102, [["行く", "やめる"], 1]),
+        _cmd(0, [])]}]}]}
+    entries = [
+        _entry("Map001.json/Ev1(A)/p0/dialog_2", "Map001.json", "dialog",
+               "はい", "Yes, second"),
+        _entry("Map001.json/Ev1(A)/p0/choice_2_0", "Map001.json", "choice",
+               "行く", "Go"),
+    ]
+    RPGMakerMVParser()._apply_translations_fast(data, entries)
+    lst = data["events"][1]["pages"][0]["list"]
+    assert lst[0]["parameters"][0] == "はい"
+    assert lst[1]["parameters"][0] == ["行く", "やめる"]
+    assert lst[3]["parameters"][0] == "Yes, second"
+    assert lst[4]["parameters"][0] == ["Go", "やめる"]
+
+
+def test_fixed_risk1_mv_moved_line_falls_back_within_its_page():
+    """If the ID's position no longer holds the original (game update moved
+    it), text matching is still used -- but only inside the same page."""
+    from translator.rpgmaker_mv import RPGMakerMVParser
+    data = {"events": [None,
+        {"id": 1, "name": "A", "pages": [{"list": [
+            _cmd(401, ["新しい行"]), _cmd(101, ["", 0, 0, 2]),
+            _cmd(401, ["こんにちは"]), _cmd(0, [])]}]},
+        {"id": 2, "name": "B", "pages": [{"list": [
+            _cmd(401, ["こんにちは"]), _cmd(0, [])]}]},
+    ]}
+    entries = [_entry("Map001.json/Ev1(A)/p0/dialog_1", "Map001.json",
+                      "dialog", "こんにちは", "Hello")]
+    RPGMakerMVParser()._apply_translations_fast(data, entries)
+    assert data["events"][1]["pages"][0]["list"][0]["parameters"][0] == "新しい行"
+    assert data["events"][1]["pages"][0]["list"][2]["parameters"][0] == "Hello"
+    assert data["events"][2]["pages"][0]["list"][0]["parameters"][0] == "こんにちは"
 
 
 # ── Risk 2: note-separator stripping truncates real content ───────────────
 
-def test_repro_risk2_separator_line_truncates_when_source_uses_unlisted_dash():
-    """Source scene-break uses ━━━ (U+2501), which _SOURCE_SEP_LINE_RE does not
-    recognise; the LLM renders it as '---' and everything after is deleted."""
+def test_fixed_risk2_heavy_dash_scene_break_is_kept():
+    """FIXED: a ━━━ scene break rendered as '---' no longer deletes the rest."""
     from translator.ai_client import AIClient
     source = "第一章\n━━━━━━\nそして朝が来た。"
     llm_out = "Chapter One\n------\nAnd then morning came."
-    assert AIClient._strip_notes(llm_out, source) == "Chapter One"
+    assert AIClient._strip_notes(llm_out, source) == llm_out
 
 
-def test_repro_risk2_fullwidth_asterisks_truncate():
+def test_fixed_risk2_fullwidth_asterisks_kept():
     from translator.ai_client import AIClient
     source = "ここまで\n＊＊＊\nここから"
     llm_out = "Up to here\n***\nFrom here"
-    assert AIClient._strip_notes(llm_out, source) == "Up to here"
+    assert AIClient._strip_notes(llm_out, source) == llm_out
+
+
+def test_fixed_risk2_unlisted_separator_style_without_source_line_kept():
+    """Even a separator style no list covers keeps the text when the part
+    before it doesn't account for every source line."""
+    from translator.ai_client import AIClient
+    source = "朝だ。\n鳥が鳴く。\n今日も一日が始まる。"
+    llm_out = "Morning.\n---\nBirds sing.\nAnother day begins."
+    assert AIClient._strip_notes(llm_out, source) == llm_out
+
+
+def test_fixed_risk2_labelled_note_after_separator_still_stripped():
+    from translator.ai_client import AIClient
+    out = AIClient._strip_notes("Hello.\n---\nNote: literally 'good day'.",
+                                "こんにちは。\n――\n")
+    assert out == "Hello."
 
 
 def test_refute_risk2_mitigation_when_source_has_ascii_or_common_dash_line():
@@ -106,16 +164,24 @@ def test_refute_risk2_mitigation_when_source_has_ascii_or_common_dash_line():
 
 # ── Risk 3: SRPG Studio heuristic scanner treats ints as strings ───────────
 
-def test_repro_risk3_srpg_scanner_reads_integers_as_text():
-    """Two uint32 fields (4, 0x30443042) are indistinguishable from the
-    length-prefixed UTF-16 string 'あい' and are offered for translation."""
+def test_fixed_risk3_srpg_scanner_ignores_unterminated_integers():
+    """FIXED: two uint32 fields (4, 0x30443042) look like the UTF-16 string
+    'あい' but have no NUL terminator, so they are no longer offered for
+    translation.  A real terminated string is still found."""
     from translator.srpgstudio import SRPGStudioParser
     blob = b"\x00" * 8 + struct.pack("<II", 4, 0x30443042) + b"\x00" * 8
     found = SRPGStudioParser()._scan_strings(blob)
-    assert (8, 4, "あい") in found
+    assert not any(t == "あい" for _o, _l, t in found)
+    real = struct.pack("<I", 6) + "あい\x00".encode("utf-16-le")
+    assert SRPGStudioParser()._scan_strings(b"\x01" * 4 + real) == [(4, 6, "あい")]
+    # A NUL inside the claimed length is not one string either
+    bad = struct.pack("<I", 8) + "あ\x00い\x00".encode("utf-16-le")
+    assert SRPGStudioParser()._scan_strings(bad) == []
 
 
-def test_repro_risk3_srpg_patch_changes_blob_length():
+def test_by_design_risk3_srpg_patch_changes_blob_length():
+    """Still true by design: the project blob runs to EOF, so a length
+    change only shifts data after it inside the blob (see review R3)."""
     from translator.srpgstudio import SRPGStudioParser
     blob = b"HDR!" + struct.pack("<I", 6) + "勇者\x00".encode("utf-16-le") + b"TAIL"
     strings = SRPGStudioParser()._scan_strings(blob)
