@@ -712,8 +712,9 @@ class RPGMakerMVParser:
                 ...
             js/plugins.js       (if applicable)
             js/plugins/TranslatorWordWrap.js  (if word wrap injected)
-            install.bat         (renames originals, moves translations in)
-            uninstall.bat       (restores originals)
+            install.bat         (copies originals aside, copies translations
+                                 over data/ -- never removes a game file)
+            uninstall.bat       (copies the originals back)
             README.txt
 
         End users extract into the game folder and run install.bat.
@@ -762,12 +763,20 @@ class RPGMakerMVParser:
             # immediately overwrite game files — install.bat handles the swap
             data_file_count = 0
             skipped_lines: dict[str, int] = {}
-            for filename in sorted(os.listdir(source_dir)):
-                source_path = os.path.join(source_dir, filename)
-                if not os.path.isfile(source_path):
-                    continue
-                if not filename.lower().endswith(".json"):
-                    continue
+            # Every data file of the backup AND the live game: install.bat
+            # puts these over the player's data/, and a file only the live
+            # game has (added by an update) must ship too (review H1).
+            # Nothing in the game folder or backup is written here.
+            manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
+            names = set()
+            for d in {source_dir, data_dir}:
+                names.update(fn for fn in os.listdir(d)
+                             if fn.lower().endswith(".json")
+                             and os.path.isfile(os.path.join(d, fn)))
+            for filename in sorted(names):
+                source_path = game_io.read_only_source(
+                    filename, os.path.join(data_dir, filename),
+                    os.path.join(source_dir, filename), manifest)
 
                 with open(source_path, "r", encoding="utf-8-sig") as f:
                     data = json.load(f)
@@ -790,6 +799,13 @@ class RPGMakerMVParser:
                 zf.writestr(arc_path,
                             json.dumps(data, ensure_ascii=False, indent=2))
                 data_file_count += 1
+            # Translated lines of files the game no longer has at all
+            for filename, file_entries in by_file.items():
+                if filename.lower().endswith(".json") and filename not in names:
+                    n = sum(1 for e in file_entries
+                            if e.translation != e.original)
+                    if n:
+                        skipped_lines[filename] = n
 
             # Write translated plugins.js
             plugin_entries = [
@@ -971,7 +987,7 @@ class RPGMakerMVParser:
                            game_title: str,
                            inject_wordwrap: bool = False,
                            font_name: Optional[str] = "Consolas") -> str:
-        """Generate install.bat: rename originals aside, move translations in."""
+        """Generate install.bat: copy originals aside, copy translations over (never removes a game file)."""
         dr = data_rel.replace("/", "\\")
         dr_base = os.path.basename(data_rel)     # e.g. "data"
         tr = f"_translation\\{dr}"                # e.g. "_translation\\data"
@@ -1008,20 +1024,29 @@ class RPGMakerMVParser:
             "",
             "set FAIL=0",
             "",
-            # Step 1: Rename original data/ to data_original/
+            # Step 1: COPY the original data/ to data_original/ (built under
+            # a temp name, renamed when complete).  data/ itself is never
+            # removed: files this package doesn't have (a newer game
+            # version's maps...) must stay in the game.
             f'echo [Step 1] Backing up original files...',
             f'if not exist "{dr}_original\\" (',
-            f'    ren "{dr}" "{dr_base}_original"',
+            f'    if exist "{dr}_rmt_tmp\\" rmdir /S /Q "{dr}_rmt_tmp"',
+            f'    xcopy "{dr}" "{dr}_rmt_tmp\\" /E /I /H /K /Y /Q >nul',
             "    if errorlevel 1 (",
-            f'        echo   ERROR: Failed to rename {dr}\\ to {dr}_original\\',
+            f'        echo   ERROR: Failed to back up {dr}\\ - nothing was changed',
+            f'        if exist "{dr}_rmt_tmp\\" rmdir /S /Q "{dr}_rmt_tmp"',
             "        set FAIL=1",
             "        goto :done",
             "    )",
-            f'    echo   Renamed {dr}\\ to {dr}_original\\',
+            f'    ren "{dr}_rmt_tmp" "{dr_base}_original"',
+            "    if errorlevel 1 (",
+            f'        echo   ERROR: Failed to name the backup {dr}_original\\ - nothing was changed',
+            "        set FAIL=1",
+            "        goto :done",
+            "    )",
+            f'    echo   Copied {dr}\\ to {dr}_original\\',
             ") else (",
             f'    echo   Backup already exists ^({dr}_original\\^)',
-            f'    echo   Removing current {dr}\\ to replace with translation...',
-            f'    rmdir /S /Q "{dr}"',
             ")",
             "",
         ]
@@ -1036,12 +1061,13 @@ class RPGMakerMVParser:
                 "",
             ]
 
-        # Step 2: Move translated folder into place
+        # Step 2: Copy the translated files over data/ (files the package
+        # doesn't have are kept)
         lines += [
             f'echo [Step 2] Installing translated files...',
-            f'move "{tr}" "{dr}"',
+            f'xcopy "{tr}" "{dr}\\" /E /I /H /K /Y /Q >nul',
             "if errorlevel 1 (",
-            f'    echo   ERROR: Failed to move translated {dr}\\ into place',
+            f'    echo   ERROR: Failed to copy translated files into {dr}\\',
             "    set FAIL=1",
             ") else (",
             f"    echo   Installed translated {dr}\\ ^({n_files} files^)",
@@ -1107,9 +1133,8 @@ class RPGMakerMVParser:
     def _build_uninstall_bat(data_rel: str, js_rel: str,
                              has_plugins: bool, game_title: str,
                              inject_wordwrap: bool = False) -> str:
-        """Generate uninstall.bat: remove translated data, rename originals back."""
+        """Generate uninstall.bat: copy the originals back over data/, then drop the backup."""
         dr = data_rel.replace("/", "\\")
-        dr_base = os.path.basename(data_rel)
         lines = [
             "@echo off",
             "chcp 65001 >nul 2>&1",
@@ -1132,16 +1157,16 @@ class RPGMakerMVParser:
             "",
             "set FAIL=0",
             "",
-            # Remove translated data/ and rename original back
-            f'echo Removing translated {dr}\\...',
-            f'if exist "{dr}\\" rmdir /S /Q "{dr}"',
-            "",
+            # Copy the originals back over data/ (never delete data/: a
+            # file added after the install, e.g. by a game update, stays);
+            # the backup is removed only when the copy succeeded.
             f'echo Restoring {dr}_original\\ to {dr}\\...',
-            f'ren "{dr}_original" "{dr_base}"',
+            f'xcopy "{dr}_original" "{dr}\\" /E /I /H /K /Y /Q >nul',
             "if errorlevel 1 (",
-            f'    echo   ERROR: Failed to rename {dr}_original\\ back to {dr}\\',
+            f'    echo   ERROR: Failed to copy {dr}_original\\ back to {dr}\\ - the backup was kept',
             "    set FAIL=1",
             ") else (",
+            f'    rmdir /S /Q "{dr}_original"',
             "    echo   Data files restored.",
             ")",
         ]

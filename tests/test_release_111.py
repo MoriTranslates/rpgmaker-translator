@@ -412,3 +412,112 @@ def test_refresh_keeps_the_old_backup_and_stops_if_it_cannot(tmp_path):
     assert (bak / "Map.json").read_text(encoding="utf-8") == "新しい"
     assert (tmp_path / "data_original.replaced" / "Map.json.backup-1"
             ).read_text(encoding="utf-8") == "古い"
+
+
+# ── MV/MZ install package (review H1) ────────────────────────────────
+
+def _zip_json(zp, arc):
+    import zipfile
+    with zipfile.ZipFile(zp) as zf:
+        if arc not in zf.namelist():
+            return None
+        return json.loads(zf.read(arc).decode("utf-8"))
+
+
+def test_patch_zip_ships_data_files_only_the_live_game_has(mv_game, mv_parser,
+                                                           tmp_path):
+    """Review H1 probe: data_original/ with no manifest, Map002.json only in
+    the live game -> it was left out of the zip, silently."""
+    import shutil
+    data = os.path.join(mv_game, "data")
+    shutil.copytree(data, data + "_original")                 # 1.1.0 backup
+    shutil.copy(os.path.join(data, "Map001.json"),
+                os.path.join(data, "Map002.json"))             # update adds
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        if e.file == "Map002.json":
+            e.translation, e.status = "EN " + e.id, "translated"
+    assert any(e.file == "Map002.json" and e.translation for e in entries)
+    zp = str(tmp_path / "p.zip")
+    mv_parser.export_patch_zip(mv_game, entries, zp)
+    shipped = _zip_json(zp, "_translation/data/Map002.json")
+    assert shipped is not None
+    assert "EN Map002.json" in json.dumps(shipped, ensure_ascii=False)
+
+
+def test_patch_zip_reads_an_update_without_touching_the_backup(
+        mv_game, mv_parser, tmp_path):
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "reviewed"
+    mv_parser.save_project(mv_game, entries)
+    _update_items(mv_game)
+    data = os.path.join(mv_game, "data")
+    before = _tree_hashes(data, data + "_original")
+    zp = str(tmp_path / "p.zip")
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.export_patch_zip(mv_game, entries, zp)
+    assert ei.value.changed == {"Items.json": 1}
+    assert _tree_hashes(data, data + "_original") == before   # read-only
+    items = _zip_json(zp, "_translation/data/Items.json")
+    assert items[1]["name"] == "ハイポーション"          # the update, kept
+    assert any(isinstance(i, dict) and i.get("name") == "アップデート品"
+               for i in items)
+
+
+def test_patch_zip_counts_lines_of_a_file_the_game_no_longer_has(
+        mv_game, mv_parser, tmp_path):
+    entries = mv_parser.load_project(mv_game)
+    entries.append(_entry("Map077.json/1/0/0", "Map077.json", "dialog",
+                          "消えた", "Gone"))
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.export_patch_zip(mv_game, entries, str(tmp_path / "p.zip"))
+    assert ei.value.changed == {"Map077.json": 1}
+
+
+def test_install_bat_never_removes_or_renames_data():
+    from translator.rpgmaker_mv import RPGMakerMVParser
+    for rel in ("data", "www/data"):
+        dr = rel.replace("/", "\\")
+        inst = RPGMakerMVParser._build_install_bat(rel, "js", 3, True, "T")
+        un = RPGMakerMVParser._build_uninstall_bat(rel, "js", True, "T")
+        assert f'rmdir /S /Q "{dr}"' not in inst
+        assert f'ren "{dr}"' not in inst and f'move "_translation' not in inst
+        assert f'rmdir /S /Q "{dr}"' not in un
+
+
+@pytest.mark.skipif(os.name != "nt", reason="needs cmd.exe")
+def test_install_bat_keeps_files_the_package_does_not_have(mv_game, mv_parser,
+                                                           tmp_path):
+    """The player's game has a map our package lacks (a newer version):
+    install and uninstall must both keep it."""
+    import shutil
+    import subprocess
+    import zipfile
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "translated"
+    zp = str(tmp_path / "p.zip")
+    mv_parser.export_patch_zip(mv_game, entries, zp, game_title="T")
+    player = tmp_path / "player"
+    shutil.copytree(os.path.join(mv_game, "data"), player / "data")
+    (player / "data" / "Map099.json").write_text('{"x": "新"}',
+                                                 encoding="utf-8")
+    with zipfile.ZipFile(zp) as zf:
+        zf.extractall(player)
+    for script in ("install.bat", "uninstall.bat"):
+        r = subprocess.run(["cmd", "/c", str(player / script)], cwd=player,
+                           stdin=subprocess.DEVNULL, capture_output=True,
+                           timeout=60)
+        out = r.stdout.decode("utf-8", "replace")
+        assert r.returncode == 0 and "FAILED" not in out, out
+        assert (player / "data" / "Map099.json").is_file(), script
+        if script == "install.bat":
+            items = json.loads((player / "data" / "Items.json")
+                               .read_text(encoding="utf-8-sig"))
+            assert items[1]["name"].startswith("EN ")
+            assert (player / "data_original" / "Map099.json").is_file()
+    items = json.loads((player / "data" / "Items.json")
+                       .read_text(encoding="utf-8-sig"))
+    assert not items[1]["name"].startswith("EN ")
+    assert not (player / "data_original").exists()

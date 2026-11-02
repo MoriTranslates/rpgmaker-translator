@@ -661,6 +661,25 @@ def refresh_changed_originals(pairs, manifest: ExportManifest) -> RefreshResult:
     return result
 
 
+def read_only_source(key: str, live: str, bak: str,
+                     manifest: ExportManifest) -> str:
+    """Which copy of a game file to translate, without writing anything.
+
+    For packages built from the game (the MV/MZ install zip): the backup's
+    original, unless the live file is a game update the backup doesn't have
+    yet (same rule as ``refresh_changed_originals``, but nothing is copied),
+    or the backup has no copy at all.
+    """
+    if not os.path.isfile(bak):
+        return live
+    if (manifest.exists and os.path.isfile(live)
+            and not manifest.is_ours(key, live)
+            and not _same_content(live, bak)
+            and not _looks_translated(live, bak)):
+        return live
+    return bak
+
+
 def refreshed_note(refreshed: list[str]) -> str:
     """User-facing note for files whose backup was re-baselined (or not)."""
     parts = []
