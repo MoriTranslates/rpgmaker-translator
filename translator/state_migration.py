@@ -55,7 +55,8 @@ _MV_EVENT_ID_RE = re.compile(
 
 # Ren'Py dialogue / choice IDs:  <file>/<label>/<kind>_<n>
 _RENPY_EVENT_ID_RE = re.compile(
-    r'^(?P<prefix>[^/]+/[^/]+)/(?P<kind>dialog|choice)_(?P<num>\d+)'
+    # file (may sit in a subfolder of game/, e.g. "chapters/ch2.rpy") / label
+    r'^(?P<prefix>(?:[^/]+/)*?[^/]+\.rpy/[^/]+)/(?P<kind>dialog|choice)_(?P<num>\d+)'
     r'(?P<rest>)$')
 
 # Event names inside MV prefixes are display text (often translated in an

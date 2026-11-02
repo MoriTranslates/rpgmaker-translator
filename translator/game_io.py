@@ -171,10 +171,13 @@ def backup_tree_once(src_dir: str, backup_dir: str,
             os.makedirs(tmp)
             for name in only:
                 s = os.path.join(src_dir, name)
+                d = os.path.join(tmp, name)
+                if os.path.dirname(name):      # e.g. "chapters/ch2.rpy"
+                    os.makedirs(os.path.dirname(d), exist_ok=True)
                 if os.path.isdir(s):
-                    shutil.copytree(s, os.path.join(tmp, name))
+                    shutil.copytree(s, d)
                 elif os.path.isfile(s):
-                    shutil.copy2(s, os.path.join(tmp, name))
+                    shutil.copy2(s, d)
         os.rename(tmp, backup_dir)
     except OSError as exc:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -13,15 +13,19 @@ log = logging.getLogger(__name__)
 
 # Character definition: define alias = Character("Name", ...)
 _CHAR_DEF_RE = re.compile(
-    r'^define\s+(\w+)\s*=\s*Character\(\s*"([^"]*)"', re.MULTILINE)
+    r'^define\s+(\w+)\s*=\s*Character\(\s*"((?:[^"\\\n]|\\.)*)"', re.MULTILINE)
+
+# What may follow the string of a say statement and must be written back
+# unchanged: `with dissolve`, `nointeract`, `id line_01` (any order).
+_SAY_TAIL = r'((?:\s+(?:nointeract|id\s+[\w.]+|with\s+[^"#\s][^"#]*?))*)'
 
 # Dialogue: alias "text"
 _DIALOGUE_RE = re.compile(
-    r'^(\s+)(\w+)\s+"((?:[^"\\]|\\.)*)"\s*$')
+    r'^(\s+)(\w+)\s+"((?:[^"\\]|\\.)*)"' + _SAY_TAIL + r'\s*$')
 
 # Narration: "text" (indented, no alias, not a choice, not a define)
 _NARRATION_RE = re.compile(
-    r'^(\s+)"((?:[^"\\]|\\.)*)"\s*$')
+    r'^(\s+)"((?:[^"\\]|\\.)*)"' + _SAY_TAIL + r'\s*$')
 
 # Menu choice: "Choice text":  (or "Choice text" if condition:)
 _CHOICE_RE = re.compile(
@@ -86,6 +90,31 @@ _TITLE_RE = re.compile(
     r'define\s+config\.name\s*=\s*_?\(\s*"([^"]*)"\s*\)')
 
 
+# Folders under game/ that never hold the game's own script: Ren'Py's
+# translation files (tl/), its bytecode cache and save folders.
+_SKIP_DIRS = {"tl", "cache", "saves"}
+
+
+def _rpy_files(game_dir: str) -> list[str]:
+    """Every .rpy under *game_dir*, as sorted "/"-separated relative paths.
+
+    Real games keep their script in subfolders (game/scripts/ch1.rpy ...),
+    so the whole tree is scanned -- except tl/ (Ren'Py's own translation
+    files) and cache/saves.
+    """
+    out = []
+    for dirpath, dirnames, filenames in os.walk(game_dir):
+        rel_dir = os.path.relpath(dirpath, game_dir)
+        if rel_dir == ".":
+            dirnames[:] = [d for d in dirnames if d.lower() not in _SKIP_DIRS]
+        dirnames.sort()
+        for fn in filenames:
+            if fn.endswith(".rpy"):
+                rel = fn if rel_dir == "." else os.path.join(rel_dir, fn)
+                out.append(rel.replace(os.sep, "/"))
+    return sorted(out)
+
+
 def _read_rpy(fpath: str, lines: bool = False):
     """Read a .rpy file (UTF-8, BOM-tolerant, lossy fallback)."""
     try:
@@ -125,6 +154,28 @@ def _classify_line(line: str):
     return None, None
 
 
+def _escape_backslashes(text: str, original: str = "") -> str:
+    """Double every backslash that isn't a Ren'Py escape.
+
+    Entry text keeps Ren'Py's escapes as written in the script (``\\"``,
+    ``\\n``, ``\\\\``), so those stay.  ``\\ ``, ``\\%`` and ``\\'`` are
+    escapes too, but an LLM writes "a \\ b" meaning a backslash: they are
+    kept only when the original uses the same escape.  Anything else (a
+    lone backslash, one before a letter, at the end) is a literal
+    backslash and becomes ``\\\\`` so it shows in the game.
+    """
+    original = original or ""
+
+    def _fix(m):
+        seq = m.group(0)
+        if seq in ("\\\\", '\\"', "\\n"):
+            return seq
+        if len(seq) == 2 and seq[1] in " %'" and seq in original:
+            return seq
+        return "\\\\" + seq[1:]
+    return re.sub(r'\\(.|$)', _fix, text, flags=re.S)
+
+
 def _escape_rpy(text: str, original: str = "") -> str:
     """Escape a translation for a Ren'Py string literal.
 
@@ -138,6 +189,7 @@ def _escape_rpy(text: str, original: str = "") -> str:
       (e.g. ``[player]`` or ``{w=0.5}`` carried over from the source).
     """
     text = text.replace("\r\n", "\n").replace("\n", "\\n")
+    text = _escape_backslashes(text, original)
     text = re.sub(r'(?<!\\)"', r'\\"', text)
     keep = set(RENPY_TAG_RE.findall(original or ""))
     keep.update(RENPY_INTERP_RE.findall(original or ""))
@@ -165,7 +217,7 @@ class RenPyParser:
         if not os.path.isdir(game_dir):
             return False
         # Must have at least one .rpy file
-        has_rpy = any(f.endswith(".rpy") for f in os.listdir(game_dir))
+        has_rpy = bool(_rpy_files(game_dir))
         # Should also have renpy/ folder or a .py launcher
         has_renpy = (os.path.isdir(os.path.join(path, "renpy")) or
                      any(f.endswith(".py") for f in os.listdir(path)))
@@ -193,25 +245,22 @@ class RenPyParser:
                     return bak
             return os.path.join(game_dir, fname)
 
+        self.load_warnings: list[str] = []
+        rpy_files = _rpy_files(game_dir)
+
         # Parse character definitions first (for speaker context)
         self._char_names = {}
-        for fname in sorted(os.listdir(game_dir)):
-            if fname.endswith(".rpy"):
-                fpath = src_path(fname)
-                self._parse_char_defs(fpath)
+        for fname in rpy_files:
+            self._parse_char_defs(src_path(fname))
 
         # Extract character names from names.rpy (or wherever defines are)
-        for fname in sorted(os.listdir(game_dir)):
-            if not fname.endswith(".rpy"):
-                continue
+        for fname in rpy_files:
             fpath = src_path(fname)
             entries.extend(self._extract_char_name_entries(fpath, fname))
 
         # Extract translatable strings from each .rpy file
-        for fname in sorted(os.listdir(game_dir)):
-            if not fname.endswith(".rpy"):
-                continue
-            if fname in _SKIP_FILES:
+        for fname in rpy_files:
+            if os.path.basename(fname) in _SKIP_FILES:
                 continue
             fpath = src_path(fname)
             if not os.path.isfile(fpath):
@@ -222,6 +271,7 @@ class RenPyParser:
                 entries.extend(file_entries)
             except Exception as e:
                 log.error("Failed to parse %s: %s", fname, e)
+                self.load_warnings.append(f"{fname}: {e}")
 
         log.info("Loaded %d entries from Ren'Py project", len(entries))
         return entries
@@ -318,9 +368,8 @@ class RenPyParser:
         """Load character definitions for gender dialog."""
         game_dir = os.path.join(project_dir, "game")
         self._char_names = {}
-        for fname in sorted(os.listdir(game_dir)):
-            if fname.endswith(".rpy"):
-                self._parse_char_defs(os.path.join(game_dir, fname))
+        for fname in _rpy_files(game_dir):
+            self._parse_char_defs(os.path.join(game_dir, fname))
 
         actors = []
         for i, (alias, name) in enumerate(self._char_names.items(), 1):
@@ -362,9 +411,17 @@ class RenPyParser:
         # Create backup on first export (built under a temp name and
         # renamed when complete, so a partial copy is never trusted)
         manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
-        rpy_names = sorted(f for f in os.listdir(game_dir) if f.endswith(".rpy"))
+        rpy_names = _rpy_files(game_dir)
         if game_io.backup_tree_once(game_dir, backup_dir, only=rpy_names):
             manifest.save()
+        # Scripts the backup has no copy of yet (it was made by a version
+        # that only read game/*.rpy, or before a game update added files):
+        # back them up now, before they are ever written.
+        for fname in rpy_names:
+            bak = os.path.join(backup_dir, fname)
+            if not os.path.exists(bak):
+                os.makedirs(os.path.dirname(bak), exist_ok=True)
+                game_io.backup_file_once(os.path.join(game_dir, fname), bak)
         self.last_export_notes: list[str] = []
         refreshed = game_io.refresh_changed_originals(
             [(f, os.path.join(game_dir, f), os.path.join(backup_dir, f))
@@ -448,9 +505,9 @@ class RenPyParser:
                 condition = m.group(3) or ""
                 new_line = f'{indent}"{escaped}"{condition}:\n'
             elif kind == "dialog":
-                new_line = f'{indent}{m.group(2)} "{escaped}"\n'
+                new_line = f'{indent}{m.group(2)} "{escaped}"{m.group(4) or ""}\n'
             else:
-                new_line = f'{indent}"{escaped}"\n'
+                new_line = f'{indent}"{escaped}"{m.group(3) or ""}\n'
             output_lines[line_idx] = new_line
             changed = True
 
@@ -475,10 +532,10 @@ class RenPyParser:
             raise FileNotFoundError(
                 "No game_original/ backup exists. Export to game first to create one.")
         restored = 0
-        for fname in os.listdir(backup_dir):
-            if fname.endswith(".rpy"):
-                src = os.path.join(backup_dir, fname)
-                dst = os.path.join(game_dir, fname)
-                game_io.atomic_copy(src, dst)
-                restored += 1
+        for fname in _rpy_files(backup_dir):
+            src = os.path.join(backup_dir, fname)
+            dst = os.path.join(game_dir, fname)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            game_io.atomic_copy(src, dst)
+            restored += 1
         log.info("Restored %d original .rpy files", restored)

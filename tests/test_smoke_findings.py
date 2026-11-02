@@ -434,7 +434,12 @@ def test_ace_database_field_changed_by_update_is_kept(tmp_path):
     assert str(out[1].attributes["@name"]) == "ハイポーション"
 
 
-# ── Ren'Py: lines that are never extracted (NOT fixed) ───────────────
+# ── Ren'Py: lines that were never extracted, escapes (FIXED) ──────────
+#
+# Only game/*.rpy was read (real games keep scripts in subfolders), say
+# lines ending in `with ...` / `nointeract` were skipped, a lone backslash
+# in a translation became Ren'Py's "\ " (a space), and a character name
+# containing \" was cut at the escaped quote.
 
 def _renpy_game(tmp_path, files):
     game = tmp_path / "RenGame"
@@ -442,31 +447,131 @@ def _renpy_game(tmp_path, files):
     for rel, text in files.items():
         p = game / "game" / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding="utf-8")
+        p.write_bytes(text.encode("utf-8"))
     return game
 
 
-@pytest.mark.xfail(strict=True, reason="smoke finding: game/ subfolders are not scanned")
+def _renpy_export(game, fn):
+    from translator.renpy import RenPyParser
+    p = RenPyParser()
+    entries = p.load_project(str(game))
+    for e in entries:
+        e.translation, e.status = fn(e), "translated"
+    p.save_project(str(game), entries)
+    return entries
+
+
 def test_renpy_scripts_in_subfolders_are_extracted(tmp_path):
     from translator.renpy import RenPyParser
     game = _renpy_game(tmp_path, {
         "script.rpy": 'label start:\n    "最初の台詞"\n',
         "chapters/ch2.rpy": 'label ch2:\n    "第二章の台詞"\n',
+        "tl/english/script.rpy": 'translate english start_1:\n    "訳"\n',
     })
-    originals = {e.original for e in RenPyParser().load_project(str(game))}
-    assert "第二章の台詞" in originals
+    entries = RenPyParser().load_project(str(game))
+    by_orig = {e.original: e for e in entries}
+    assert "第二章の台詞" in by_orig
+    assert by_orig["第二章の台詞"].id == "chapters/ch2.rpy/ch2/dialog_0"
+    assert "訳" not in by_orig                       # tl/ is not game script
 
 
-@pytest.mark.xfail(strict=True, reason="smoke finding: say lines with a trailing clause are skipped")
+def test_renpy_subfolder_export_backup_and_restore(tmp_path):
+    from translator.renpy import RenPyParser
+    src = 'label ch2:\n    "第二章の台詞"\n'
+    game = _renpy_game(tmp_path, {"script.rpy": 'label start:\n    "一"\n',
+                                  "chapters/ch2.rpy": src})
+    _renpy_export(game, lambda e: "EN")
+    live = game / "game" / "chapters" / "ch2.rpy"
+    assert '"EN"' in live.read_text(encoding="utf-8")
+    assert (game / "game_original" / "chapters" / "ch2.rpy").read_bytes() \
+        == src.encode("utf-8")
+    RenPyParser().restore_originals(str(game))
+    assert live.read_bytes() == src.encode("utf-8")
+
+
+def test_renpy_old_backup_gets_subfolder_scripts_before_writing(tmp_path):
+    """A backup from a version that only copied game/*.rpy has no copy of
+    subfolder scripts: they must be backed up before the first write."""
+    src = 'label ch2:\n    "第二章の台詞"\n'
+    game = _renpy_game(tmp_path, {"script.rpy": 'label start:\n    "一"\n',
+                                  "chapters/ch2.rpy": src})
+    (game / "game_original").mkdir()
+    (game / "game_original" / "script.rpy").write_bytes(
+        'label start:\n    "一"\n'.encode("utf-8"))
+    _renpy_export(game, lambda e: "EN")
+    assert (game / "game_original" / "chapters" / "ch2.rpy").read_bytes() \
+        == src.encode("utf-8")
+
+
 def test_renpy_say_with_trailing_clause_is_extracted(tmp_path):
     from translator.renpy import RenPyParser
     game = _renpy_game(tmp_path, {
         "script.rpy": ('define e = Character("エリカ")\n'
                        'label start:\n'
-                       '    e "こんにちは" with dissolve\n'),
+                       '    e "こんにちは" with dissolve\n'
+                       '    e "待って" nointeract\n'
+                       '    "語り" with Dissolve(0.5)\n'
+                       '    e "台詞" id start_abc123\n'),
     })
     originals = {e.original for e in RenPyParser().load_project(str(game))}
-    assert "こんにちは" in originals
+    assert {"こんにちは", "待って", "語り", "台詞"} <= originals
+
+
+def test_renpy_trailing_clause_is_written_back(tmp_path):
+    game = _renpy_game(tmp_path, {
+        "script.rpy": ('label start:\n'
+                       '    e "こんにちは" with dissolve\n'
+                       '    "語り" nointeract\n'),
+    })
+    _renpy_export(game, lambda e: "EN " + e.original)
+    text = (game / "game" / "script.rpy").read_text(encoding="utf-8")
+    assert '    e "EN こんにちは" with dissolve\n' in text
+    assert '    "EN 語り" nointeract\n' in text
+
+
+def test_renpy_lone_backslash_survives():
+    from translator.renpy import _escape_rpy
+    assert _escape_rpy("a \\ b") == "a \\\\ b"            # literal backslash
+    assert _escape_rpy("end\\") == "end\\\\"
+    assert _escape_rpy("C:\\dir") == "C:\\\\dir"
+    # real escapes stay escapes
+    assert _escape_rpy('say \\"hi\\"') == 'say \\"hi\\"'
+    assert _escape_rpy("one\\ntwo") == "one\\ntwo"
+    assert _escape_rpy("a\\\\b") == "a\\\\b"
+    # "\ " is kept only when the original uses that escape
+    assert _escape_rpy("x\\ y", original="元\\ 文") == "x\\ y"
+
+
+def test_renpy_lone_backslash_round_trips_through_export(tmp_path):
+    from translator.renpy import RenPyParser
+    game = _renpy_game(tmp_path, {"script.rpy": 'label start:\n    "一"\n'})
+    _renpy_export(game, lambda e: "a \\ b")
+    text = (game / "game" / "script.rpy").read_text(encoding="utf-8")
+    assert '    "a \\\\ b"\n' in text           # Ren'Py shows: a \ b
+    again = RenPyParser().load_project(str(game))
+    assert again[0].original == "a \\\\ b"
+
+
+def test_renpy_character_name_with_escaped_quote(tmp_path):
+    from translator.renpy import RenPyParser
+    game = _renpy_game(tmp_path, {
+        "script.rpy": ('define m = Character("ミスター\\"X\\"", color="#fff")\n'
+                       'label start:\n    m "こんにちは"\n'),
+    })
+    names = [e for e in RenPyParser().load_project(str(game))
+             if e.field == "name"]
+    assert names and names[0].original == 'ミスター\\"X\\"'
+    _renpy_export(game, lambda e: 'Mr. "X"' if e.field == "name" else "Hi")
+    text = (game / "game" / "script.rpy").read_text(encoding="utf-8")
+    assert 'define m = Character("Mr. \\"X\\"", color="#fff")' in text
+
+
+def test_migration_recognises_subfolder_renpy_ids():
+    from translator.state_migration import _parse_event_id
+    assert _parse_event_id("chapters/ch2.rpy/ch2/dialog_3", "renpy") == \
+        ("chapters/ch2.rpy/ch2", "dialog", "3", "")
+    assert _parse_event_id("script.rpy/start/choice_0", "renpy") == \
+        ("script.rpy/start", "choice", "0", "")
 
 
 # ── Wolf: stale translation over an updated line (FIXED) ─────────────
