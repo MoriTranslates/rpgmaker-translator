@@ -293,6 +293,10 @@ class MainWindow(QMainWindow):
         """Switch between the welcome page and the project workspace."""
         if not show:
             self._refresh_recent_ui()
+        # The step bar belongs to a project (reset() shows it again); the
+        # welcome page has its own buttons
+        if not show:
+            self.pipeline_bar.setVisible(False)
         self._stack.setCurrentWidget(self.tabs if show else self._welcome)
 
     # Menu/toolbar action → Lucide icon (settings_action sits on the menubar

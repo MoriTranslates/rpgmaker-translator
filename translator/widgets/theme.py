@@ -55,11 +55,15 @@ DARK = {
     "accent_fill_hover": "#f7bd5e",
     "on_accent":    "#1a1206",
     "accent_alt":   "#6ea8ff",  # navy-coat blue: info, links, translated
-    "accent_soft":  "#33291a",  # amber wash for the current step
+    "accent_soft":  "#33291a",  # amber wash for the running step
+    "accent_quiet": "#c98a2e",  # secondary amber (tab underline, badges)
+    "alt_soft":     "#16294a",  # blue wash for active filter chips
+    "scroll_thumb": "#5a6690",  # 3:1 on field
     "error_soft":   "#3a1f1c",
     "ok_soft":      "#17302a",
     "ok":           "#8fd18a",
     "status_translated": "#6ea8ff",
+    "status_untranslated": "#c46a52",  # muted ember: still to do, not an error
     "warn":         "#f2c14e",
     "caution":      "#f2994a",
     "error":        "#f26b4f",  # ember
@@ -100,10 +104,14 @@ LIGHT = {
     "on_accent":    "#1b1206",
     "accent_alt":   "#2f5fb3",
     "accent_soft":  "#f6e3bd",
+    "accent_quiet": "#a8661a",
+    "alt_soft":     "#dbe7fb",
+    "scroll_thumb": "#9c8a66",
     "error_soft":   "#fbe1d6",
     "ok_soft":      "#e1f0dc",
     "ok":           "#2e7d32",
     "status_translated": "#2f5fb3",
+    "status_untranslated": "#b4532f",
     "warn":         "#8f5400",
     "caution":      "#b45309",
     "error":        "#c2410c",
@@ -180,7 +188,7 @@ STATUS_LABELS = {
 }
 
 _STATUS_FG = {
-    "untranslated": "error",
+    "untranslated": "status_untranslated",
     "translated":   "status_translated",
     "reviewed":     "ok",
     "skipped":      "text_dim",
@@ -512,7 +520,7 @@ QTabBar::tab:hover {{
 }}
 QTabBar::tab:selected {{
     color: {text};
-    border-bottom: 2px solid {accent};
+    border-bottom: 2px solid {accent_quiet};
 }}
 QSplitter::handle {{
     background-color: {border_strong};
@@ -537,7 +545,7 @@ QScrollBar:horizontal {{
     margin: 0;
 }}
 QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
-    background-color: {border_strong};
+    background-color: {scroll_thumb};
     border-radius: 3px;
     margin: 2px;
 }}
@@ -658,14 +666,18 @@ QComboBox[chip="true"]:focus, QToolButton[chip="true"]:focus {{
     padding: 2px 11px;
 }}
 QComboBox[chip="true"][active="true"], QToolButton[chip="true"]:checked {{
-    background-color: {accent_soft};
-    border-color: {accent};
-    color: {accent};
+    background-color: {alt_soft};
+    border-color: {accent_alt};
+    color: {accent_alt};
     font-weight: 600;
+}}
+QComboBox[chip="true"] {{
+    padding-right: 26px;
 }}
 QComboBox[chip="true"]::drop-down {{
     border: none;
-    width: 18px;
+    width: 22px;
+    subcontrol-position: center right;
 }}
 QStackedWidget#editorPane {{
     background-color: {panel};
@@ -675,7 +687,7 @@ QStackedWidget#editorPane QTabWidget::pane {{
 }}
 QWidget#projectHeader {{
     background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 {accent_soft}, stop:0.45 {panel}, stop:1 {panel});
+        stop:0 {accent_soft}, stop:0.3 {panel}, stop:1 {panel});
     border-bottom: 1px solid {border};
 }}
 QLabel#projectTitle {{
@@ -685,11 +697,11 @@ QLabel#projectTitle {{
 }}
 QLabel#engineBadge {{
     background-color: {raised};
-    color: {accent};
+    color: {text_soft};
     border: 1px solid {border_strong};
-    border-radius: 9px;
-    padding: 1px 8px;
-    font-size: 8.5pt;
+    border-radius: 10px;
+    padding: 1px 9px;
+    font-size: 9.5pt;
     font-weight: 600;
 }}
 QLabel#projectCounts {{
@@ -700,8 +712,7 @@ QProgressBar#headerProgress {{
     border-radius: 4px;
 }}
 QProgressBar#headerProgress::chunk {{
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 {accent_pressed}, stop:1 {accent});
+    background-color: {status_translated};
     border-radius: 4px;
 }}
 QLabel#emptyTitle {{
@@ -730,7 +741,10 @@ QToolButton[step]:hover {{
 QToolButton[step="pending"] {{
     color: {text_dim};
 }}
-QToolButton[step="next"], QToolButton[step="active"] {{
+QToolButton[step="next"] {{
+    color: {text};
+}}
+QToolButton[step="active"] {{
     background-color: {accent_soft};
     color: {accent};
     font-weight: 600;
@@ -752,16 +766,27 @@ QToolButton#stopButton:enabled {{
     font-weight: 600;
 }}
 QToolButton#applyButton {{
-    border: 1px solid {ok};
+    border: 1px solid {border_strong};
     border-radius: 6px;
     padding: 5px 12px;
-    color: {ok};
-    font-weight: 600;
+    color: {text_soft};
 }}
 QToolButton#applyButton:hover {{
-    background-color: {ok_soft};
+    background-color: {button};
+    color: {text};
+}}
+QToolButton#applyButton[ready="true"] {{
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {accent_fill_hover}, stop:1 {accent_fill});
+    border-color: {accent_fill};
+    color: {on_accent};
+    font-weight: 600;
+}}
+QToolButton#applyButton[ready="true"]:hover {{
+    background-color: {accent_fill_hover};
 }}
 QToolButton#applyButton:disabled {{
+    background: transparent;
     color: {text_dim};
     border-color: {border};
 }}
@@ -841,6 +866,10 @@ def stylesheet() -> str:
     if check:
         css += 'QCheckBox::indicator:checked { image: url("%s"); }\n' % check
     suffix = "dark" if is_dark() else "light"
+    chevron = icon_path(f"chevron-down-{suffix}.svg")
+    if chevron:
+        css += ('QComboBox[chip="true"]::down-arrow '
+                '{ image: url("%s"); width: 10px; height: 10px; }\n' % chevron)
     for arrow in ("up", "down"):
         path = icon_path(f"chevron-{arrow}-{suffix}.svg")
         if path:

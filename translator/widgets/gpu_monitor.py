@@ -48,8 +48,10 @@ class GPUMonitorPanel(QWidget):
         layout.addWidget(self._name_label)
 
         # Slim bars with the reading beside the caption, never on the fill
-        self._vram_label, self._vram_value, self._vram_bar =             self._add_meter(layout, "VRAM")
-        self._util_label, self._util_value, self._util_bar =             self._add_meter(layout, "GPU")
+        self._vram_label, self._vram_value, self._vram_bar = \
+            self._add_meter(layout, "VRAM")
+        self._util_label, self._util_value, self._util_bar = \
+            self._add_meter(layout, "GPU")
 
         # Temp + Power row
         stats_row = QHBoxLayout()
@@ -195,12 +197,12 @@ class GPUMonitorPanel(QWidget):
 
     @staticmethod
     def _color_bar(bar: QProgressBar, pct: int):
-        """Accent while there is room; warn only when the GPU is nearly full.
+        """Cool blue while there is room; amber, then red, only when nearly full.
 
         A model filling most of the VRAM is normal, so high-but-fine usage
         must not look like an alarm.
         """
-        token = "error" if pct >= 95 else "caution" if pct >= 90 else "accent"
+        token = "error" if pct >= 95 else "accent" if pct >= 90 else "accent_alt"
         bar.setStyleSheet(
             f"QProgressBar::chunk {{ background: {theme.c(token)}; "
             f"border-radius: 3px; }}")

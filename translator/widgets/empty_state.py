@@ -30,7 +30,7 @@ class EmptyState(QWidget):
         self._icon = QLabel()
         self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         theme.bind_icon(lambda ic: self._icon.setPixmap(ic.pixmap(48, 48)),
-                        icon, "accent")
+                        icon, "accent_quiet")
         layout.addWidget(self._icon)
 
         self.title = QLabel(title)

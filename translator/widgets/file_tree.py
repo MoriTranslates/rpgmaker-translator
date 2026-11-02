@@ -160,7 +160,7 @@ class FileTreeWidget(QTreeWidget):
             item = parent.child(i)
             name = item.text(0)
             if item.data(0, Qt.ItemDataRole.UserRole) == "__ALL__":
-                ic = theme.icon("layers", "accent")
+                ic = theme.icon("layers", "accent_quiet")
             elif item.childCount():
                 ic = theme.icon("folder", "text_muted")
             elif name.startswith("Map"):

@@ -19,7 +19,7 @@ class ProjectHeader(QWidget):
 
         self._icon = QLabel()
         theme.bind_icon(lambda ic: self._icon.setPixmap(ic.pixmap(20, 20)),
-                        "scroll-text", "accent")
+                        "scroll-text", "accent_quiet")
         layout.addWidget(self._icon)
 
         self.title = QLabel("")

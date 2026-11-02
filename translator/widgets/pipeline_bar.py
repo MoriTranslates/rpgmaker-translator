@@ -1,9 +1,10 @@
 """Pipeline bar — the workspace's one action bar.
 
-Each workflow step is a button (done = tick, current = accent, upcoming =
-dim) that runs that step; a primary "Next:" button nudges the next pending
-step, and Stop sits on the right.  Colors live in theme.py and are picked
-by the ``step`` dynamic property.
+Each workflow step is a button (done = tick, running = accent, upcoming =
+plain) that runs that step; one primary button carries the next pending
+step — "Next: …", or "Apply to Game" once only the export is left — and
+Stop sits on the right.  Colors live in theme.py and are picked by the
+``step`` / ``ready`` dynamic properties.
 """
 
 from PyQt6.QtWidgets import (
@@ -44,8 +45,10 @@ class _StepButton(QToolButton):
     def _refresh(self):
         if self._state == "done":
             self.setIcon(theme.icon("check", "ok"))
-        elif self._state in ("active", "next"):
+        elif self._state == "active":
             self.setIcon(theme.icon(_STEP_ICONS.get(self.key, "circle"), "accent"))
+        elif self._state == "next":
+            self.setIcon(theme.icon(_STEP_ICONS.get(self.key, "circle"), "text_soft"))
         else:
             self.setIcon(theme.icon(_STEP_ICONS.get(self.key, "circle"), "text_dim"))
         self.setToolTip(f"Step {self.number}: {self.name} — "
@@ -212,8 +215,23 @@ class PipelineBar(QWidget):
         for arrow in self._arrow_labels:
             arrow.setPixmap(theme.icon("chevron-right", "text_dim").pixmap(14, 14))
         self.next_btn.setIcon(theme.icon("arrow-right", "on_accent"))
-        if self.apply_button is not None:
-            self.apply_button.setIcon(theme.icon("gamepad-2", "ok"))
+        self._style_apply()
+
+    def _style_apply(self):
+        """Apply to Game is quiet until it is the next thing to do."""
+        btn = self.apply_button
+        if btn is None:
+            return
+        ready = bool(btn.property("ready"))
+        btn.setIcon(theme.icon("gamepad-2", "on_accent" if ready else "text_soft"))
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+
+    def _set_apply_ready(self, ready: bool):
+        if (self.apply_button is not None
+                and bool(self.apply_button.property("ready")) != ready):
+            self.apply_button.setProperty("ready", ready)
+            self._style_apply()
 
     def set_engine(self, engine_key_or_steps):
         """Switch pipeline steps for the given engine.
@@ -242,6 +260,7 @@ class PipelineBar(QWidget):
         for label in self._step_labels.values():
             label.state = "pending"
         self.next_btn.setVisible(False)
+        self._set_apply_ready(False)
         self.hint_label.setText("")
         self.setVisible(True)
         self._nudge_next()
@@ -257,6 +276,7 @@ class PipelineBar(QWidget):
         idx = [k for k, _ in self._steps].index(step_key)
         self._current_index = idx
         self.next_btn.setVisible(False)
+        self._set_apply_ready(False)
         self.hint_label.setText(f"{self._steps[idx][1]} in progress…")
 
     def mark_done(self, step_key: str):
@@ -286,11 +306,15 @@ class PipelineBar(QWidget):
             if self._step_labels[key].state == "pending":
                 self._step_labels[key].state = "next"
                 self._current_index = i
+                # Only the export is left: Apply to Game is the one action
+                last = key == "export" and self.apply_button is not None
                 self.next_btn.setText(f"Next: {name}")
-                self.next_btn.setVisible(True)
+                self.next_btn.setVisible(not last)
+                self._set_apply_ready(last)
                 self.hint_label.setText("")
                 return
         self.next_btn.setVisible(False)
+        self._set_apply_ready(False)
         self.hint_label.setText("All steps complete!")
 
     def _on_next_clicked(self):
