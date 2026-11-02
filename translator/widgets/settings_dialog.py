@@ -85,7 +85,10 @@ class SettingsDialog(QDialog):
         self.engine_handlers = engine_handlers or {}
         self.setWindowTitle("Settings")
         self.setMinimumSize(620, 520)
-        self.resize(680, 640)
+        # Tall enough for the Options page on a 1080p screen; it scrolls on
+        # smaller ones (the scrollbar thumb is visible, so nothing looks cut)
+        screen = self.screen().availableGeometry() if self.screen() else None
+        self.resize(700, min(760, screen.height() - 80) if screen else 640)
         self._build_ui()
         self._load_current()
 
@@ -476,6 +479,11 @@ class SettingsDialog(QDialog):
         self.engine_table.verticalHeader().setVisible(False)
         self.engine_table.setSelectionMode(
             QTableWidget.SelectionMode.NoSelection)
+        # Light rows: hairlines between engines only, no cell grid
+        self.engine_table.setShowGrid(False)
+        self.engine_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.engine_table.horizontalHeader().setDefaultAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         # Load global defaults from the Options tab values
         from ..engine_handler import EngineHandler

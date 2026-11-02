@@ -163,7 +163,7 @@ class EventViewerPanel(QWidget):
         v_splitter.setCollapsible(0, False)
         v_splitter.setSizes([900, 340])
 
-        detail_layout.addWidget(v_splitter)
+        detail_layout.addWidget(v_splitter, 1)
 
         self._hint_label = QLabel(
             "↑/↓ move between lines  ·  Space toggles reviewed  "
