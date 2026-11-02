@@ -15,24 +15,24 @@ from . import theme
 from .empty_state import EmptyStack, EmptyState
 
 
-# Status icons and theme color tokens
+# Status -> (Lucide icon, theme color token)
 _STATUS_TOKENS = {
-    "queued":      ("⏳", "text_muted"),
-    "translating": ("⚙", "accent"),
-    "done":        ("✔", "ok"),
-    "error":       ("✘", "error"),
-    "skipped":     ("⏭", "text_dim"),
-    "tm":          ("♻", "special"),
-    "glossary":    ("📖", "warn"),
+    "queued":      ("clock", "text_muted"),
+    "translating": ("sparkles", "accent_quiet"),
+    "done":        ("check", "ok"),
+    "error":       ("x", "error"),
+    "skipped":     ("minus", "text_dim"),
+    "tm":          ("history", "special"),
+    "glossary":    ("book-open", "warn"),
 }
 
 
 class _StatusLookup:
-    """``_STATUS[key]`` -> (icon, QColor) resolved against the current theme."""
+    """``_STATUS[key]`` -> (QIcon, QColor) resolved against the current theme."""
 
     def __getitem__(self, key):
-        icon, token = _STATUS_TOKENS[key]
-        return icon, theme.qcolor(token)
+        name, token = _STATUS_TOKENS[key]
+        return theme.icon(name, token), theme.qcolor(token)
 
 
 _STATUS = _StatusLookup()
@@ -213,12 +213,13 @@ class QueuePanel(QWidget):
         db_order.sort()
 
         dim = theme.qcolor("text_dim")
-        queued_color = _STATUS["queued"][1]
+        queued_icon, queued_color = _STATUS["queued"]
 
         def make_entry_item(e):
             orig = (e.original or "")[:120].replace("\n", " ")
             preview = (e.field or "entry")
-            child = QTreeWidgetItem([f"⏳ {preview}", "", orig, "", ""])
+            child = QTreeWidgetItem([preview, "", orig, "", ""])
+            child.setIcon(0, queued_icon)
             child.setData(0, Qt.ItemDataRole.UserRole, "queued")
             child.setData(1, Qt.ItemDataRole.UserRole, e.id)
             child.setForeground(0, queued_color)
@@ -228,8 +229,9 @@ class QueuePanel(QWidget):
 
         def make_event_node(key: str, group_entries: list, label: str):
             node = QTreeWidgetItem([
-                f"⏳ {label}", f"0/{len(group_entries)}", "", "", "",
+                label, f"0/{len(group_entries)}", "", "", "",
             ])
+            node.setIcon(0, queued_icon)
             node.setForeground(1, dim)
             node.setData(0, Qt.ItemDataRole.UserRole, key)
             self._event_items[key] = node
@@ -251,8 +253,9 @@ class QueuePanel(QWidget):
         if db_groups:
             db_total = sum(len(g) for g in db_groups.values())
             db_root = QTreeWidgetItem([
-                f"⏳ Database", f"0/{db_total}", "", "", "",
+                "Database", f"0/{db_total}", "", "", "",
             ])
+            db_root.setIcon(0, queued_icon)
             db_root.setForeground(1, dim)
             db_root.setData(0, Qt.ItemDataRole.UserRole, DB_KEY)
             self._event_items[DB_KEY] = db_root
@@ -267,7 +270,13 @@ class QueuePanel(QWidget):
                 db_root.addChild(file_node)
             self._tree.addTopLevelItem(db_root)
 
+        self._show_result_columns(False)
         self._update_summary()
+
+    def _show_result_columns(self, show: bool):
+        """Translation / Source stay hidden until the first line is done."""
+        for col in (3, 4):
+            self._tree.setColumnHidden(col, not show)
 
     def mark_entry_done(self, entry_id: str, translation: str,
                         source: str = "LLM"):
@@ -284,9 +293,10 @@ class QueuePanel(QWidget):
         self._done_count += 1
         icon, color = _STATUS["done"]
 
-        preview = item.text(0).split(" ", 1)[-1] if " " in item.text(0) else ""
-        item.setText(0, f"{icon} {preview}")
+        item.setIcon(0, icon)
         item.setData(0, Qt.ItemDataRole.UserRole, "done")
+        if self._tree.isColumnHidden(3):
+            self._show_result_columns(True)
         item.setForeground(0, color)
 
         trans_text = (translation or "")[:120].replace("\n", " ")
@@ -317,9 +327,10 @@ class QueuePanel(QWidget):
             return
         old_status = item.data(0, Qt.ItemDataRole.UserRole)
         icon, color = _STATUS["error"]
-        preview = item.text(0).split(" ", 1)[-1] if " " in item.text(0) else ""
-        item.setText(0, f"{icon} {preview}")
+        item.setIcon(0, icon)
         item.setData(0, Qt.ItemDataRole.UserRole, "error")
+        if self._tree.isColumnHidden(3):
+            self._show_result_columns(True)
         item.setForeground(0, color)
         item.setText(3, f"ERROR: {error_msg[:80]}")
         item.setForeground(3, color)
@@ -352,7 +363,9 @@ class QueuePanel(QWidget):
         for item in self._entry_items.values():
             status = item.data(0, Qt.ItemDataRole.UserRole)
             if status in _STATUS_TOKENS:
-                item.setForeground(0, _STATUS[status][1])
+                icon, color = _STATUS[status]
+                item.setIcon(0, icon)
+                item.setForeground(0, color)
         for key, node in self._event_items.items():
             node.setForeground(1, theme.qcolor("text_dim"))
             if key in self._event_counts:
@@ -398,7 +411,6 @@ class QueuePanel(QWidget):
         done, error, total = cnt["done"], cnt["error"], cnt["total"]
         node.setText(1, f"{done}/{total}" + (f" · {error} err" if error else ""))
 
-        label = _friendly_event_name(key)
         if done == total and error == 0:
             icon, color = _STATUS["done"]
         elif error > 0:
@@ -408,7 +420,7 @@ class QueuePanel(QWidget):
         else:
             icon, color = _STATUS["queued"]
         node.setForeground(0, color)
-        node.setText(0, f"{icon} {label}")
+        node.setIcon(0, icon)
 
     def _update_summary(self):
         total = len(self._entries)
@@ -424,14 +436,18 @@ class QueuePanel(QWidget):
         self._progress.setMaximum(total)
         self._progress.setValue(self._done_count)
         self._progress.show()
-        if self._done_count > 0 and elapsed > 0:
-            rate = elapsed / self._done_count
+        rate = elapsed / self._done_count if self._done_count else 0
+        if remaining > 0 and rate >= 0.05:
             eta = rate * remaining
             self._eta_label.setText(
-                f"ETA: {self._format_time(eta)} "
-                f"| Elapsed: {self._format_time(elapsed)}"
+                f"About {self._format_time(eta)} left "
+                f"·  {self._format_time(elapsed)} so far"
             )
-            self._speed_label.setText(f"{rate:.1f}s/entry")
+            self._speed_label.setText(f"{rate:.1f}s per line")
+        else:
+            # Nothing measurable yet (or nothing left): no "ETA: 0s"
+            self._eta_label.setText("")
+            self._speed_label.setText("")
 
     @staticmethod
     def _entry_matches(ch: QTreeWidgetItem, filter_text: str) -> bool:

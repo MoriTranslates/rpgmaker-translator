@@ -679,7 +679,7 @@ QComboBox[chip="true"]::drop-down {{
     width: 22px;
     subcontrol-position: center right;
 }}
-QStackedWidget#editorPane {{
+QStackedWidget#editorPane, QWidget#eventEditorPane {{
     background-color: {panel};
 }}
 QStackedWidget#editorPane QTabWidget::pane {{

@@ -113,7 +113,7 @@ class EventViewerPanel(QWidget):
         h.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
 
-        # Behavior — read-only table, editing via panel below
+        # Behavior — read-only table, editing via the side pane
         self._detail_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self._detail_table.setEditTriggers(
@@ -125,14 +125,17 @@ class EventViewerPanel(QWidget):
         self._detail_table.setAlternatingRowColors(False)
         self._detail_table.currentCellChanged.connect(self._on_row_selected)
 
-        # Vertical splitter: table (top 70%) + editor (bottom 30%)
-        v_splitter = QSplitter(Qt.Orientation.Vertical)
+        # Same pattern as the main tab: the scene gets the height, the
+        # editor sits in a pane on the right (original above translation)
+        v_splitter = QSplitter(Qt.Orientation.Horizontal)
         v_splitter.addWidget(self._detail_table)
 
-        # Editor panel
+        # Editor pane
         editor_widget = QWidget()
-        editor_layout = QHBoxLayout(editor_widget)
-        editor_layout.setContentsMargins(0, 2, 0, 0)
+        editor_widget.setObjectName("eventEditorPane")
+        editor_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        editor_layout = QVBoxLayout(editor_widget)
+        editor_layout.setContentsMargins(8, 4, 8, 4)
 
         orig_box = QGroupBox("Original (JP)")
         orig_inner = QVBoxLayout(orig_box)
@@ -140,7 +143,7 @@ class EventViewerPanel(QWidget):
         self._orig_editor.setReadOnly(True)
         self._orig_editor.setAcceptRichText(False)
         orig_inner.addWidget(self._orig_editor)
-        editor_layout.addWidget(orig_box)
+        editor_layout.addWidget(orig_box, 2)
 
         trans_box = QGroupBox("Translation (EN) — editable")
         trans_inner = QVBoxLayout(trans_box)
@@ -151,10 +154,14 @@ class EventViewerPanel(QWidget):
         self._trans_editor.customContextMenuRequested.connect(self._show_trans_context_menu)
         self._spell = SpellHighlighter(self._trans_editor.document())
         trans_inner.addWidget(self._trans_editor)
-        editor_layout.addWidget(trans_box)
+        editor_layout.addWidget(trans_box, 3)
 
+        editor_widget.setMinimumWidth(240)
         v_splitter.addWidget(editor_widget)
-        v_splitter.setSizes([500, 200])
+        v_splitter.setStretchFactor(0, 1)
+        v_splitter.setStretchFactor(1, 0)
+        v_splitter.setCollapsible(0, False)
+        v_splitter.setSizes([900, 340])
 
         detail_layout.addWidget(v_splitter)
 
