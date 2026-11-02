@@ -18,6 +18,12 @@ from .project_model import TranslationEntry
 from . import JAPANESE_RE, game_io
 
 
+def _norm_cell(text: str) -> str:
+    """A JP cell as the parser stores it (stripped; load reads with newline
+    translation, export reads raw, so compare with \n line ends)."""
+    return text.replace("\r\n", "\n").strip()
+
+
 def _looks_like_free_text_cell(cell: str) -> bool:
     """Empty, or English prose (letters + a space) -- never an id/number."""
     cell = cell.strip()
@@ -64,8 +70,16 @@ class CSVGameParser:
                 continue
         return False
 
-    def load_project(self, project_dir: str, context_size: int | None = None
-                     ) -> list[TranslationEntry]:
+    def load_originals(self, project_dir: str) -> list[TranslationEntry]:
+        """Parse the game's ORIGINAL text, for merging a game update.
+
+        Each file is read from data_original/ when an export backed it up
+        (the live file holds English then), else from data/.
+        """
+        return self.load_project(project_dir, from_backup=True)
+
+    def load_project(self, project_dir: str, context_size: int | None = None,
+                     from_backup: bool = False) -> list[TranslationEntry]:
         """Parse all CSV game files and extract translatable entries."""
         if context_size is not None:
             self.context_size = context_size
@@ -80,6 +94,9 @@ class CSVGameParser:
             if not any(name.lower().endswith(ext) for ext in self.extensions):
                 continue
             fpath = os.path.join(data_dir, name)
+            backup = os.path.join(project_dir, "data_original", name)
+            if from_backup and os.path.isfile(backup):
+                fpath = backup
             file_entries = self._parse_file(fpath, name)
             if file_entries:
                 entries.extend(file_entries)
@@ -191,8 +208,10 @@ class CSVGameParser:
             [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
              for fn in sorted(all_files)], manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
         problems: list[str] = []
+        # file -> translations not written because the game text changed
+        changed_lines: dict[str, int] = {}
 
         for filename in sorted(all_files):
             file_entries = entries_by_file.get(filename, [])
@@ -242,7 +261,7 @@ class CSVGameParser:
                     f"data; {len(file_entries)} translations)")
                 continue
 
-            # Build translation lookup: row_idx -> translation
+            # Build translation lookup: row_idx -> (original, translation)
             trans_map = {}
             for entry in file_entries:
                 # Parse row index from entry ID
@@ -251,20 +270,30 @@ class CSVGameParser:
                     if p.startswith("row_"):
                         try:
                             row_idx = int(p[4:])
-                            trans_map[row_idx] = entry.translation
+                            trans_map[row_idx] = (entry.original,
+                                                  entry.translation)
                         except ValueError:
                             pass
 
-            # Apply translations
+            # Apply translations -- only to rows whose Japanese cell still
+            # holds the entry's original (rows are addressed by number; a
+            # game update can insert, remove or change rows).
             applied = 0
-            for row_idx, translation in trans_map.items():
+            for row_idx, (original, translation) in trans_map.items():
                 # row_N is the 1-based record number (header = row_1)
-                if 2 <= row_idx <= len(rows):
-                    # Ensure row has enough columns
-                    while len(rows[row_idx - 1]) <= en_col:
-                        rows[row_idx - 1].append("")
-                    rows[row_idx - 1][en_col] = translation
-                    applied += 1
+                row = rows[row_idx - 1] if 2 <= row_idx <= len(rows) else None
+                now = (row[jp_col] if row is not None and jp_col < len(row)
+                       else None)
+                if now is None or _norm_cell(now) != _norm_cell(original):
+                    if translation != original:
+                        changed_lines[filename] = (
+                            changed_lines.get(filename, 0) + 1)
+                    continue
+                # Ensure row has enough columns
+                while len(row) <= en_col:
+                    row.append("")
+                row[en_col] = translation
+                applied += 1
 
             # Write back, keeping the source's BOM and line terminator
             buf = io.StringIO(newline="")
@@ -278,7 +307,7 @@ class CSVGameParser:
 
             log.info("Exported %d translations to %s", applied, filename)
         manifest.finish()
-        game_io.raise_if_problems(problems)
+        game_io.raise_export_problems(problems, changed_lines)
 
     def restore_originals(self, project_dir: str):
         """Restore original files from backup."""

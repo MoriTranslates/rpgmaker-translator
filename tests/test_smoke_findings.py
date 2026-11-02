@@ -1245,3 +1245,72 @@ def test_srpg_resume_merge_reads_backup(tmp_path):
     proj = TranslationProject(project_path=str(tmp_path), entries=entries)
     stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
     assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
+
+
+def test_no_control_bytes_in_source_files():
+    """Raw control bytes in source (a NUL or backspace typed through shell
+    escaping) fail silently or confuse tools -- write escapes instead."""
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).resolve().parent.parent
+    files = [*root.joinpath("translator").rglob("*.py"),
+             *root.joinpath("tests").glob("*.py"), root / "main.py"]
+    bad = {}
+    for f in files:
+        n = len(re.findall(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]", f.read_bytes()))
+        if n:
+            bad[str(f.relative_to(root))] = n
+    assert bad == {}
+
+
+def _csv_game(tmp_path, rows):
+    path = tmp_path / "data" / "script.x"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "com,hen1,hen2,hen2_en\r\n" + "".join(f"s,s,{r},\r\n" for r in rows)
+    path.write_bytes(text.encode("utf-8"))
+    return path
+
+
+def _csv_rows(path):
+    import csv
+    import io
+    return list(csv.reader(io.StringIO(path.read_bytes().decode("utf-8"), newline="")))
+
+
+def test_csv_inserted_row_does_not_shift_translations(tmp_path):
+    """A game update that inserts a row moves every later line down: the
+    old translations must not land on the wrong rows."""
+    from translator import game_io
+    from translator.csv_game import CSVGameParser
+    path = _csv_game(tmp_path, ["一行目", "二行目"])
+    p = CSVGameParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN " + e.original, "reviewed"
+    p.save_project(str(tmp_path), entries)
+    update_rows = ["一行目", "新しい行", "二行目"]
+    path.write_bytes(_csv_game(tmp_path, update_rows).read_bytes())
+    (tmp_path / "data_original" / "script.x").write_bytes(path.read_bytes())
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(tmp_path), entries)
+    assert "script.x: 1 translated line(s) not written" in str(ei.value)
+    rows = _csv_rows(path)
+    assert rows[1][3] == "EN 一行目"
+    assert rows[2][2:] == ["新しい行", ""]     # never got "EN 二行目"
+    assert rows[3][3] == ""                    # row_3's entry was 二行目, now row 4
+
+
+def test_csv_resume_merge_reads_backup(tmp_path):
+    from translator.csv_game import CSVGameParser
+    from translator.project_model import TranslationProject
+    _csv_game(tmp_path, ["一行目", "二行目", "三行目"])
+    p = CSVGameParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN", "reviewed"
+    p.save_project(str(tmp_path), entries)
+    (tmp_path / "data_original" / "script.x").write_bytes(
+        "com,hen1,hen2,hen2_en\r\ns,s,変更,\r\ns,s,二行目,\r\ns,s,三行目,\r\n".encode("utf-8"))
+    proj = TranslationProject(project_path=str(tmp_path), entries=entries)
+    stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
+    assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
