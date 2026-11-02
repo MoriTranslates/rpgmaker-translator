@@ -676,11 +676,14 @@ class RPGMakerMVParser:
         manifest.finish()
 
         # Export plugin translations (plugins.js is outside data/)
+        self.plugin_unplaced = 0
         try:
             self._save_plugins(project_dir, entries)
         except (OSError, ValueError) as exc:
             log.warning("Export failed for plugins.js: %s", exc)
             errors.append(f"plugins.js: {exc}")
+        if self.plugin_unplaced:
+            skipped_lines["plugins.js"] = self.plugin_unplaced
 
         # Swap game font for English readability
         try:
@@ -822,6 +825,8 @@ class RPGMakerMVParser:
                 try:
                     plugins = self._load_plugins_js(ps)
                     self._apply_plugin_translations(plugins, plugin_entries)
+                    if self.plugin_unplaced:
+                        skipped_lines["plugins.js"] = self.plugin_unplaced
 
                     if inject_wordwrap:
                         if not any(p.get("name") == self.INJECTED_PLUGIN_NAME
@@ -3642,6 +3647,14 @@ class RPGMakerMVParser:
                 plugin_by_name[p["name"]] = p
 
         self.plugin_identifiers_skipped = 0
+        # translations whose value is no longer in plugins.js (plugin
+        # removed, parameter renamed or its value changed): not written
+        self.plugin_unplaced = 0
+
+        def unplaced(entry):
+            if entry.translation != entry.original:
+                self.plugin_unplaced += 1
+
         for entry in plugin_entries:
             # Parse ID: plugins.js/PluginName/ParamKey[/nested/path...]
             parts = entry.id.split("/")
@@ -3660,9 +3673,11 @@ class RPGMakerMVParser:
 
             plugin = plugin_by_name.get(plugin_name)
             if not plugin:
+                unplaced(entry)
                 continue
             params = plugin.get("parameters", {})
             if param_key not in params:
+                unplaced(entry)
                 continue
 
             if not nested_path:
@@ -3671,21 +3686,34 @@ class RPGMakerMVParser:
                 try:
                     decoded = json.loads(raw_val)
                     if isinstance(decoded, str):
+                        if decoded.strip() != entry.original.strip():
+                            unplaced(entry)       # value changed: keep it
+                            continue
                         # Re-encode to preserve JSON string wrapping
                         params[param_key] = json.dumps(entry.translation, ensure_ascii=False)
                         continue
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
-                # Plain string replacement
+                # Plain string replacement -- only over the original
+                if not isinstance(raw_val, str) or \
+                        raw_val.strip() != entry.original.strip():
+                    unplaced(entry)
+                    continue
                 params[param_key] = entry.translation
             else:
                 # Nested: parse JSON, navigate path, replace, re-serialize
                 try:
                     parsed = json.loads(params[param_key])
+                    before = json.dumps(parsed, ensure_ascii=False)
                     self._set_nested_value(parsed, nested_path, entry.original,
                                            entry.translation)
-                    params[param_key] = json.dumps(parsed, ensure_ascii=False)
+                    after = json.dumps(parsed, ensure_ascii=False)
+                    if after == before:
+                        unplaced(entry)     # path gone or value changed
+                        continue
+                    params[param_key] = after
                 except (json.JSONDecodeError, ValueError, TypeError):
+                    unplaced(entry)
                     continue
 
     @staticmethod

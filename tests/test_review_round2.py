@@ -783,3 +783,18 @@ def test_renpy_detects_scripts_only_in_subfolders(tmp_path):
     (game / "game" / "scripts" / "ch1.rpy").write_text('label a:\n    "台詞"\n',
                                                        encoding="utf-8")
     assert RenPyParser.is_renpy_project(str(game))
+
+
+def test_mv_plugin_value_that_changed_is_kept_and_reported(mv_game, mv_parser):
+    """plugins.js values were written unconditionally."""
+    from translator import game_io
+    _plugin_game(mv_game, {"表示名": "勇者"})
+    entries = [e for e in mv_parser.load_project(mv_game) if e.file == "plugins.js"]
+    for e in entries:
+        e.translation, e.status = "Hero", "translated"
+    _plugin_game(mv_game, {"表示名": "魔王"})          # game update changed it
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert "plugins.js: 1 translated line(s) not written" in str(ei.value)
+    plugins = mv_parser._load_plugins_js(os.path.join(mv_game, "js", "plugins.js"))
+    assert plugins[0]["parameters"]["表示名"] == "魔王"
