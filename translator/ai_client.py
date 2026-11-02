@@ -1044,8 +1044,42 @@ class AIClient:
 
     # ── Ollama process management ─────────────────────────────────
 
-    def stop_server(self):
-        """Stop any running Ollama process (service or managed subprocess)."""
+    def is_local_server(self) -> bool:
+        """True when base_url points at this machine (only then can a
+        local start/restart help)."""
+        from urllib.parse import urlparse
+        try:
+            host = (urlparse(self.base_url).hostname or "").lower()
+        except ValueError:
+            return False
+        return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+    def owns_server(self) -> bool:
+        """True while an Ollama we started ourselves is running."""
+        return bool(self._managed_proc and self._managed_proc.poll() is None)
+
+    @staticmethod
+    def external_ollama_running() -> bool:
+        """True if an ollama.exe is running (Windows; False elsewhere)."""
+        if os.name != "nt":
+            return False
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq ollama.exe", "/NH"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            ).stdout
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return False
+        return "ollama.exe" in out.lower()
+
+    def stop_server(self, kill_external: bool = False):
+        """Stop the Ollama this app started.
+
+        Only with ``kill_external`` (which callers pass solely after the
+        user confirmed it) is the OllamaService stopped and every other
+        ollama.exe killed -- that also stops Ollama for any other app.
+        """
         # 1. Kill our own managed subprocess if we started one
         if self._managed_proc and self._managed_proc.poll() is None:
             log.info("Stopping managed Ollama subprocess (PID %d)", self._managed_proc.pid)
@@ -1056,6 +1090,10 @@ class AIClient:
                 self._managed_proc.kill()
                 self._managed_proc.wait(timeout=3)
             self._managed_proc = None
+
+        if not kill_external:
+            time.sleep(0.5)
+            return
 
         # 2. Stop the Windows service (if running)
         try:
@@ -1078,13 +1116,21 @@ class AIClient:
         # Brief pause to let ports release
         time.sleep(0.5)
 
-    def restart_server(self, num_parallel: int = 2) -> bool:
-        """Restart Ollama with OLLAMA_NUM_PARALLEL set.
+    def restart_server(self, num_parallel: int = 2,
+                       kill_external: bool = False) -> bool:
+        """(Re)start Ollama with OLLAMA_NUM_PARALLEL set.
 
-        Stops any existing Ollama process, then starts a new one as a
+        Stops the Ollama this app started (and, only with
+        ``kill_external``, every other one), then starts a new one as a
         managed subprocess. Returns True if the server becomes reachable.
+        Without ``kill_external`` an Ollama started by someone else is
+        never touched -- if one is still running, nothing is started.
         """
-        self.stop_server()
+        self.stop_server(kill_external=kill_external)
+        if not kill_external and self.external_ollama_running():
+            log.warning("Another Ollama is running; not killing it without "
+                        "the user's permission")
+            return self.is_available()
 
         # Find ollama executable
         ollama_exe = self._find_ollama_exe()

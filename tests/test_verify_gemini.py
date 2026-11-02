@@ -191,21 +191,25 @@ def test_by_design_risk3_srpg_patch_changes_blob_length():
 
 # ── Risk 4: cmd /c mklink with unquoted metacharacters ────────────────────
 
-@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe only")
-def test_repro_risk4_mklink_cmd_injection_without_spaces(tmp_path):
-    """Same call shape as main_window._open_in_rpgmaker.  A folder name with
-    '&' but no space is not quoted by list2cmdline, so cmd runs a 2nd command."""
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows-only")
+def test_fixed_risk4_junction_created_without_shell_for_ampersand_path(tmp_path):
+    """FIXED: "Open in RPG Maker" creates junctions through the Win32 API,
+    never through cmd, so a folder named with '&' (no spaces) works and
+    cannot inject a second command."""
+    import inspect
+    from translator.utils import create_junction
+    from translator.widgets import main_window
+    assert "mklink" not in inspect.getsource(main_window.MainWindow._open_in_rpgmaker)
     src = tmp_path / "src"
     src.mkdir()
+    (src / "a.txt").write_text("x", encoding="utf-8")
     ws = tmp_path / "Tom&echo"          # legal Windows folder name
     ws.mkdir()
     link = os.path.join(str(ws), "INJECTED")
-    line = subprocess.list2cmdline(["cmd", "/c", "mklink", "/J", link, str(src)])
-    assert '"' not in line.split("&", 1)[0][-5:]   # the '&' is outside quotes
-    r = subprocess.run(["cmd", "/c", "mklink", "/J", link, str(src)],
-                       capture_output=True, text=True)
-    # cmd split at '&' and executed `echo\INJECTED <src>` as a second command
-    assert "INJECTED" in r.stdout
+    create_junction(link, str(src))
+    assert os.path.isfile(os.path.join(link, "a.txt"))
+    os.rmdir(link)                       # removes the junction, not the target
+    assert (src / "a.txt").exists()
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe only")

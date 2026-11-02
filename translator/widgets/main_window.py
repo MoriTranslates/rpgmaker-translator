@@ -6,7 +6,6 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 import time
 from collections import Counter
 
@@ -24,6 +23,7 @@ from PyQt6.QtGui import QAction, QPalette, QColor, QKeySequence, QShortcut
 from ..version import __version__
 from ..resource_paths import app_dir
 from ..game_io import PartialExportError
+from ..utils import create_junction
 from ..ai_client import AIClient, build_system_prompt
 from ..rpgmaker_mv import RPGMakerMVParser
 from ..tyranoscript import TyranoScriptParser
@@ -2337,9 +2337,32 @@ class MainWindow(QMainWindow):
         if self.client.is_cloud:
             return True
         if not self.client.is_available():
+            if not self.client.is_local_server():
+                # A remote server that is down can't be fixed by starting
+                # (or killing) a local Ollama.
+                QMessageBox.warning(
+                    self, "Ollama",
+                    f"Cannot reach Ollama at {self.client.base_url}.\n"
+                    "Check that the server is running and reachable.")
+                return False
+            kill_external = False
+            if (self.client.external_ollama_running()
+                    and not self.client.owns_server()):
+                reply = QMessageBox.question(
+                    self, "Restart Ollama?",
+                    "Ollama is running but not responding.\n\n"
+                    "Force-restart it? This stops every Ollama process on "
+                    "this PC, including jobs other apps are running on it.",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if reply != QMessageBox.StandardButton.Yes:
+                    return False
+                kill_external = True
             self._run_blocking(
                 "Starting Ollama", "Starting Ollama…",
-                self.client.restart_server, self.engine.num_workers)
+                self.client.restart_server, self.engine.num_workers,
+                kill_external)
         if not self.client.is_available():
             QMessageBox.warning(self, "Ollama", "Cannot connect to Ollama. Please start it manually.")
             return False
@@ -3207,44 +3230,86 @@ class MainWindow(QMainWindow):
 
     _EASYRPG_URL = ("https://easyrpg.org/downloads/player/0.8.1.1/"
                     "easyrpg-player-0.8.1.1-windows-x64.zip")
+    # Pinned hashes of that exact release (no checksum is published, so
+    # these were taken from the archive when the URL was pinned).  The zip
+    # is verified before extraction and the exe before every use, so a
+    # tampered download or a swapped cached copy is never run.
+    _EASYRPG_ZIP_SHA256 = (
+        "49590bd595f60cd3a2833f9bea7dcb4b2f90b9a0d86ebf57423378fcdd50cd88")
+    _EASYRPG_EXE_SHA256 = (
+        "f9d295c2b913fe8decf366ca2a7957407ca987124f9d895de68a6b076e68775b")
+    _EASYRPG_EXE_NAME = "Player.exe"
+
+    @classmethod
+    def _download_easyrpg(cls, cached: str) -> None:
+        """Download, verify and cache EasyRPG Player (runs off the UI thread)."""
+        import hashlib
+        import io
+        import urllib.request
+        import zipfile
+        from ..game_io import atomic_write_bytes
+        with urllib.request.urlopen(cls._EASYRPG_URL, timeout=30) as r:
+            zip_data = r.read(64 * 1024 * 1024)
+        if hashlib.sha256(zip_data).hexdigest() != cls._EASYRPG_ZIP_SHA256:
+            raise ValueError("downloaded archive failed the SHA-256 check")
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+            exe = zf.read(cls._EASYRPG_EXE_NAME)
+        if hashlib.sha256(exe).hexdigest() != cls._EASYRPG_EXE_SHA256:
+            raise ValueError("Player.exe failed the SHA-256 check")
+        os.makedirs(os.path.dirname(cached), exist_ok=True)
+        atomic_write_bytes(cached, exe)
+
+    @classmethod
+    def _easyrpg_cache_ok(cls, cached: str) -> bool:
+        from ..game_io import sha256_file
+        try:
+            return sha256_file(cached) == cls._EASYRPG_EXE_SHA256
+        except OSError:
+            return False
 
     def _ensure_easyrpg_player(self, game_dir: str) -> str:
-        """Copy EasyRPG Player into the game folder for locale-free play.
+        """Offer to copy EasyRPG Player into the game folder for locale-free play.
 
-        Downloads on first use, caches in tools/ next to main.py.
-        Returns a status message string, or empty if already present.
+        Asks first (it downloads and adds an executable), verifies the
+        pinned SHA-256 of the archive and the exe, downloads on a worker
+        thread, and caches the verified exe in tools/.  Returns a status
+        message string, or empty if nothing was done.
         """
         dest = os.path.join(game_dir, "Player.exe")
-        if os.path.isfile(dest):
+        if os.path.isfile(dest) or getattr(self, "_easyrpg_declined", False):
             return ""
 
-        # Check local cache
         tools_dir = os.path.join(app_dir(), "tools")
         cached = os.path.join(tools_dir, "easyrpg-player.exe")
+        have_cache = self._easyrpg_cache_ok(cached)
 
-        if not os.path.isfile(cached):
-            # Download
+        reply = QMessageBox.question(
+            self, "Add EasyRPG Player?",
+            "RPG Maker 2000/2003 games often show garbled text on non-"
+            "Japanese Windows. EasyRPG Player (free, open source) runs them "
+            "correctly.\n\n"
+            + ("Copy the verified EasyRPG Player into the game folder as "
+               "Player.exe?" if have_cache else
+               "Download EasyRPG Player 0.8.1.1 (about 8 MB) from easyrpg.org, "
+               "verify its checksum and copy it into the game folder as "
+               "Player.exe?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if reply != QMessageBox.StandardButton.Yes:
+            self._easyrpg_declined = True   # don't ask again this session
+            return ""
+
+        if not have_cache:
             try:
-                import io
-                import zipfile
-                import urllib.request
                 log.info("Downloading EasyRPG Player…")
-                with urllib.request.urlopen(self._EASYRPG_URL, timeout=30) as r:
-                    zip_data = r.read()
-                with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
-                    # Find the exe inside the zip
-                    exe_names = [n for n in zf.namelist()
-                                 if n.lower().endswith(".exe")]
-                    if not exe_names:
-                        log.warning("No exe found in EasyRPG zip")
-                        return ""
-                    os.makedirs(tools_dir, exist_ok=True)
-                    with open(cached, "wb") as f:
-                        f.write(zf.read(exe_names[0]))
-                log.info("EasyRPG Player cached at %s", cached)
+                self._run_blocking("EasyRPG Player", "Downloading EasyRPG Player…",
+                                   self._download_easyrpg, cached)
             except Exception as exc:
                 log.warning("Failed to download EasyRPG Player: %s", exc)
-                return ""
+                return f"EasyRPG Player was not added: {exc}"
+            if not self._easyrpg_cache_ok(cached):
+                return "EasyRPG Player was not added: download failed."
+            log.info("EasyRPG Player cached at %s", cached)
 
         # Copy to game folder
         try:
@@ -3375,15 +3440,12 @@ class MainWindow(QMainWindow):
             if os.path.exists(link):
                 continue  # Junction already exists
             try:
-                # mklink /J creates a directory junction (no admin needed)
-                result = subprocess.run(
-                    ["cmd", "/c", "mklink", "/J", link, source],
-                    capture_output=True, text=True, check=True,
-                )
-            except subprocess.CalledProcessError as e:
+                # Directory junction via the Win32 API (no shell, no admin)
+                create_junction(link, source)
+            except OSError as e:
                 QMessageBox.critical(
                     self, "Junction Error",
-                    f"Failed to create directory junction for {dirname}:\n{e.stderr}"
+                    f"Failed to create directory junction for {dirname}:\n{e}"
                 )
                 return
 

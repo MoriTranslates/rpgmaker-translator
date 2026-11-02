@@ -1095,8 +1095,26 @@ class SettingsDialog(QDialog):
             self.engine.batch_size = self.batch_spin.value()
             self.engine.max_history = self.history_spin.value()
 
-        if new_workers != self._orig_workers and not self.client.is_cloud:
-            self._restart_ollama(new_workers)
+        if (new_workers != self._orig_workers and not self.client.is_cloud
+                and self.client.is_local_server()):
+            kill_external = False
+            if (self.client.external_ollama_running()
+                    and not self.client.owns_server()):
+                reply = QMessageBox.question(
+                    self, "Restart Ollama?",
+                    f"Ollama must restart to use {new_workers} parallel "
+                    "slots.\n\nRestart it now? This stops every Ollama "
+                    "process on this PC, including jobs other apps are "
+                    "running on it. Choose No to keep it running (the new "
+                    "worker count applies after you restart Ollama yourself).",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                kill_external = reply == QMessageBox.StandardButton.Yes
+                if not kill_external:
+                    new_workers = None
+            if new_workers is not None:
+                self._restart_ollama(new_workers, kill_external)
 
         if self.plugin_analyzer:
             manual = self.wordwrap_spin.value()
@@ -1159,7 +1177,7 @@ class SettingsDialog(QDialog):
         else:
             self.wordwrap_spin.setSuffix("")
 
-    def _restart_ollama(self, num_parallel: int):
+    def _restart_ollama(self, num_parallel: int, kill_external: bool = False):
         """Restart Ollama with OLLAMA_NUM_PARALLEL matching the new worker count."""
         progress = QProgressDialog(
             f"Restarting Ollama with {num_parallel} parallel slots...",
@@ -1174,7 +1192,8 @@ class SettingsDialog(QDialog):
         result = {}
         loop = QEventLoop(self)
         worker = _CallWorker(
-            lambda: self.client.restart_server(num_parallel), parent=self)
+            lambda: self.client.restart_server(num_parallel, kill_external),
+            parent=self)
         worker.done.connect(lambda ok: result.__setitem__("ok", ok))
         worker.finished.connect(loop.quit)
         worker.start()
