@@ -6,16 +6,42 @@ is elided after it.  Each speaker keeps the same soft color everywhere
 """
 
 from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter
 from PyQt6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 from . import theme
 
 SPEAKER_ROLE = Qt.ItemDataRole.UserRole + 42
 _MAX_CHIP = 130  # px; longer names are elided inside the chip
+_CHIP_PT = 9.0   # chip text size (never below the readable minimum)
 
 
 class SpeakerDelegate(QStyledItemDelegate):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._chip_font: QFont | None = None
+        self._chip_base = None   # the cell font the chip font was built from
+
+    def _font_for_chip(self, base: QFont) -> QFont:
+        """One chip font, rebuilt only if the cell font changes."""
+        if self._chip_font is None or self._chip_base != base:
+            font = QFont(base)
+            font.setPointSizeF(_CHIP_PT)
+            font.setWeight(QFont.Weight.DemiBold)
+            self._chip_font = font
+            self._chip_base = QFont(base)
+        return self._chip_font
+
+    @staticmethod
+    def _text_color(index) -> QColor:
+        """The cell's ForegroundRole as a QColor (it may be a brush or unset)."""
+        fg = index.data(Qt.ItemDataRole.ForegroundRole)
+        if fg is None:
+            return theme.qcolor("text")
+        if isinstance(fg, QBrush):
+            return fg.color()
+        return QColor(fg)
 
     def paint(self, painter: QPainter, option, index):
         speaker = index.data(SPEAKER_ROLE)
@@ -27,7 +53,7 @@ class SpeakerDelegate(QStyledItemDelegate):
         self.initStyleOption(opt, index)
         widget = opt.widget
         style = widget.style() if widget else None
-        text = opt.text
+        text = opt.text  # the model already folds it onto one line
 
         # Background / selection / hairline for the whole cell, no text
         opt.text = ""
@@ -35,9 +61,7 @@ class SpeakerDelegate(QStyledItemDelegate):
             style.drawControl(QStyle.ControlElement.CE_ItemViewItem,
                               opt, painter, widget)
 
-        chip_font = QFont(opt.font)
-        chip_font.setPointSizeF(max(7.5, opt.font.pointSizeF() - 1.5))
-        chip_font.setWeight(QFont.Weight.DemiBold)
+        chip_font = self._font_for_chip(opt.font)
         fm = QFontMetrics(chip_font)
         label = fm.elidedText(speaker, Qt.TextElideMode.ElideRight,
                               _MAX_CHIP - 12)
@@ -62,14 +86,11 @@ class SpeakerDelegate(QStyledItemDelegate):
         text_rect = rect.adjusted(int(8 + chip_w + 8), 0, -8, 0)
         painter.setFont(opt.font)
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)
-        color = (theme.qcolor("selection_text") if selected
-                 else index.data(Qt.ItemDataRole.ForegroundRole)
-                 or theme.qcolor("text"))
-        painter.setPen(QColor(color))
-        line = " ".join(text.split())
+        painter.setPen(theme.qcolor("selection_text") if selected
+                       else self._text_color(index))
         painter.drawText(
             text_rect,
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
             QFontMetrics(opt.font).elidedText(
-                line, Qt.TextElideMode.ElideRight, text_rect.width()))
+                text, Qt.TextElideMode.ElideRight, text_rect.width()))
         painter.restore()

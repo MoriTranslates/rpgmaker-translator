@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QStyle, QStyledItemDelegate
 from . import theme
 
 STATUS_ROLE = Qt.ItemDataRole.UserRole + 41
-STRIPE_WIDTH = 5
+STRIPE_WIDTH = 4
 
 
 class StatusDelegate(QStyledItemDelegate):
@@ -35,10 +35,9 @@ class StatusDelegate(QStyledItemDelegate):
                 painter.fillRect(rect, bg)
 
         color = theme.status_fg(status)
-        # The selected row's stripe takes the accent so the cursor is easy
-        # to follow; the marker still shows the status.
-        painter.fillRect(rect.x(), rect.y(), STRIPE_WIDTH, rect.height(),
-                         theme.qcolor("accent") if selected else color)
+        # The stripe always shows the status (the selection fill marks the
+        # cursor), so no selected-row color can be mistaken for a status.
+        painter.fillRect(rect.x(), rect.y(), STRIPE_WIDTH, rect.height(), color)
 
         # Marker centered in the remaining space, sized from the font
         size = max(9.0, option.fontMetrics.height() * 0.62)

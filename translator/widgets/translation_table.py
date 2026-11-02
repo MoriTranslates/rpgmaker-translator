@@ -44,7 +44,27 @@ COL_FIELD = 2
 COL_ORIGINAL = 3
 COL_TRANSLATION = 4
 
-_COLUMN_HEADERS = ["", "File", "Event", "Original (JP)", "Translation (EN)"]
+_COLUMN_HEADERS = ["", "File", "Where", "Original (JP)", "Translation (EN)"]
+
+# Fonts shared by every row (FontRole is asked for each painted cell, so
+# allocating a QFont per call adds up on big games).  Built lazily: QFont
+# needs the application's base font, which the theme sets at startup.
+_FONTS: dict = {}
+
+
+def _row_font(kind: str) -> QFont:
+    font = _FONTS.get(kind)
+    if font is None:
+        font = QFont(QApplication.font())
+        size = font.pointSizeF() if font.pointSizeF() > 0 else 10.0
+        if kind == "en":            # the English is what you read: a touch larger
+            font.setPointSizeF(size + 0.5)
+        elif kind == "jp":          # the source sits a step quieter
+            font.setPointSizeF(max(9.0, size - 0.5))
+        elif kind == "pending":     # the "not translated yet" dash
+            font.setPointSizeF(size + 0.5)
+        _FONTS[kind] = font
+    return font
 
 _SPEAKER_RE = re.compile(r'\[Speaker:\s*(.+?)\]')
 _NAMEBOX_RE = re.compile(r'\\[Nn]<(.+)>')
@@ -62,12 +82,29 @@ class TranslationTableModel(QAbstractTableModel):
         self._entries: list[TranslationEntry] = []
         self._dark_mode = True
         self.speaker_lookup: dict = {}  # JP speaker -> EN name (set by the table)
+        # One file listed: the Where column drops the file name
+        self.single_file = False
+        # data() runs for every painted cell; cache the per-entry work.
+        # _flat: raw text -> one-line text (keyed by content, so edits
+        # simply miss).  _speakers: entry id -> (context, namebox, name).
+        self._flat: dict[str, str] = {}
+        self._speakers: dict[str, tuple] = {}
 
     def set_entries(self, entries: list, dupe_counts: dict = None):
         self.beginResetModel()
         self._entries = entries
         self._dupe_counts = dupe_counts or {}
+        if len(self._flat) > 4 * max(len(entries), 1000):
+            self._flat.clear()  # drop text from long-gone edits
         self.endResetModel()
+
+    def _one_line(self, text: str) -> str:
+        """Text with line breaks and runs of spaces folded (cached)."""
+        flat = self._flat.get(text)
+        if flat is None:
+            flat = " ".join(text.split())
+            self._flat[text] = flat
+        return flat
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._entries)
@@ -86,7 +123,7 @@ class TranslationTableModel(QAbstractTableModel):
 
         if (role == Qt.ItemDataRole.DisplayRole and col == COL_TRANSLATION
                 and not entry.translation):
-            return "Not translated yet"
+            return "\u2014"  # a quiet dash; the status marker says why
 
         if role == Qt.ItemDataRole.DisplayRole or role == Qt.ItemDataRole.EditRole:
             if col == COL_STATUS:
@@ -95,22 +132,27 @@ class TranslationTableModel(QAbstractTableModel):
                 return entry.file
             elif col == COL_FIELD:
                 label = _extract_event_context(entry.id)
+                if not self.single_file:
+                    stem = (entry.file.rsplit(".", 1)[0]
+                            if entry.file.endswith((".json", ".js"))
+                            else entry.file)
+                    label = f"{stem} \u00b7 {label}" if label else stem
                 count = self._dupe_counts.get(entry.original, 0)
                 if count > 1:
                     label = f"{label} (\u00d7{count})"
                 return label
             elif col == COL_ORIGINAL:
-                return (" ".join(entry.original.split())
+                return (self._one_line(entry.original)
                         if role == Qt.ItemDataRole.DisplayRole
                         else entry.original)
             elif col == COL_TRANSLATION:
-                return (" ".join(entry.translation.split())
+                return (self._one_line(entry.translation)
                         if role == Qt.ItemDataRole.DisplayRole
                         else entry.translation)
 
         elif role == Qt.ItemDataRole.ToolTipRole:
             if col == COL_FIELD:
-                return f"{entry.field} — {entry.id}"
+                return f"{entry.file} — {entry.field} — {entry.id}"
             if col == COL_STATUS:
                 return theme.STATUS_LABELS.get(entry.status, entry.status)
 
@@ -123,23 +165,20 @@ class TranslationTableModel(QAbstractTableModel):
                 return self._speaker_of(entry)
 
         elif role == Qt.ItemDataRole.FontRole:
-            if col == COL_TRANSLATION and not entry.translation:
-                font = QFont()
-                font.setItalic(True)
-                return font
-
-        elif role == Qt.ItemDataRole.BackgroundRole:
-            # Rows stay neutral; only work still to do gets a faint wash
-            if entry.status == "untranslated":
-                return theme.status_row_color(entry.status)
+            # Rows stay neutral (no background wash): the status stripe and
+            # marker carry the state; the English reads a step above the JP
+            if col == COL_TRANSLATION:
+                return _row_font("en" if entry.translation else "pending")
+            if col == COL_ORIGINAL:
+                return _row_font("jp")
 
         elif role == Qt.ItemDataRole.ForegroundRole:
             if col == COL_STATUS:
                 return theme.status_fg(entry.status)
             if col in (COL_FILE, COL_FIELD):
-                return theme.qcolor("text_muted")
+                return theme.qcolor("text_dim")
             if col == COL_ORIGINAL:
-                return theme.qcolor("text_soft")
+                return theme.qcolor("text_muted")
             if col == COL_TRANSLATION:
                 return theme.qcolor("text" if entry.translation else "text_dim")
 
@@ -151,15 +190,24 @@ class TranslationTableModel(QAbstractTableModel):
 
     def _speaker_of(self, entry) -> str:
         """English (else Japanese) speaker name of a dialogue line, or ''."""
-        name = ""
-        if entry.context:
-            m = _SPEAKER_RE.search(entry.context)
-            if m:
-                name = m.group(1).strip()
-        if not name:
-            m = _NAMEBOX_RE.fullmatch((getattr(entry, "namebox", "") or "").strip())
-            if m and "\\" not in m.group(1):
-                name = m.group(1).strip()
+        context = entry.context
+        namebox = getattr(entry, "namebox", "") or ""
+        cached = self._speakers.get(entry.id)
+        if cached is not None and cached[0] == context and cached[1] == namebox:
+            name = cached[2]
+        else:
+            name = ""
+            if context:
+                m = _SPEAKER_RE.search(context)
+                if m:
+                    name = m.group(1).strip()
+            if not name:
+                m = _NAMEBOX_RE.fullmatch(namebox.strip())
+                if m and "\\" not in m.group(1):
+                    name = m.group(1).strip()
+            self._speakers[entry.id] = (context, namebox, name)
+        # The JP->EN lookup is applied after the cache, so renaming a
+        # speaker never needs an invalidation
         return self.speaker_lookup.get(name, name) if name else ""
 
     def setData(self, index: QModelIndex, value, role=Qt.ItemDataRole.EditRole):
@@ -410,11 +458,11 @@ class TranslationTable(QWidget):
         self.table.setColumnWidth(COL_STATUS, 30)
         self._status_delegate = StatusDelegate(self.table)
         self.table.setItemDelegateForColumn(COL_STATUS, self._status_delegate)
-        # File / Event are compact reference columns; the text gets the room
-        header.setSectionResizeMode(COL_FILE, QHeaderView.ResizeMode.Interactive)
+        # One compact, muted "Where" column (file \u00b7 event); the text gets
+        # the room.  The separate File column stays in the model, hidden.
+        self.table.setColumnHidden(COL_FILE, True)
         header.setSectionResizeMode(COL_FIELD, QHeaderView.ResizeMode.Interactive)
-        self.table.setColumnWidth(COL_FILE, 130)
-        self.table.setColumnWidth(COL_FIELD, 110)
+        self.table.setColumnWidth(COL_FIELD, 130)
         header.setSectionResizeMode(COL_ORIGINAL, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(COL_TRANSLATION, QHeaderView.ResizeMode.Stretch)
         self._speaker_delegate = SpeakerDelegate(self.table)
@@ -523,7 +571,7 @@ class TranslationTable(QWidget):
         vsplit.setStretchFactor(0, 1)
         vsplit.setStretchFactor(1, 0)
         vsplit.setCollapsible(0, False)
-        vsplit.setSizes([1000, 420])
+        vsplit.setSizes([1000, 340])
 
         layout.addWidget(vsplit, 1)
 
@@ -736,15 +784,21 @@ class TranslationTable(QWidget):
                     seen[e.original] = e
             self._visible_entries = list(seen.values())
 
+        self._model.single_file = self._one_file_listed()
         self._model.set_entries(self._visible_entries, self._dupe_counts)
-        self._sync_file_column()
         self._restore_selection(prev_entry)
         self._update_stats()
 
-    def _sync_file_column(self):
-        """Hide the File column while every listed line is from one file."""
-        files = {e.file for e in self._visible_entries}
-        self.table.setColumnHidden(COL_FILE, len(files) == 1)
+    def _one_file_listed(self) -> bool:
+        """True while every listed line comes from the same file (stops at
+        the second file, so a mixed list costs almost nothing)."""
+        first = None
+        for e in self._visible_entries:
+            if first is None:
+                first = e.file
+            elif e.file != first:
+                return False
+        return first is not None
 
     def _commit_and_next(self):
         """Ctrl+Enter: keep the edit (already saved) and go to the next

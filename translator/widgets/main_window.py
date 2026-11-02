@@ -241,7 +241,14 @@ class MainWindow(QMainWindow):
         self.text_splitter = text_tab
         # Slim project header (title, engine, progress) over the workspace
         self.project_header = ProjectHeader()
-        self.file_tree.stats_changed.connect(self._update_project_header)
+        # Counts can refresh many times a second during a batch; the header
+        # recounts the whole project, so coalesce to ~4 updates a second
+        self._header_timer = QTimer(self)
+        self._header_timer.setSingleShot(True)
+        self._header_timer.setInterval(250)
+        self._header_timer.timeout.connect(self._update_project_header)
+        self.file_tree.stats_changed.connect(
+            lambda _project: self._header_timer.start())
         text_page = QWidget()
         text_page_layout = QVBoxLayout(text_page)
         text_page_layout.setContentsMargins(0, 0, 0, 0)
@@ -2181,9 +2188,9 @@ class MainWindow(QMainWindow):
                 if dlg_done:
                     self.pipeline_bar.mark_done("dialogue")
 
-    def _update_project_header(self, project=None):
+    def _update_project_header(self):
         """Title, engine badge and progress for the header over the table."""
-        project = project or self.project
+        project = self.project
         entries = project.entries if project else []
         title = ""
         for e in entries:
