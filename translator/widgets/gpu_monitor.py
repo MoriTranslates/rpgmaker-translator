@@ -3,7 +3,7 @@
 import logging
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar
-from PyQt6.QtCore import QProcess, QTimer
+from PyQt6.QtCore import QProcess, Qt, QTimer
 
 from . import theme
 
@@ -36,56 +36,50 @@ class GPUMonitorPanel(QWidget):
         # First poll happens in showEvent once the panel is visible
 
     def _build_ui(self):
+        self.setObjectName("gpuMonitor")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(2)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
 
         # GPU name
         self._name_label = QLabel("GPU: detecting...")
-        self._name_label.setStyleSheet("font-weight: bold; font-size: 8pt;")
+        self._name_label.setStyleSheet("font-weight: 600;")
         layout.addWidget(self._name_label)
 
-        # VRAM bar
-        vram_row = QHBoxLayout()
-        vram_row.setSpacing(4)
-        self._vram_label = QLabel("VRAM:")
-        self._vram_label.setFixedWidth(42)
-        self._vram_label.setStyleSheet("font-size: 8pt;")
-        vram_row.addWidget(self._vram_label)
-
-        self._vram_bar = QProgressBar()
-        self._vram_bar.setRange(0, 100)
-        self._vram_bar.setFixedHeight(16)
-        self._vram_bar.setTextVisible(True)
-        vram_row.addWidget(self._vram_bar)
-        layout.addLayout(vram_row)
-
-        # GPU utilization bar
-        util_row = QHBoxLayout()
-        util_row.setSpacing(4)
-        self._util_label = QLabel("GPU:")
-        self._util_label.setFixedWidth(42)
-        self._util_label.setStyleSheet("font-size: 8pt;")
-        util_row.addWidget(self._util_label)
-
-        self._util_bar = QProgressBar()
-        self._util_bar.setRange(0, 100)
-        self._util_bar.setFixedHeight(16)
-        self._util_bar.setTextVisible(True)
-        util_row.addWidget(self._util_bar)
-        layout.addLayout(util_row)
+        # Slim bars with the reading beside the caption, never on the fill
+        self._vram_label, self._vram_value, self._vram_bar =             self._add_meter(layout, "VRAM")
+        self._util_label, self._util_value, self._util_bar =             self._add_meter(layout, "GPU")
 
         # Temp + Power row
         stats_row = QHBoxLayout()
-        stats_row.setSpacing(8)
+        stats_row.setSpacing(12)
         self._temp_label = QLabel("Temp: --")
-        self._temp_label.setStyleSheet("font-size: 8pt;")
         stats_row.addWidget(self._temp_label)
         self._power_label = QLabel("Power: --")
-        self._power_label.setStyleSheet("font-size: 8pt;")
+        self._power_label.setObjectName("hint")
         stats_row.addWidget(self._power_label)
         stats_row.addStretch()
         layout.addLayout(stats_row)
+
+    @staticmethod
+    def _add_meter(layout, caption: str):
+        row = QHBoxLayout()
+        label = QLabel(caption)
+        label.setObjectName("hint")
+        value = QLabel("")
+        value.setAlignment(Qt.AlignmentFlag.AlignRight)
+        row.addWidget(label)
+        row.addStretch()
+        row.addWidget(value)
+        layout.addLayout(row)
+        bar = QProgressBar()
+        bar.setObjectName("meter")
+        bar.setRange(0, 100)
+        bar.setFixedHeight(6)
+        bar.setTextVisible(False)
+        layout.addWidget(bar)
+        return label, value, bar
 
     def _poll(self):
         """Start an async nvidia-smi query (never blocks the GUI thread)."""
@@ -137,14 +131,14 @@ class GPUMonitorPanel(QWidget):
         # VRAM
         mem_pct = int(mem_used / mem_total * 100) if mem_total > 0 else 0
         self._vram_bar.setValue(mem_pct)
-        self._vram_bar.setFormat(
-            f"{mem_used:.0f} / {mem_total:.0f} MB ({mem_pct}%)"
+        self._vram_value.setText(
+            f"{mem_used / 1024:.1f} / {mem_total / 1024:.1f} GB  ({mem_pct}%)"
         )
         self._color_bar(self._vram_bar, mem_pct)
 
         # Utilization
         self._util_bar.setValue(gpu_util)
-        self._util_bar.setFormat(f"{gpu_util}%")
+        self._util_value.setText(f"{gpu_util}%")
         self._color_bar(self._util_bar, gpu_util)
 
         # Temp + Power
@@ -176,9 +170,9 @@ class GPUMonitorPanel(QWidget):
         self._available = False
         self._name_label.setText("GPU: not detected")
         self._vram_bar.setValue(0)
-        self._vram_bar.setFormat("N/A")
+        self._vram_value.setText("N/A")
         self._util_bar.setValue(0)
-        self._util_bar.setFormat("N/A")
+        self._util_value.setText("N/A")
         self._temp_label.setText("Temp: --")
         self._power_label.setText("Power: --")
         self._temp = None
@@ -187,11 +181,11 @@ class GPUMonitorPanel(QWidget):
     def _color_temp(self):
         temp = getattr(self, "_temp", None)
         if temp is None:
-            self._temp_label.setStyleSheet("font-size: 8pt;")
+            self._temp_label.setStyleSheet("")
             return
         token = "error" if temp >= 80 else "caution" if temp >= 65 else "ok"
         self._temp_label.setStyleSheet(
-            f"font-size: 8pt; color: {theme.c(token)};")
+            f"color: {theme.c(token)};")
 
     def apply_theme(self):
         """Re-color bars/labels after a dark/light switch."""
@@ -210,15 +204,9 @@ class GPUMonitorPanel(QWidget):
             token = "warn"
         else:
             token = "ok"
-        # Semi-transparent chunk keeps the centered text readable in both themes
-        chunk = theme.qcolor(token)
         bar.setStyleSheet(
-            f"QProgressBar {{ border: 1px solid {theme.c('border_strong')}; "
-            f"border-radius: 3px; background: {theme.c('field')}; "
-            f"font-size: 7pt; color: {theme.c('text')}; }}"
-            f"QProgressBar::chunk {{ background: rgba({chunk.red()}, "
-            f"{chunk.green()}, {chunk.blue()}, 150); border-radius: 2px; }}"
-        )
+            f"QProgressBar::chunk {{ background: {theme.c(token)}; "
+            f"border-radius: 3px; }}")
 
     @property
     def is_available(self) -> bool:

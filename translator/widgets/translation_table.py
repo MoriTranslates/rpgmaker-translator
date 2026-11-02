@@ -342,6 +342,7 @@ class TranslationTable(QWidget):
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.setWordWrap(True)
         self.table.verticalHeader().setVisible(False)  # row numbers unused
+        self.table.setShowGrid(False)  # rows are split by a hairline in QSS
 
         # Column widths
         header = self.table.horizontalHeader()
