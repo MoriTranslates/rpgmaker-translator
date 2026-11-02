@@ -72,6 +72,21 @@ _INLINE_TAGS = re.compile(
 )
 
 
+_UNDECODABLE_RE = re.compile('[\ufffd\udc80-\udcff]+')
+
+
+def _same_text(a: str, b: str) -> bool:
+    """Equal, treating undecodable bytes alike.
+
+    Load reads with errors="replace" (U+FFFD) and export with
+    surrogateescape (U+DC80..U+DCFF), and one invalid sequence may become
+    one or several markers: collapse any run of either to one marker.
+    """
+    if a == b:
+        return True
+    return _UNDECODABLE_RE.sub('\ufffd', a) == _UNDECODABLE_RE.sub('\ufffd', b)
+
+
 def _is_inline_tag(line: str) -> bool:
     """Check if a [tag] line is an inline formatting tag (part of text)."""
     return bool(_INLINE_TAGS.match(line))
@@ -330,6 +345,25 @@ class KirikiriParser:
         log.info("Parsed %d entries from %d .ks files", len(entries), len(ks_files))
         return entries
 
+    def load_originals(self, project_dir: str) -> list[TranslationEntry]:
+        """Parse the game's ORIGINAL text, for merging a game update.
+
+        Each .ks is read from scenario_original/ when an export backed it
+        up (the live file holds English then; the export refreshes the
+        backup after a game update), else from the live scenario folder.
+        """
+        scenario_dir = self._find_scenario_dir(project_dir)
+        if not scenario_dir:
+            return []
+        backup_dir = Path(os.path.dirname(scenario_dir)) / "scenario_original"
+        entries = []
+        for ks_path in sorted(Path(scenario_dir).rglob("*.ks")):
+            rel_path = str(ks_path.relative_to(Path(scenario_dir))).replace("\\", "/")
+            bak = backup_dir / rel_path
+            entries.extend(self._parse_ks_file(bak if bak.is_file() else ks_path,
+                                               rel_path))
+        return entries
+
     def save_project(self, project_dir: str, entries: list[TranslationEntry]):
         """Export translations back into .ks files."""
         scenario_dir = self._find_scenario_dir(project_dir)
@@ -349,9 +383,11 @@ class KirikiriParser:
         pairs = game_io.tree_pairs(scenario_dir, backup_dir, (".ks",))
         refreshed = game_io.refresh_changed_originals(pairs, manifest)
         if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+            self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
         problems: list[str] = []
         written: list[tuple[str, str]] = []
+        # file -> translations not written because the game text changed
+        changed_lines: dict[str, int] = {}
 
         # Group entries by file
         by_file: dict[str, list[TranslationEntry]] = {}
@@ -396,7 +432,19 @@ class KirikiriParser:
             # Re-parse the source exactly like load did to recover the real
             # line indices of each entry (blocks may contain blank lines).
             line_map: dict[str, list[int]] = {}
-            self._parse_lines(lines, rel_path, line_map)
+            fresh = {e.id: e.original
+                     for e in self._parse_lines(lines, rel_path, line_map)}
+            # Entries are placed by position (ID): only write those whose
+            # original is still there.  A changed or removed line keeps the
+            # game's text and is reported (game update / hand edit).
+            still_there = []
+            for e in file_entries:
+                now = fresh.get(e.id)
+                if now is not None and _same_text(now, e.original):
+                    still_there.append(e)
+                elif e.translation != e.original:
+                    changed_lines[rel_path] = changed_lines.get(rel_path, 0) + 1
+            file_entries = still_there
 
             translated_lines = self._apply_translations(
                 lines, file_entries, line_map,
@@ -421,7 +469,7 @@ class KirikiriParser:
             manifest.record(rel_path, live_path)
         manifest.finish()
         log.info("Exported %d translations to scenario/", export_count)
-        game_io.raise_if_problems(problems)
+        game_io.raise_export_problems(problems, changed_lines)
 
     def restore_originals(self, project_dir: str):
         """Restore original scenario files from backup."""

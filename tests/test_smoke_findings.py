@@ -1045,3 +1045,63 @@ def test_rm2k_resume_merge_reads_original_backups(tmp_path):
     by = {e.id: e for e in proj.entries}
     assert by["Map0001.lmu/Ev1(EV)/p1/dialog_0"].status == "untranslated"
     assert by["Map0001.lmu/Ev1(EV)/p1/choice_1_0"].status == "reviewed"
+
+
+def _kirikiri_game(tmp_path, body: bytes):
+    ks = tmp_path / "data" / "scenario" / "a.ks"
+    ks.parent.mkdir(parents=True, exist_ok=True)
+    ks.write_bytes(body)
+    return ks
+
+
+def test_kirikiri_export_skips_line_whose_original_changed(tmp_path):
+    from translator import game_io
+    from translator.kirikiri import KirikiriParser
+    ks = _kirikiri_game(tmp_path, "*start\r\n古い台詞です[p]\r\n\r\n同じ台詞です[p]\r\n"
+                        .encode("cp932"))
+    p = KirikiriParser()
+    entries = p.load_project(str(tmp_path))
+    assert len(entries) == 2
+    for e in entries:
+        e.translation, e.status = "EN line", "reviewed"
+    p.save_project(str(tmp_path), entries)
+    update = "*start\r\n新しい台詞です[p]\r\n\r\n同じ台詞です[p]\r\n".encode("cp932")
+    ks.write_bytes(update)
+    (tmp_path / "data" / "scenario_original" / "a.ks").write_bytes(update)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(tmp_path), entries)
+    assert "a.ks: 1 translated line(s) not written" in str(ei.value)
+    text = ks.read_bytes().decode("cp932")
+    assert "新しい台詞です" in text and "EN line" in text
+
+
+def test_kirikiri_undecodable_byte_is_not_a_change(tmp_path):
+    from translator.kirikiri import KirikiriParser
+    body = "*start\r\n".encode("cp932") + b"\x81\x20" + "台詞です[p]\r\n".encode("cp932")
+    ks = _kirikiri_game(tmp_path, body)
+    p = KirikiriParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN line", "translated"
+    p.save_project(str(tmp_path), entries)          # no "not written" error
+    assert b"EN line" in ks.read_bytes()
+
+
+def test_kirikiri_resume_merge_reads_backup(tmp_path):
+    from translator.kirikiri import KirikiriParser
+    from translator.project_model import TranslationProject
+    _kirikiri_game(tmp_path, "*start\r\n古い台詞です[p]\r\n\r\n二つ目[p]\r\n\r\n三つ目[p]\r\n"
+                   .encode("cp932"))
+    p = KirikiriParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN line", "reviewed"
+    p.save_project(str(tmp_path), entries)
+    (tmp_path / "data" / "scenario_original" / "a.ks").write_bytes(
+        "*start\r\n新しい台詞です[p]\r\n\r\n二つ目[p]\r\n\r\n三つ目[p]\r\n".encode("cp932"))
+    proj = TranslationProject(project_path=str(tmp_path), entries=entries)
+    stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
+    assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
+    assert any(e.original.startswith("新しい台詞") and e.status == "untranslated"
+               for e in proj.entries)
+    assert sum(e.status == "reviewed" for e in proj.entries) == 2
