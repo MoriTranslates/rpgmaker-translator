@@ -169,7 +169,9 @@ class SettingsDialog(QDialog):
         self.model_hint_label.setWordWrap(True)
         form.addRow("", self.model_hint_label)
 
+        # Model fetch / connection result, as a hint under the model row
         self.status_label = QLabel("")
+        self.status_label.setObjectName("hint")
         form.addRow("", self.status_label)
 
         self.lang_combo = QComboBox()
@@ -178,6 +180,11 @@ class SettingsDialog(QDialog):
             self.lang_combo.setItemData(self.lang_combo.count() - 1, tip, Qt.ItemDataRole.ToolTipRole)
         self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
         form.addRow("Target Language:", self.lang_combo)
+        stars_hint = QLabel("Stars show how well local models handle that "
+                            "language (5 = best).")
+        stars_hint.setObjectName("hint")
+        stars_hint.setWordWrap(True)
+        form.addRow("", stars_hint)
 
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
 
