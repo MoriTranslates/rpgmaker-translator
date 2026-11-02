@@ -449,6 +449,7 @@ class RenPyParser:
         # Process each .rpy file
         exported = 0
         problems: list[str] = []
+        changed_lines: dict[str, int] = {}
         for fname in rpy_names:
             # Read from backup (idempotent re-export)
             source = os.path.join(backup_dir, fname)
@@ -457,6 +458,8 @@ class RenPyParser:
             target = os.path.join(game_dir, fname)
             try:
                 count = self._export_file(source, target, fname, trans_map)
+                if self._changed_lines:
+                    changed_lines[fname] = self._changed_lines
                 manifest.record(fname, target)
             except OSError as exc:
                 problems.append(f"{fname} ({exc})")
@@ -465,12 +468,25 @@ class RenPyParser:
 
         manifest.finish()
         log.info("Exported %d translations to .rpy files", exported)
-        game_io.raise_if_problems(problems)
+        game_io.raise_export_problems(problems, changed_lines)
 
     def _export_file(self, source_path: str, target_path: str,
                      fname: str, trans_map: dict) -> int:
-        """Apply translations to a single .rpy file. Returns count."""
+        """Apply translations to a single .rpy file. Returns count.
+
+        Entries are addressed by label + line index, so each line must still
+        hold the entry's original text; otherwise (game update) the game's
+        new line is kept and counted in ``self._changed_lines``.
+        """
         lines = _read_rpy(source_path, lines=True)
+        self._changed_lines = 0
+
+        def still_there(entry, text):
+            if text == entry.original:
+                return True
+            if entry.translation != entry.original:
+                self._changed_lines += 1
+            return False
 
         current_label = "start"
         dialogue_index = 0
@@ -490,7 +506,7 @@ class RenPyParser:
                 if m is None:
                     continue
                 entry = trans_map.get(f"{fname}/define/{m.group(1)}")
-                if entry:
+                if entry and still_there(entry, m.group(2)):
                     output_lines[line_idx] = raw_line.replace(
                         f'"{m.group(2)}"',
                         f'"{_escape_rpy(entry.translation, entry.original)}"', 1)
@@ -505,6 +521,9 @@ class RenPyParser:
                 f"{fname}/{current_label}/{prefix}_{dialogue_index}")
             dialogue_index += 1
             if not entry:
+                continue
+            text = m.group(3) if kind == "dialog" else m.group(2)
+            if not still_there(entry, text):
                 continue
 
             escaped = _escape_rpy(entry.translation, entry.original)

@@ -936,3 +936,25 @@ def test_mv_atomic_write_fsyncs_before_replace(tmp_path, monkeypatch):
     mv.RPGMakerMVParser._atomic_write_text(str(target), "{}")
     assert calls == ["fsync", "replace"]
     assert target.read_text(encoding="utf-8") == "{}"
+
+
+def test_renpy_export_skips_line_whose_original_changed(tmp_path):
+    from translator import game_io
+    from translator.renpy import RenPyParser
+    game = _renpy_game(tmp_path, {"script.rpy": ('define e = Character("エリカ")\n'
+                                                 'label start:\n'
+                                                 '    e "古い台詞"\n'
+                                                 '    e "同じ台詞"\n')})
+    p = RenPyParser()
+    entries = p.load_project(str(game))
+    for e in entries:
+        e.translation, e.status = "EN " + e.original, "reviewed"
+    p.save_project(str(game), entries)
+    live = game / "game" / "script.rpy"
+    live.write_bytes(('define e = Character("エリカ")\nlabel start:\n'
+                      '    e "新しい台詞"\n    e "同じ台詞"\n').encode("utf-8"))
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(game), entries)
+    assert "script.rpy: 1 translated line(s) not written" in str(ei.value)
+    text = live.read_text(encoding="utf-8")
+    assert '    e "新しい台詞"\n' in text and '    e "EN 同じ台詞"\n' in text
