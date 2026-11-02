@@ -34,12 +34,19 @@ Game files and backups:
   app or PC stops in the middle of the final swap, the game folder is put back the next time the
   game is opened, exported or restored (RPG Maker MV/MZ, VX Ace, Kirikiri, TyranoScript; Wolf RPG
   on the next restore), and you are told. Leftover copies are kept aside, never deleted.
-- **Restore Originals keeps files a game update added** instead of deleting them.
+- **Restore Originals keeps files a game update added** instead of deleting them. If only the
+  final clean-up fails (a file in use), the restore is reported as done, with a note saying where
+  the leftover copy is, instead of "Restore Failed".
 - **Game updates are no longer rolled back.** When you update a game after exporting with this
-  version, the next export, or resuming the project, notices the changed files and puts them into
-  the backup, including new files and TyranoScript's `lang.js` / `Config.tjs`. It used to copy the
-  old files back over the update. (Backups made by 1.1.0 can't tell an update from the app's own
-  output, so for those the old behaviour stays until the first export with this version.)
+  version, the next export notices the changed files and puts them into the backup (including
+  TyranoScript's `lang.js` / `Config.tjs`). It used to copy the old files back over the update.
+  The replaced backup files are kept in a `…_original.replaced` folder next to the backup. A
+  changed file that holds far less Japanese than the backup (a hand-edited export, another
+  patch) is not taken as an update. A file the backup has no copy of is never copied into it as
+  the "original" unless every translated line still finds its Japanese text there, so English
+  written by an older export can't become the original. (Backups made by 1.1.0 can't tell an
+  update from the app's own output, so for those nothing is refreshed until the first export
+  with this version.)
 
 Translations in the right place:
 
@@ -64,16 +71,27 @@ Honest reports:
   with the files and line counts when a file could not be written, or when translated lines
   could not be placed because the game's text changed or the line is gone. The advice matches
   the cause. The install package (patch zip) reports missing lines the same way.
-- **Files that can't be read are listed** when you open or resume a project, instead of their text
-  silently missing.
+- **After a game update, the export says what happened**: translated lines whose game text
+  changed are skipped and listed, and the game keeps its new text there. This version does not
+  add a game update's new or changed lines to an existing project; to translate the new version,
+  start a new project on a clean copy of the updated game (Import Translations can bring over
+  your existing work). Resuming a project never writes to the game files or the backup (apart
+  from putting back a folder that an interrupted Restore Originals left out) and never changes
+  your existing lines because the game changed.
+- **Files that can't be read are listed** when you open a project, instead of their text silently
+  missing.
+
+Install package (RPG Maker MV/MZ patch zip):
+
+- **The package contains every data file**, including files only the current game has (added by
+  an update). They used to be left out without a word.
+- **`install.bat` never removes a game file.** It copies `data/` to `data_original/` and copies
+  the translated files over `data/`; files the package doesn't have stay in the game. Before, it
+  renamed or deleted `data/`, so the player's game could lose a map and crash.
+  `uninstall.bat` copies the originals back.
 
 Your work is kept:
 
-- **Re-opening a project after a game update picks up the changes**, for every engine. Lines are
-  matched by their text, so lines that only moved keep their translation and Reviewed status. New
-  lines are added, changed lines go back to untranslated, and lines that left the game are removed
-  from the list. The old translations of changed and removed lines are kept in the save file. If
-  most of your translated lines would change (probably the wrong game), you are asked first.
 - **Ren'Py projects from earlier versions keep their work** after the dialogue numbering changed
   in this version (see below): saved projects are re-matched by text when they are opened.
 - **Your reviewed lines are left alone.** Automatic clean-up, code repair and bulk grammar polish
@@ -108,10 +126,8 @@ Engines:
 - Bulk grammar polish only polishes lines that aren't marked Reviewed.
 - RPG Maker 2000/2003 export asks before adding EasyRPG Player to the game folder.
 - Writing translations to the game no longer freezes the window on large games.
-- Resuming a project checks the game for updates in the background, with a progress dialog.
 - Ren'Py: lines ending in `with …`, `nointeract` or `id …` are now dialogue, so later lines of the
   same label are numbered differently. Saved projects are re-matched by text automatically.
-- The "speaker processing" setting is saved with each project and used again when it is resumed.
 
 ### Security
 
