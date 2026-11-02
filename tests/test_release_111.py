@@ -262,3 +262,153 @@ def test_recovery_note_of_another_game_is_not_shown(tmp_path):
     (a / "data.rmt-old" / game_io.SWAP_MARKER).write_text("x")
     assert game_io.recover_interrupted_restore(str(a / "data"))
     assert len(game_io.take_recovery_notes(str(a))) == 1
+
+
+# ── Export-time backup refresh made safe ─────────────────────────────
+
+def _sha(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def _mv_translated(mv_game, mv_parser):
+    from test_smoke_findings import _set_page
+    _set_page(mv_game, [(401, "一行目の台詞"), (401, "二行目の台詞")])
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "reviewed"
+    return entries
+
+
+def test_mv_english_file_missing_from_backup_is_never_adopted(mv_game,
+                                                               mv_parser):
+    """Review H3 (related path): a data file the backup lacks whose game
+    copy is our own English (1.1.0 export) is not copied into the backup
+    as the "original" and not written; its lines are reported."""
+    entries = _mv_translated(mv_game, mv_parser)
+    mv_parser.save_project(mv_game, entries)
+    os.remove(os.path.join(mv_game, "data_original", "Map001.json"))
+    live = os.path.join(mv_game, "data", "Map001.json")
+    before = _sha(live)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert "Map001.json" in ei.value.changed
+    assert not os.path.exists(os.path.join(mv_game, "data_original",
+                                           "Map001.json"))
+    assert _sha(live) == before
+
+
+def test_mv_japanese_file_missing_from_backup_is_backed_up_then_written(
+        mv_game, mv_parser, tmp_path):
+    entries = _mv_translated(mv_game, mv_parser)
+    live = os.path.join(mv_game, "data", "Map001.json")
+    jp = (tmp_path / "jp.json")
+    jp.write_bytes(open(live, "rb").read())
+    mv_parser.save_project(mv_game, entries)
+    os.remove(os.path.join(mv_game, "data_original", "Map001.json"))
+    with open(live, "wb") as f:                        # Japanese again
+        f.write(jp.read_bytes())
+    mv_parser.save_project(mv_game, entries)          # complete
+    bak = os.path.join(mv_game, "data_original", "Map001.json")
+    assert _sha(bak) == _sha(str(jp))
+    assert "EN " in open(live, encoding="utf-8-sig").read()
+
+
+def test_mv_file_missing_from_backup_without_lines_is_left_alone(
+        mv_game, mv_parser):
+    entries = mv_parser.load_project(mv_game)
+    mv_parser.save_project(mv_game, entries)
+    extra = os.path.join(mv_game, "data", "Map099.json")
+    with open(extra, "w", encoding="utf-8") as f:
+        f.write('{"events": [], "displayName": "新しい"}')
+    before = _sha(extra)
+    mv_parser.save_project(mv_game, entries)
+    assert _sha(extra) == before
+    assert not os.path.exists(os.path.join(mv_game, "data_original",
+                                           "Map099.json"))
+
+
+def test_ace_english_file_missing_from_backup_is_never_adopted(tmp_path):
+    from test_smoke_findings import _ace_one_map_game
+    from translator.rpgmaker_ace import RPGMakerAceParser
+    game, live = _ace_one_map_game(tmp_path, ["こんにちは"])
+    p = RPGMakerAceParser()
+    entries = p.load_project(str(game))
+    for e in entries:
+        e.translation, e.status = "Hello", "reviewed"
+    p.save_project(str(game), entries)
+    os.remove(game / "Data_original" / "Map001.rvdata2")
+    before = _sha(live)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(game), entries)
+    assert "Map001.rvdata2" in ei.value.changed
+    assert not (game / "Data_original" / "Map001.rvdata2").exists()
+    assert _sha(live) == before
+
+
+def test_renpy_english_script_missing_from_backup_is_never_adopted(tmp_path):
+    from translator.renpy import RenPyParser
+    game = tmp_path / "RenGame"
+    (game / "renpy").mkdir(parents=True)
+    (game / "game").mkdir()
+    s = game / "game" / "script.rpy"
+    s.write_bytes('label start:\n    e "こんにちは"\n'.encode("utf-8"))
+    p = RenPyParser()
+    entries = p.load_project(str(game))
+    for e in entries:
+        e.translation, e.status = "Hello", "reviewed"
+    p.save_project(str(game), entries)
+    os.remove(game / "game_original" / "script.rpy")
+    before = _sha(s)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(game), entries)
+    assert "script.rpy" in ei.value.changed
+    assert not (game / "game_original" / "script.rpy").exists()
+    assert _sha(s) == before
+
+
+def test_refresh_refuses_a_live_file_that_looks_translated(tmp_path):
+    """Review H3 at export: English the manifest doesn't know (hand-fixed
+    export, another fan patch) must not replace the Japanese backup."""
+    live, bak = tmp_path / "data", tmp_path / "data_original"
+    live.mkdir()
+    bak.mkdir()
+    (bak / "Map.json").write_text("「" + "こんにちは" * 100 + "」",
+                                  encoding="utf-8")
+    (live / "Map.json").write_text('"' + "Hello there " * 100 + '"',
+                                   encoding="utf-8")
+    m = game_io.ExportManifest(str(bak) + ".manifest.json")
+    m.finish()
+    m = game_io.ExportManifest(str(bak) + ".manifest.json")
+    res = game_io.refresh_changed_originals(
+        [("Map.json", str(live / "Map.json"), str(bak / "Map.json"))], m)
+    assert list(res) == [] and res.refused == ["Map.json"] and res
+    assert "こんにちは" in (bak / "Map.json").read_text(encoding="utf-8")
+    kept = tmp_path / "data_original.replaced" / "Map.json.game-1"
+    assert "Hello there" in kept.read_text(encoding="utf-8")
+    note = game_io.refreshed_note(res)
+    assert "look translated" in note and "data_original.replaced" in note
+
+
+def test_refresh_keeps_the_old_backup_and_stops_if_it_cannot(tmp_path):
+    live, bak = tmp_path / "data", tmp_path / "data_original"
+    live.mkdir()
+    bak.mkdir()
+    (bak / "Map.json").write_text("古い", encoding="utf-8")
+    (live / "Map.json").write_text("新しい", encoding="utf-8")
+    pairs = [("Map.json", str(live / "Map.json"), str(bak / "Map.json"))]
+    m = game_io.ExportManifest(str(bak) + ".manifest.json")
+    m.finish()
+    # the folder for kept copies can't be created: nothing is replaced
+    (tmp_path / "data_original.replaced").write_text("in the way")
+    with pytest.raises(OSError):
+        game_io.refresh_changed_originals(
+            pairs, game_io.ExportManifest(str(bak) + ".manifest.json"))
+    assert (bak / "Map.json").read_text(encoding="utf-8") == "古い"
+    os.remove(tmp_path / "data_original.replaced")
+    res = game_io.refresh_changed_originals(
+        pairs, game_io.ExportManifest(str(bak) + ".manifest.json"))
+    assert list(res) == ["Map.json"]
+    assert (bak / "Map.json").read_text(encoding="utf-8") == "新しい"
+    assert (tmp_path / "data_original.replaced" / "Map.json.backup-1"
+            ).read_text(encoding="utf-8") == "古い"

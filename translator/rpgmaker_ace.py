@@ -349,13 +349,31 @@ class RPGMakerAceParser:
             out_path = os.path.join(data_dir, filename)
             if not os.path.exists(source_path) and os.path.isfile(out_path) \
                     and file_entries and source_path != out_path:
-                # The backup predates this file: back it up before writing
+                # The backup has no copy of this file.  The game's copy is
+                # taken as the original only if every translated line still
+                # finds its original there -- otherwise it may be English
+                # from an older export, and must never become the
+                # "original" in the backup.  Then nothing is written.
+                try:
+                    data = self._read_rvdata2(out_path)
+                    n = self._apply_translations(data, filename, file_entries)
+                except Exception as exc:
+                    log.error("Failed to read %s: %s", filename, exc)
+                    problems.append(f"{filename} ({exc})")
+                    continue
+                if n:
+                    skipped[filename] = len(file_entries)
+                    log.warning("%s is not in the backup and its game copy "
+                                "is not the original: not written", filename)
+                    continue
                 try:
                     game_io.backup_file_once(out_path, source_path)
-                except OSError as exc:
-                    problems.append(f"{filename} (could not back it up "
-                                    f"before writing: {exc})")
-                    continue
+                    self._write_rvdata2(out_path, data)
+                    manifest.record(filename, out_path)
+                except Exception as exc:
+                    log.error("Failed to export %s: %s", filename, exc)
+                    problems.append(f"{filename} ({exc})")
+                continue
             if not os.path.exists(source_path):
                 if file_entries:
                     problems.append(f"{filename} (file not found, "
@@ -384,10 +402,11 @@ class RPGMakerAceParser:
     def _backup_pairs(data_dir: str) -> list:
         """(name, live, backup) for every data file in either folder.
 
-        Every file, not only those with entries: a map a game update adds
-        has none yet, and must still reach the backup (or Restore would
-        drop it).  Scripts.rvdata2 is left out -- only the script plugins
-        change it, and they keep their own backup.
+        Every file, not only those with entries, so an update to any of them
+        refreshes the backup (files the backup lacks are never taken into
+        it by the refresh; Restore keeps them).  Scripts.rvdata2 is left
+        out -- only the script plugins change it, and they keep their own
+        backup.
         """
         backup_dir = data_dir + "_original"
         names = set()

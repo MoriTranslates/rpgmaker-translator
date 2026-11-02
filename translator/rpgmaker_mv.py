@@ -615,22 +615,22 @@ class RPGMakerMVParser:
         skipped_lines: dict[str, int] = {}
         for filename in sorted(candidates):
             source_path = os.path.join(source_dir, filename)
+            live_path = os.path.join(data_dir, filename)
+            adopt = False
             if not os.path.isfile(source_path):
-                live_path = os.path.join(data_dir, filename)
                 if not os.path.isfile(live_path):
                     continue
-                # The backup predates this file (game update with no usable
-                # manifest).  Back the live original up BEFORE writing it,
-                # so Restore Originals can bring it back.
-                try:
-                    if source_dir == backup_dir:
-                        game_io.backup_file_once(live_path, source_path)
-                    else:
-                        source_path = live_path
-                except OSError as exc:
-                    errors.append(f"{filename}: could not back it up "
-                                  f"before writing ({exc})")
+                if source_dir == backup_dir and not by_file.get(filename):
+                    # Not in the backup and nothing to write: leave the
+                    # game's file exactly as it is.
                     continue
+                # The backup has no copy (added by a game update, or by an
+                # older version's export).  The game's copy is taken as the
+                # original only if every translated line still finds its
+                # original there -- it may be English from a 1.1.0 export,
+                # which must never become the "original" in the backup.
+                source_path = live_path
+                adopt = source_dir == backup_dir
 
             try:
                 with open(source_path, "r", encoding="utf-8-sig") as f:
@@ -639,7 +639,18 @@ class RPGMakerMVParser:
                 n_skipped = self._apply_translations_fast(
                     data, by_file.get(filename, []),
                     global_speakers=global_speakers)
-                if n_skipped:
+                if adopt:
+                    if n_skipped:
+                        skipped_lines[filename] = len(by_file[filename])
+                        log.warning("%s is not in the backup and its game "
+                                    "copy is not the original: not written",
+                                    filename)
+                        continue
+                    # Back the untouched game copy up BEFORE writing it, so
+                    # Restore Originals can bring it back; no backup, no write.
+                    game_io.backup_file_once(
+                        live_path, os.path.join(backup_dir, filename))
+                elif n_skipped:
                     skipped_lines[filename] = n_skipped
 
                 # Switch locale so name input shows Latin alphabet instead of kana

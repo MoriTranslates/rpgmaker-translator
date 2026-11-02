@@ -99,9 +99,13 @@ def test_refresh_changed_originals_rules(tmp_path):
     (live / "update.json").write_text("JP2-v2", encoding="utf-8")
     m = game_io.ExportManifest(str(bak) + ".manifest.json")
     refreshed = game_io.refresh_changed_originals(pairs, m)
-    assert sorted(refreshed) == ["new.json", "update.json"]
+    assert sorted(refreshed) == ["update.json"]
     assert (bak / "update.json").read_text(encoding="utf-8") == "JP2-v2"
-    assert (bak / "new.json").read_text(encoding="utf-8") == "NEW"
+    # 1.1.1: a file the backup lacks is never taken into it (it could be
+    # English written by a 1.1.0 export), and the replaced backup is kept.
+    assert not (bak / "new.json").exists()
+    kept = tmp_path / "data_original.replaced" / "update.json.backup-1"
+    assert kept.read_text(encoding="utf-8") == "JP2"
     # Our own export output is never baked into the backup.
     assert (bak / "ours.json").read_text(encoding="utf-8") == "JP1"
 

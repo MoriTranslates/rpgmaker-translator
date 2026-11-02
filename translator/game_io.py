@@ -14,9 +14,10 @@ guarantees are the same for all engines:
   swaps it in, so a failed restore leaves the live folder untouched.
 * ``ExportManifest`` + ``refresh_changed_originals`` — remember what each
   export wrote.  If a live file later differs from both the backup and what
-  we wrote, the game was updated (or patched by hand) after the backup was
-  taken; the backup is re-baselined from it instead of silently rolling the
-  update back on the next export.
+  we wrote, the game was updated after the backup was taken; at export the
+  backup is re-baselined from it (the old copy kept aside) instead of
+  silently rolling the update back.  Never on resume, never for a file the
+  backup lacks, never for a live file that looks translated.
 * ``PartialExportError`` — raised when some files were written and others
   failed, so the UI never reports "Export Complete" for a partial export.
 """
@@ -533,7 +534,77 @@ class ExportManifest:
         self.exists = not self.pending
 
 
-def refresh_changed_originals(pairs, manifest: ExportManifest) -> list[str]:
+class RefreshResult(list):
+    """Keys whose backup was re-baselined, plus what was refused / kept.
+
+    ``refused``  -- keys whose live file looked like a translation (far less
+                    Japanese than the backup): the backup was left alone.
+    ``kept_dir`` -- folder holding the copies saved before anything was
+                    replaced (old backups, and refused live files).
+    True when anything was refreshed or refused, so callers that only
+    check ``if refreshed:`` still show the note.
+    """
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.refused: list[str] = []
+        self.kept_dir = ""
+
+    def __bool__(self):
+        return bool(len(self) or self.refused)
+
+
+# A live file is not taken as a game update when it holds less than this
+# share of the backup's Japanese (only judged when the backup has at least
+# _JP_MIN_FOR_CHECK Japanese characters).
+_JP_KEEP_RATIO = 0.5
+_JP_MIN_FOR_CHECK = 200
+
+
+def _japanese_counts(path: str) -> tuple[int, int]:
+    """Japanese characters in *path* read as UTF-8 and as cp932."""
+    from . import JAPANESE_RE
+    with open(path, "rb") as f:
+        raw = f.read()
+    return (len(JAPANESE_RE.findall(raw.decode("utf-8", "ignore"))),
+            len(JAPANESE_RE.findall(raw.decode("cp932", "ignore"))))
+
+
+def _looks_translated(live: str, bak: str) -> bool:
+    """Does *live* hold far less Japanese than *bak* (a translation, a fan
+    patch or a hand-edited export, rather than a game update)?"""
+    b_utf8, b_sjis = _japanese_counts(bak)
+    l_utf8, l_sjis = _japanese_counts(live)
+    # compare in the encoding that finds the most Japanese in the backup
+    b, live_n = (b_utf8, l_utf8) if b_utf8 >= b_sjis else (b_sjis, l_sjis)
+    return b >= _JP_MIN_FOR_CHECK and live_n < b * _JP_KEEP_RATIO
+
+
+def kept_copies_dir(manifest: ExportManifest) -> str:
+    """Where copies are saved before a backup file is replaced.
+
+    Beside the backup, never inside it (a restore would copy it into the
+    game) -- ``data_original.manifest.json`` -> ``data_original.replaced``.
+    """
+    base = manifest.path
+    if base.endswith(".manifest.json"):
+        base = base[:-len(".manifest.json")]
+    return base + ".replaced"
+
+
+def _keep_copy(src: str, key: str, kept_dir: str, tag: str) -> str:
+    """Copy *src* into *kept_dir* under a new name; raises on failure."""
+    name = key.replace("/", "__").replace("\\", "__")
+    n = 1
+    while os.path.exists(os.path.join(kept_dir, f"{name}.{tag}-{n}")):
+        n += 1
+    dst = os.path.join(kept_dir, f"{name}.{tag}-{n}")
+    os.makedirs(kept_dir, exist_ok=True)
+    atomic_copy(src, dst)
+    return dst
+
+
+def refresh_changed_originals(pairs, manifest: ExportManifest) -> RefreshResult:
     """Re-baseline backups for game files that changed after the backup.
 
     *pairs* is an iterable of ``(key, live_path, backup_path)``.  A live
@@ -541,48 +612,83 @@ def refresh_changed_originals(pairs, manifest: ExportManifest) -> list[str]:
 
     * a manifest exists (so we know what earlier exports wrote — without one
       a difference from the backup is most likely our own previous output),
-    * the live file is not what we last wrote, and
-    * it differs from the backup (or the backup has no copy of it).
+    * the backup HAS a copy of the file (a file the backup lacks can't be
+      compared with any original: it may be a 1.1.0 export's English
+      output, and must never be taken as the "original"),
+    * the live file is not what we last wrote and differs from the backup,
+    * the live file does not hold far less Japanese than the backup (then
+      it is a translation -- a fan patch, a hand-edited export -- not a
+      game update; it is refused and saved aside instead).
+
+    Before a backup file is replaced, the old copy is saved in
+    ``kept_copies_dir``; if that fails, OSError is raised and nothing is
+    replaced (the export must then stop before writing the game).
 
     Always marks the manifest pending (``begin``) before returning, so
     callers write game files only after that marker is safely on disk.
-
-    Returns the keys that were refreshed.
     """
-    refreshed = []
+    result = RefreshResult()
     if not manifest.exists:
         manifest.begin()
-        return refreshed
+        return result
+    kept_dir = kept_copies_dir(manifest)
     for key, live, bak in pairs:
-        if not os.path.isfile(live):
+        if not os.path.isfile(live) or not os.path.isfile(bak):
             continue
         if manifest.is_ours(key, live):
             continue
-        if os.path.isfile(bak) and _same_content(live, bak):
+        if _same_content(live, bak):
             continue
-        os.makedirs(os.path.dirname(bak) or ".", exist_ok=True)
+        if _looks_translated(live, bak):
+            # The export will overwrite this live file from the backup:
+            # keep what was there.  Failing to keep it stops the export.
+            _keep_copy(live, key, kept_dir, "game")
+            result.refused.append(key)
+            result.kept_dir = kept_dir
+            log.warning("Game file %s differs from the backup but holds far "
+                        "less Japanese: not taken as a game update (copy "
+                        "kept in %s)", key, kept_dir)
+            continue
+        _keep_copy(bak, key, kept_dir, "backup")
+        result.kept_dir = kept_dir
         atomic_copy(live, bak)
         manifest.forget(key)
-        refreshed.append(key)
+        result.append(key)
         log.warning("Game file %s changed since the backup was taken — "
-                    "backup refreshed from the current file", key)
+                    "backup refreshed from the current file (old copy in "
+                    "%s)", key, kept_dir)
     manifest.begin()
-    return refreshed
+    return result
 
 
 def refreshed_note(refreshed: list[str]) -> str:
-    """User-facing note for files whose backup was re-baselined."""
-    if not refreshed:
-        return ""
-    shown = ", ".join(refreshed[:8])
-    more = f" and {len(refreshed) - 8} more" if len(refreshed) > 8 else ""
-    return (f"{len(refreshed)} game file(s) changed since your first export "
+    """User-facing note for files whose backup was re-baselined (or not)."""
+    parts = []
+    kept = getattr(refreshed, "kept_dir", "")
+    if len(refreshed):
+        shown = ", ".join(refreshed[:8])
+        more = (f" and {len(refreshed) - 8} more"
+                if len(refreshed) > 8 else "")
+        parts.append(
+            f"{len(refreshed)} game file(s) changed since your first export "
             f"(game update?): {shown}{more}. The backup was refreshed from "
             f"the current files so the update is kept. This project does not "
             f"pick up new or changed lines: translated lines whose text "
             f"changed were skipped and are listed, and new lines stay "
             f"untranslated. To translate the new version of the game, start "
             f"a new project on a clean copy of it.")
+    refused = getattr(refreshed, "refused", [])
+    if refused:
+        shown = ", ".join(refused[:8])
+        more = f" and {len(refused) - 8} more" if len(refused) > 8 else ""
+        parts.append(
+            f"{len(refused)} game file(s) differ from the backup but look "
+            f"translated, not updated: {shown}{more}. The backup was kept "
+            f"as it was; a copy of each of those game files was saved "
+            f"before exporting.")
+    if parts and kept:
+        parts.append(f"Copies of everything replaced are in {kept}.")
+    return " ".join(parts)
 
 
 def tree_pairs(live_dir: str, backup_dir: str, suffixes: tuple[str, ...]):
