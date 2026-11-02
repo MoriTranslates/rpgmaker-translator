@@ -25,6 +25,7 @@ from PyQt6.QtGui import (
 from ..project_model import TranslationEntry
 from .. import CONTROL_CODE_RE, JAPANESE_RE
 from . import theme
+from .status_delegate import STATUS_ROLE, StatusDelegate
 
 _CODE_RE = CONTROL_CODE_RE  # local alias
 _JAPANESE_RE = JAPANESE_RE
@@ -98,8 +99,14 @@ class TranslationTableModel(QAbstractTableModel):
             if col == COL_STATUS:
                 return theme.STATUS_LABELS.get(entry.status, entry.status)
 
+        elif role == STATUS_ROLE:
+            if col == COL_STATUS:
+                return entry.status
+
         elif role == Qt.ItemDataRole.BackgroundRole:
-            return theme.status_row_color(entry.status)
+            # Rows stay neutral; only work still to do gets a faint wash
+            if entry.status == "untranslated":
+                return theme.status_row_color(entry.status)
 
         elif role == Qt.ItemDataRole.ForegroundRole:
             if col == COL_STATUS:
@@ -143,8 +150,8 @@ class TranslationTableModel(QAbstractTableModel):
             return _COLUMN_HEADERS[section] if section < len(_COLUMN_HEADERS) else ""
         if (orientation == Qt.Orientation.Horizontal
                 and role == Qt.ItemDataRole.ToolTipRole and section == COL_STATUS):
-            return ("Status: ○ untranslated  ◐ translated  "
-                    "● reviewed  — skipped")
+            return ("Status: ○ untranslated  ● translated  "
+                    "✓ reviewed  — skipped")
         return None
 
     # ── Helpers for external updates ──────────────────────────────
@@ -340,6 +347,8 @@ class TranslationTable(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(COL_STATUS, 30)
+        self._status_delegate = StatusDelegate(self.table)
+        self.table.setItemDelegateForColumn(COL_STATUS, self._status_delegate)
         header.setSectionResizeMode(COL_FILE, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(COL_FIELD, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(COL_ORIGINAL, QHeaderView.ResizeMode.Stretch)

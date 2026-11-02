@@ -48,11 +48,11 @@ DARK = {
     "error":        "#f38ba8",  # red
     "special":      "#cba6f7",  # mauve
     "tooltip":      "#313244",
-    # Translation table row tints, by entry status
-    "row_untranslated": "#47283a",
-    "row_translated":   "#433f2b",
-    "row_reviewed":     "#24432f",
-    "row_skipped":      "#2a2b3a",
+    # Row tints by entry status — kept faint; the status stripe carries meaning
+    "row_untranslated": "#241b2b",
+    "row_translated":   "#24222b",
+    "row_reviewed":     "#1b2a26",
+    "row_skipped":      "#1e1e2c",
 }
 
 # Semantic tokens → Catppuccin Latte (light)
@@ -82,10 +82,10 @@ LIGHT = {
     "error":        "#d20f39",
     "special":      "#8839ef",
     "tooltip":      "#ffffff",
-    "row_untranslated": "#fce4e8",
-    "row_translated":   "#fbf1d6",
-    "row_reviewed":     "#e0f2da",
-    "row_skipped":      "#eceef3",
+    "row_untranslated": "#fdf1f3",
+    "row_translated":   "#fdf8ec",
+    "row_reviewed":     "#eff8ec",
+    "row_skipped":      "#f4f5f8",
 }
 
 _state = {"dark": True}
@@ -110,11 +110,12 @@ def qcolor(name: str) -> QColor:
 
 # ── Shared status visuals (never rely on color alone) ──────────────
 
+# Text fallbacks (exports, tooltips); the tables draw these shapes themselves
 STATUS_ICONS = {
-    "untranslated": "○",  # ○
-    "translated":   "◐",  # ◐
-    "reviewed":     "●",  # ●
-    "skipped":      "—",  # —
+    "untranslated": "○",
+    "translated":   "●",
+    "reviewed":     "✓",
+    "skipped":      "—",
 }
 
 STATUS_LABELS = {

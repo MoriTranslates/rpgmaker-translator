@@ -14,6 +14,7 @@ from PyQt6.QtGui import QColor, QFont
 from ..utils import event_prefix, extract_event_context
 from .spell_checker import SpellHighlighter, build_spell_menu_actions
 from . import theme
+from .status_delegate import STATUS_ROLE, StatusDelegate
 
 # Files that contain events (not database flat entries)
 _EVENT_FILES = {"CommonEvents.json", "Troops.json"}
@@ -104,6 +105,8 @@ class EventViewerPanel(QWidget):
         h = self._detail_table.horizontalHeader()
         h.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self._detail_table.setColumnWidth(0, 30)
+        self._detail_table.setItemDelegateForColumn(
+            0, StatusDelegate(self._detail_table))
         h.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self._detail_table.setColumnWidth(1, 120)
         h.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
@@ -564,6 +567,7 @@ class EventViewerPanel(QWidget):
         status_item = self._detail_table.item(row, 0)
         if status_item:
             status_item.setForeground(theme.status_fg(entry.status))
+            status_item.setData(STATUS_ROLE, entry.status)
             status_item.setToolTip(theme.STATUS_LABELS.get(entry.status, ""))
 
     # ── Internal: editing & review ───────────────────────────────────
