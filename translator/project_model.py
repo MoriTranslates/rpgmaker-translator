@@ -70,6 +70,10 @@ class TranslationProject:
     # Translated entries from a pre-migration state that no longer match
     # any entry of the game (kept as dicts so nothing is silently lost).
     migration_orphans: list = field(default_factory=list)
+    # Parser settings the entries were made with (e.g. speaker_processing),
+    # re-applied on resume so a changed setting doesn't look like a game
+    # update to the merge.
+    parse_options: dict = field(default_factory=dict)
 
     @property
     def total(self) -> int:
@@ -138,6 +142,8 @@ class TranslationProject:
         }
         if self.migration_orphans:
             data["migration_orphans"] = self.migration_orphans
+        if self.parse_options:
+            data["parse_options"] = self.parse_options
         dir_name = os.path.dirname(path) if os.path.dirname(path) else "."
         os.makedirs(dir_name, exist_ok=True)
         # Atomic write: write to temp file then rename to prevent corruption
@@ -178,67 +184,22 @@ class TranslationProject:
         project.id_scheme = _read_id_scheme(data)
         orphans = data.get("migration_orphans", [])
         project.migration_orphans = orphans if isinstance(orphans, list) else []
+        opts = data.get("parse_options", {})
+        project.parse_options = opts if isinstance(opts, dict) else {}
         project._build_index()
         return project
 
-    def merge_fresh_originals(self, fresh_entries: list) -> dict:
+    def merge_fresh_originals(self, fresh_entries: list,
+                              unreadable_files=(), force: bool = False) -> dict:
         """Merge a fresh parse of the game's ORIGINAL text (game update).
 
-        By entry ID:
-        * same original (and namebox) — the project's entry is kept as is:
-          translation, status (reviewed!) and context untouched;
-        * new ID — the fresh entry is added (untranslated);
-        * changed original — the entry takes the new original and becomes
-          untranslated; its old translation is kept in
-          ``migration_orphans`` so nothing is silently lost.
-        Entries the fresh parse doesn't produce are never removed (parse
-        options or an unreadable file must not delete the user's work).
-
-        Safety: when more than half of the translated / reviewed entries
-        would change, the parse most likely read the wrong files (e.g. a
-        translated game without its backup).  Nothing is merged then and
-        ``status`` is ``"low_match"``.
-
-        Returns ``{"status", "new", "changed", "unchanged"}``.
+        Matches by ID, then by text within the same scope (a game update
+        renumbers positional IDs), retires lines that left the game and
+        keeps every old translation recoverable in ``migration_orphans``.
+        See ``translator.game_update`` for the rules.
         """
-        self._ensure_index()
-        stats = {"status": "merged", "new": 0, "changed": 0, "unchanged": 0}
-        by_id = {e.id: e for e in self.entries}
-        changed, new = [], []
-        for f in fresh_entries:
-            old = by_id.get(f.id)
-            if old is None:
-                new.append(f)
-            elif (old.original == f.original
-                  and (old.namebox or "") == (f.namebox or "")):
-                stats["unchanged"] += 1
-            else:
-                changed.append((old, f))
-        with_work = sum(1 for e in self.entries
-                        if e.translation and e.status in ("translated", "reviewed"))
-        changed_work = sum(1 for old, _f in changed
-                           if old.translation
-                           and old.status in ("translated", "reviewed"))
-        if with_work and changed_work > with_work / 2:
-            stats["status"] = "low_match"
-            stats["changed"] = len(changed)
-            return stats
-        for old, f in changed:
-            if old.translation:
-                self.migration_orphans.append(
-                    {**asdict(old), "reason": "original changed (game update)"})
-            old.original = f.original
-            old.namebox = f.namebox
-            old.has_face = f.has_face
-            old.context = f.context
-            old.translation = ""
-            old.status = "untranslated"
-        self.entries.extend(new)
-        stats["new"] = len(new)
-        stats["changed"] = len(changed)
-        if new:
-            self._build_index()
-        return stats
+        from .game_update import merge
+        return merge(self, fresh_entries, unreadable_files, force)
 
     def import_translations(self, old_project: "TranslationProject") -> dict:
         """Import translations from an older version of the same project.

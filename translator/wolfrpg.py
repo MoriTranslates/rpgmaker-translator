@@ -1163,8 +1163,11 @@ class WolfRPGParser:
 
         return entries
 
-    def _find_data_dir(self) -> Path:
-        """Find or create the Data/ directory."""
+    def _find_data_dir(self, unpack: bool = True):
+        """Find the Data/ directory (unpacking Data.wolf if *unpack*).
+
+        With ``unpack=False`` returns None instead of unpacking.
+        """
         # Check Data/ folder with actual game content
         data_dir = self.game_dir / 'Data'
         if data_dir.is_dir():
@@ -1181,6 +1184,8 @@ class WolfRPGParser:
 
         # Need to unpack Data.wolf
         wolf_file = self.game_dir / 'Data.wolf'
+        if not unpack:
+            return None
         if wolf_file.is_file():
             return unpack_data_wolf(self.game_dir)
 
@@ -1794,6 +1799,24 @@ class WolfRPGParser:
         if match:
             return match.group(0) + translated
         return translated
+
+    def refresh_backups(self, folder: str) -> list[str]:
+        """Before a resume merge: put a game update into the backup.
+
+        Never unpacks Data.wolf (only an already unpacked game has a
+        backup to refresh).
+        """
+        self.game_dir = Path(folder)
+        data_dir = self._find_data_dir(unpack=False)
+        if data_dir is None or wolf3_marker(data_dir):
+            return []
+        self.data_dir = data_dir
+        backup_dir = self._backup_dir_for(data_dir)
+        if not backup_dir.is_dir():
+            return []
+        return game_io.refresh_on_resume(
+            list(self._data_file_pairs(backup_dir)),
+            str(backup_dir) + '.manifest.json')
 
     def restore_originals(self, folder: str):
         """Restore original files from backup."""

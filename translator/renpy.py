@@ -587,6 +587,16 @@ class RenPyParser:
 
     # ── Restore originals ─────────────────────────────────────────────
 
+    def refresh_backups(self, project_dir: str) -> list[str]:
+        """Before a resume merge: put a game update into the backup."""
+        game_dir = os.path.join(project_dir, "game")
+        backup_dir = os.path.join(project_dir, "game_original")
+        if not os.path.isdir(backup_dir):
+            return []
+        return game_io.refresh_on_resume(
+            [(f, os.path.join(game_dir, f), os.path.join(backup_dir, f))
+             for f in _rpy_files(game_dir)], backup_dir + ".manifest.json")
+
     def restore_originals(self, project_dir: str):
         """Restore original .rpy files from backup."""
         game_dir = os.path.join(project_dir, "game")

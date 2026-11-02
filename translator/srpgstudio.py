@@ -484,6 +484,15 @@ class SRPGStudioParser:
 
         return b"".join(parts)
 
+    def refresh_backups(self, project_dir: str) -> list[str]:
+        """Before a resume merge: put a game update into the backup."""
+        dts = os.path.join(project_dir, "data.dts")
+        backup = os.path.join(project_dir, "data_original.dts")
+        if not os.path.isfile(backup):
+            return []
+        return game_io.refresh_on_resume(
+            [("data.dts", dts, backup)], backup + ".manifest.json")
+
     def restore_originals(self, project_dir: str):
         """Restore original data.dts from backup."""
         dts_path = os.path.join(project_dir, "data.dts")

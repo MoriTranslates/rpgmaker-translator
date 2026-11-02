@@ -40,7 +40,6 @@ def test_marshal_link_after_class_or_module(blob):
 #    so every later line in that label is renumbered.  A project saved by
 #    85054f3 (verified: the old _classify_line returns None for
 #    `e "..." with dissolve`) loses its reviewed lines on resume.
-@pytest.mark.xfail(strict=True, reason="round 2: fix pending")
 def test_renpy_upgrade_renumbering_resets_reviewed_lines(tmp_path):
     from translator.renpy import RenPyParser
     game = tmp_path / "RenGame"
@@ -71,7 +70,6 @@ def test_renpy_upgrade_renumbering_resets_reviewed_lines(tmp_path):
 
 # 3. Merge is purely by positional ID: a game update that inserts one line
 #    resets every later translated line, even though its text is unchanged.
-@pytest.mark.xfail(strict=True, reason="round 2: fix pending")
 def test_merge_shifted_ids_keep_translation_of_unchanged_text():
     proj = TranslationProject(project_path="", entries=[
         _entry("M/Ev1/p0/msg1", "M", "msg", "おはよう", "Morning", "reviewed"),
@@ -128,7 +126,6 @@ def test_mv_patch_zip_reports_skipped_lines(mv_game, mv_parser, tmp_path):
 
 # 6. MV: speaker_processing is not persisted; a resume with a different
 #    value re-parses every namebox line differently and resets it.
-@pytest.mark.xfail(strict=True, reason="round 2: fix pending")
 def test_mv_merge_with_different_speaker_setting_keeps_work(mv_game, mv_parser):
     path = os.path.join(mv_game, "data", "Map001.json")
     with open(path, encoding="utf-8-sig") as f:
@@ -154,7 +151,6 @@ def test_mv_merge_with_different_speaker_setting_keeps_work(mv_game, mv_parser):
 #    copied into Data_original (refresh only covers files that already have
 #    entries), so the resume merge never sees its lines, and Restore
 #    Originals (full-folder swap) deletes it from the game.
-@pytest.mark.xfail(strict=True, reason="round 2: fix pending")
 def test_ace_new_map_from_update_is_merged_and_survives_restore(tmp_path):
     from test_smoke_findings import _ace_map, _ace_one_map_game
     from translator.rpgmaker_ace import RPGMakerAceParser, ruby_writes
@@ -315,3 +311,233 @@ def test_renpy_export_refuses_a_line_that_would_break(tmp_path, monkeypatch):
     assert "would break the script line" in str(ei.value)
     text = (game / "game" / "script.rpy").read_text(encoding="utf-8")
     assert 'broken " quote' not in text
+
+
+# ── Resume merge (fixes 2, 4-7, 17, 18; Gemini claim 3) ──────────────
+
+def _window(qapp, monkeypatch, tmp_path, answers=None, shown=None):
+    from translator.widgets import main_window as mw
+    settings = tmp_path / "_settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(mw.MainWindow, "_SETTINGS_FILE", str(settings))
+    monkeypatch.setattr(mw.AIClient, "is_available", lambda self: False)
+    monkeypatch.setattr(mw.AIClient, "list_models", lambda self: [])
+    shown = shown if shown is not None else []
+
+    def record(kind):
+        def fn(_parent, title, text, *args, **kwargs):
+            shown.append((kind, title, text))
+        return fn
+    monkeypatch.setattr(mw.QMessageBox, "information", record("information"))
+    monkeypatch.setattr(mw.QMessageBox, "warning", record("warning"))
+    answers = answers if answers is not None else []
+
+    def question(*args, **kwargs):
+        return answers.pop(0) if answers else mw.QMessageBox.StandardButton.No
+    monkeypatch.setattr(mw.QMessageBox, "question", question)
+    win = mw.MainWindow()
+    return win, shown
+
+
+def _close(win):
+    win._closing = True
+    win._autosave_timer.stop()
+    win.hide()
+
+
+def test_resume_after_update_reads_the_update_not_the_stale_backup(
+        qapp, monkeypatch, tmp_path, mv_game, mv_parser):
+    """Gemini claim 3 (real): the game is updated AFTER an export and the
+    project is resumed before any new export.  load_originals used to read
+    the old data_original/ and see nothing."""
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "translated"
+    mv_parser.save_project(mv_game, entries)
+    proj = TranslationProject(project_path=mv_game, project_type="rpgmaker_mv",
+                              entries=entries)
+    state = os.path.join(mv_game, "_translation_state.json")
+    proj.save_state(state)
+    # game update: live Items.json = the original plus a new item
+    with open(os.path.join(mv_game, "data_original", "Items.json"),
+              encoding="utf-8-sig") as f:
+        items = json.load(f)
+    items.append({"id": len(items), "name": "更新アイテム", "description": "",
+                  "note": ""})
+    with open(os.path.join(mv_game, "data", "Items.json"), "w",
+              encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False)
+    win, shown = _window(qapp, monkeypatch, tmp_path)
+    try:
+        assert win._restore_from_state(state)
+    finally:
+        _close(win)
+    assert any(e.original == "更新アイテム" for e in win.project.entries)
+    with open(os.path.join(mv_game, "data_original", "Items.json"),
+              encoding="utf-8-sig") as f:
+        assert any(isinstance(i, dict) and i.get("name") == "更新アイテム"
+                   for i in json.load(f))        # backup refreshed
+    assert any(t == "Game Update Merged" for _k, t, _x in shown)
+
+
+def test_parse_options_are_saved_and_applied_on_resume(
+        qapp, monkeypatch, tmp_path, mv_game):
+    proj = TranslationProject(project_path=mv_game, project_type="rpgmaker_mv",
+                              entries=[])
+    proj.parse_options = {"speaker_processing": False}
+    state = os.path.join(mv_game, "_translation_state.json")
+    proj.save_state(state)
+    assert TranslationProject.load_state(state).parse_options == \
+        {"speaker_processing": False}
+    win, _shown = _window(qapp, monkeypatch, tmp_path)
+    try:
+        win.handler.parser.speaker_processing = True    # app default
+        assert win._restore_from_state(state)
+        assert win.handler.parser.speaker_processing is False
+    finally:
+        _close(win)
+
+
+def test_low_match_asks_and_can_merge_anyway(qapp, monkeypatch, tmp_path,
+                                             mv_game, mv_parser):
+    from translator.widgets import main_window as mw
+    entries = mv_parser.load_project(mv_game)
+    # 30 translated lines that are not in this game at all
+    fake = [_entry(f"Items.json/{i}/name", "Items.json", "name", f"無い{i}",
+                   f"EN{i}") for i in range(100, 130)]
+    proj = TranslationProject(project_path=mv_game, project_type="rpgmaker_mv",
+                              entries=fake)
+    state = os.path.join(mv_game, "_translation_state.json")
+    proj.save_state(state)
+    win, _shown = _window(qapp, monkeypatch, tmp_path,
+                          answers=[mw.QMessageBox.StandardButton.No])
+    try:
+        assert win._restore_from_state(state)
+        fake_now = [e for e in win.project.entries if e.original.startswith("無い")]
+        assert [e.translation for e in fake_now] == \
+            [f"EN{i}" for i in range(100, 130)]    # No: unchanged
+        assert not win.project.migration_orphans
+    finally:
+        _close(win)
+    win, _shown = _window(qapp, monkeypatch, tmp_path,
+                          answers=[mw.QMessageBox.StandardButton.Yes])
+    try:
+        assert win._restore_from_state(state)
+        assert len(win.project.migration_orphans) == 30   # kept, not lost
+        assert len(win.project.entries) == len(entries)
+    finally:
+        _close(win)
+
+
+def test_resume_shows_load_warnings(qapp, monkeypatch, tmp_path, mv_game):
+    with open(os.path.join(mv_game, "data", "Map001.json"), "w") as f:
+        f.write("{broken")
+    proj = TranslationProject(project_path=mv_game, project_type="rpgmaker_mv",
+                              entries=[_entry("Map001.json/displayName",
+                                              "Map001.json", "displayName",
+                                              "村", "Village", "reviewed")])
+    state = os.path.join(mv_game, "_translation_state.json")
+    proj.save_state(state)
+    win, shown = _window(qapp, monkeypatch, tmp_path)
+    try:
+        assert win._restore_from_state(state)
+    finally:
+        _close(win)
+    assert any(t == "Some Game Files Could Not Be Read" for _k, t, _x in shown)
+    # the unreadable file's entries are kept untouched
+    assert any(e.id == "Map001.json/displayName" and e.status == "reviewed"
+               for e in win.project.entries)
+
+
+def test_line_removed_by_update_is_retired_and_exports_complete(mv_game, mv_parser):
+    """Fix 4: a deleted line no longer keeps every export "Incomplete"."""
+    from test_smoke_findings import _set_page
+    _set_page(mv_game, [(401, "一行目"), (401, "")])
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "translated"
+    mv_parser.save_project(mv_game, entries)
+    # the update (built from the ORIGINAL file) removes the line
+    with open(os.path.join(mv_game, "data_original", "Map001.json"),
+              encoding="utf-8-sig") as f:
+        m = json.load(f)
+    m["events"][1]["pages"][0]["list"] = [{"code": 0, "indent": 0, "parameters": []}]
+    for d in ("data", "data_original"):
+        with open(os.path.join(mv_game, d, "Map001.json"), "w", encoding="utf-8") as f:
+            json.dump(m, f, ensure_ascii=False)
+    proj = TranslationProject(project_path=mv_game, entries=entries)
+    stats = proj.merge_fresh_originals(mv_parser.load_originals(mv_game))
+    assert stats["retired"] == 1
+    assert any(o["original"].startswith("一行目") for o in proj.migration_orphans)
+    mv_parser.save_project(mv_game, proj.entries)        # complete again
+
+
+def test_renamed_mv_event_keeps_its_translations(mv_game, mv_parser):
+    """Fix 4: an event renamed by an update (its name is in the ID) keeps
+    its translations instead of getting duplicate empty entries."""
+    from test_smoke_findings import _set_page
+    _set_page(mv_game, [(401, "一行目"), (401, "")])
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "reviewed"
+    data = os.path.join(mv_game, "data", "Map001.json")
+    with open(data, encoding="utf-8-sig") as f:
+        m = json.load(f)
+    m["events"][1]["name"] = "改名されたイベント"
+    with open(data, "w", encoding="utf-8") as f:
+        json.dump(m, f, ensure_ascii=False)
+    proj = TranslationProject(project_path=mv_game, entries=entries)
+    stats = proj.merge_fresh_originals(mv_parser.load_originals(mv_game))
+    assert stats["changed"] == 0 and stats["new"] == 0
+    line = [e for e in proj.entries if e.original.startswith("一行目")]
+    assert len(line) == 1 and line[0].status == "reviewed"
+    assert "改名されたイベント" in line[0].id
+
+
+def test_ace_refresh_backups_then_originals_see_the_update(tmp_path):
+    """Gemini claim 3 for VX Ace: resume after an update, before any export."""
+    from test_smoke_findings import _ace_map, _ace_one_map_game
+    from translator.rpgmaker_ace import RPGMakerAceParser, ruby_writes
+    game, live = _ace_one_map_game(tmp_path, ["古い台詞"])
+    p = RPGMakerAceParser()
+    entries = p.load_project(str(game))
+    for e in entries:
+        e.translation, e.status = "EN", "reviewed"
+    p.save_project(str(game), entries)
+    live.write_bytes(ruby_writes(_ace_map(["新しい台詞"])))        # update
+    (game / "Data" / "Map002.rvdata2").write_bytes(ruby_writes(_ace_map(["新マップ"])))
+    assert sorted(p.refresh_backups(str(game))) == ["Map001.rvdata2", "Map002.rvdata2"]
+    originals = {e.original for e in p.load_originals(str(game))}
+    assert {"新しい台詞", "新マップ"} <= originals
+
+
+def test_refresh_backups_never_takes_our_own_output(tmp_path):
+    """The resume refresh follows the export's rule: our own last export
+    is never mistaken for a game update."""
+    from test_smoke_findings import _ace_one_map_game
+    from translator.rpgmaker_ace import RPGMakerAceParser
+    game, _live = _ace_one_map_game(tmp_path, ["台詞"])
+    p = RPGMakerAceParser()
+    entries = p.load_project(str(game))
+    for e in entries:
+        e.translation, e.status = "EN", "reviewed"
+    p.save_project(str(game), entries)
+    assert p.refresh_backups(str(game)) == []
+    assert {e.original for e in p.load_originals(str(game))} == {"台詞"}
+
+
+def test_renpy_refresh_backups_then_originals_see_the_update(tmp_path):
+    from translator.renpy import RenPyParser
+    game = tmp_path / "RenGame"
+    (game / "renpy").mkdir(parents=True)
+    (game / "game").mkdir()
+    s = game / "game" / "script.rpy"
+    s.write_bytes('label start:\n    "古い"\n'.encode("utf-8"))
+    p = RenPyParser()
+    entries = p.load_project(str(game))
+    for e in entries:
+        e.translation, e.status = "EN", "reviewed"
+    p.save_project(str(game), entries)
+    s.write_bytes('label start:\n    "新しい"\n'.encode("utf-8"))      # update
+    assert p.refresh_backups(str(game)) == ["script.rpy"]
+    assert {e.original for e in p.load_originals(str(game))} == {"新しい"}

@@ -911,6 +911,16 @@ class RPGMaker2KParser:
 
     # ── Restore originals ─────────────────────────────────────────────
 
+    def refresh_backups(self, project_dir: str) -> list[str]:
+        """Before a resume merge: put a game update into the backups."""
+        names = ["RPG_RT.ldb"] + [
+            f for f in sorted(os.listdir(project_dir))
+            if f.lower().endswith(".lmu") and not _is_backup_name(f)]
+        return game_io.refresh_on_resume(
+            [(f, os.path.join(project_dir, f),
+              _backup_path(os.path.join(project_dir, f))) for f in names],
+            os.path.join(project_dir, "RPG_RT_original.manifest.json"))
+
     def restore_originals(self, project_dir: str):
         """Restore original LCF files from backups."""
         restored = 0

@@ -22,6 +22,7 @@ from PyQt6.QtGui import QAction, QPalette, QColor, QKeySequence, QShortcut
 
 from ..version import __version__
 from ..resource_paths import app_dir
+from .. import game_io
 from ..game_io import PartialExportError
 from ..utils import create_junction
 from ..ai_client import AIClient, build_system_prompt
@@ -1020,6 +1021,7 @@ class MainWindow(QMainWindow):
         # handle): say so, instead of silently showing a partial project.
         load_warnings = list(
             getattr(self.handler.parser, "load_warnings", None) or [])
+        load_warnings += game_io.take_recovery_notes()
         if load_warnings:
             self._show_load_warnings(load_warnings)
 
@@ -1044,6 +1046,7 @@ class MainWindow(QMainWindow):
         self.project = TranslationProject(
             project_path=path, project_type=self._project_type, entries=entries
         )
+        self._record_parse_options()
         self.file_tree.load_project(self.project)
         self.trans_table.set_entries(entries)
         self.event_viewer.set_entries(entries)
@@ -2157,11 +2160,13 @@ class MainWindow(QMainWindow):
     def _merge_game_update(self) -> dict | None:
         """Merge the game's current ORIGINAL text into the resumed project.
 
-        Engines whose parser has ``load_originals`` (MV/MZ, VX Ace, Wolf,
-        Ren'Py) re-read the originals -- from the backup an export keeps
-        (and refreshes after a game update), else from the game itself --
-        and merge them by entry ID.  Returns the merge stats, or None when
-        nothing was checked.
+        Every engine's parser has ``refresh_backups`` and ``load_originals``:
+        a game update is first put into the backup (the export's own rule,
+        so the merge never reads a stale backup), then the originals are
+        re-read and merged (``translator.game_update``: by ID, then by text
+        in the same scope, so renumbered lines keep their work).  The
+        reading runs on a worker thread.  Returns the merge stats, or None
+        when nothing was checked.
         """
         from ..project_model import ID_SCHEME, ids_outdated
         parser = self.handler.parser
@@ -2172,33 +2177,88 @@ class MainWindow(QMainWindow):
                                 getattr(self.project, "id_scheme", ID_SCHEME))):
             # (a project whose IDs still need migrating is never merged)
             return None
-        try:
-            fresh = parser.load_originals(path)
-        except Exception as exc:  # noqa: BLE001 -- resume must still work
-            # Harmless to skip: the project stays exactly as saved; the
-            # next resume tries again.  Logged so it isn't invisible.
-            log.warning("Could not re-read the game to merge updates: %s", exc)
-            return None
-        stats = self.project.merge_fresh_originals(fresh)
-        if stats["status"] == "low_match":
+        self._apply_parse_options()
+
+        def work():
+            try:
+                refreshed = (parser.refresh_backups(path)
+                             if hasattr(parser, "refresh_backups") else [])
+                fresh = parser.load_originals(path)
+                warnings = list(getattr(parser, "load_warnings", None) or [])
+                return ("ok", refreshed, fresh, warnings)
+            except Exception as exc:  # noqa: BLE001 -- reported below
+                log.exception("Re-reading the game for a merge failed")
+                return ("error", exc)
+
+        result = self._run_blocking(
+            "Checking the Game", "Checking the game for updates…", work)
+        if not result or result[0] == "error":
             QMessageBox.warning(
-                self, "Game Text Not Merged",
-                f"{stats['changed']} lines of the game no longer match this "
-                "project — most of its translated lines would change, so "
-                "this is probably not the game (or not the backup) the "
-                "project was made from. Nothing was changed.")
-        elif stats["new"] or stats["changed"]:
-            msg = (f"The game changed since this project was saved "
-                   f"(game update?).\n\n"
+                self, "Game Not Checked",
+                "The game files could not be re-read, so this project was "
+                "not checked for a game update (it is loaded exactly as "
+                f"saved).\n\n{result[1] if result else 'Unknown error'}")
+            return None
+        _ok, refreshed, fresh, warnings = result
+        warnings = warnings + game_io.take_recovery_notes()
+        if warnings:
+            self._show_load_warnings(warnings)
+        # Files the parse could not read: "couldn't check", never "removed"
+        unreadable = set()
+        for w in warnings:
+            name = w.split(":", 1)[0].strip()
+            unreadable.update({name, os.path.splitext(name)[0]})
+
+        stats = self.project.merge_fresh_originals(fresh, unreadable)
+        if stats["status"] == "low_match":
+            reply = QMessageBox.question(
+                self, "Merge Game Changes?",
+                f"Most of this project's translated lines "
+                f"({stats['changed']}) are no longer in the game. This is "
+                "probably not the game (or not the backup) the project was "
+                "made from.\n\nMerge anyway? Lines that left the game are "
+                "kept in the save file (\"migration_orphans\"), not lost.\n"
+                "Choose No to load the project exactly as saved.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                return stats
+            stats = self.project.merge_fresh_originals(
+                fresh, unreadable, force=True)
+        if stats["new"] or stats["changed"] or stats["moved"] or stats["retired"]:
+            msg = ("The game changed since this project was saved "
+                   "(game update?).\n\n"
                    f"• {stats['new']} new line(s) added (untranslated)\n"
-                   f"• {stats['changed']} changed line(s) reset to "
-                   f"untranslated\n• {stats['unchanged']} unchanged line(s) "
-                   f"kept their translation and status")
-            if stats["changed"]:
-                msg += ("\n\nThe old translations of changed lines are kept "
-                        "in the save file under \"migration_orphans\".")
+                   f"• {stats['changed']} changed line(s) reset to untranslated\n"
+                   f"• {stats['moved']} line(s) moved in the game; they kept "
+                   "their translation and status\n"
+                   f"• {stats['retired']} line(s) no longer in the game were "
+                   "removed from the list\n"
+                   f"• {stats['unchanged']} line(s) unchanged")
+            if stats["changed"] or stats["retired"]:
+                msg += ("\n\nThe old translations of changed and removed "
+                        "lines are kept in the save file under "
+                        "\"migration_orphans\" -- nothing is lost.")
+            if refreshed:
+                msg += (f"\n\nBackup refreshed for {len(refreshed)} updated "
+                        "game file(s).")
             QMessageBox.information(self, "Game Update Merged", msg)
         return stats
+
+    def _apply_parse_options(self):
+        """Parse with the settings the project was made with (a different
+        "speaker processing" setting must not make the game look changed)."""
+        opts = getattr(self.project, "parse_options", None) or {}
+        parser = self.handler.parser
+        if "speaker_processing" in opts and hasattr(parser, "speaker_processing"):
+            parser.speaker_processing = bool(opts["speaker_processing"])
+
+    def _record_parse_options(self):
+        """Remember the settings this project's entries were parsed with."""
+        parser = self.handler.parser
+        if hasattr(parser, "speaker_processing"):
+            self.project.parse_options = {
+                "speaker_processing": bool(parser.speaker_processing)}
 
     def _merge_new_plugin_entries(self) -> int:
         """Extract plugin + System.json entries and merge any missing from project.

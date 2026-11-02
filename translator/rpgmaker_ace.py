@@ -205,10 +205,11 @@ class RPGMakerAceParser:
     @staticmethod
     def is_ace_project(path: str) -> bool:
         """Check if path contains a VX Ace project (Data/*.rvdata2)."""
-        # A Restore Originals killed mid-swap leaves Data.rmt-old and no
-        # Data/: put it back so the game is found (and runs) again.
-        game_io.recover_interrupted_restore(os.path.join(path, "Data"))
         data_dir = os.path.join(path, "Data")
+        if game_io.interrupted_swap(data_dir):
+            # Restore Originals killed mid-swap: still this game (read-only
+            # check; _find_data_dir puts the folder back on open / export)
+            data_dir += ".rmt-old"
         if not os.path.isdir(data_dir):
             return False
         return any(f.endswith(".rvdata2") for f in os.listdir(data_dir))
@@ -349,8 +350,7 @@ class RPGMakerAceParser:
         # is left to the script patchers, which keep their own backup).
         self.last_export_notes: list[str] = []
         refreshed = game_io.refresh_changed_originals(
-            [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
-             for fn in sorted(all_files)], manifest)
+            self._backup_pairs(data_dir), manifest)
         if refreshed:
             self.last_export_notes.append(game_io.refreshed_note(refreshed, merges_on_reopen=True))
 
@@ -360,6 +360,15 @@ class RPGMakerAceParser:
             file_entries = by_file.get(filename, [])
             source_path = os.path.join(source_dir, filename)
             out_path = os.path.join(data_dir, filename)
+            if not os.path.exists(source_path) and os.path.isfile(out_path) \
+                    and file_entries and source_path != out_path:
+                # The backup predates this file: back it up before writing
+                try:
+                    game_io.backup_file_once(out_path, source_path)
+                except OSError as exc:
+                    problems.append(f"{filename} (could not back it up "
+                                    f"before writing: {exc})")
+                    continue
             if not os.path.exists(source_path):
                 if file_entries:
                     problems.append(f"{filename} (file not found, "
@@ -383,6 +392,33 @@ class RPGMakerAceParser:
                 problems.append(f"{filename} ({exc})")
         manifest.finish()
         game_io.raise_export_problems(problems, skipped)
+
+    @staticmethod
+    def _backup_pairs(data_dir: str) -> list:
+        """(name, live, backup) for every data file in either folder.
+
+        Every file, not only those with entries: a map a game update adds
+        has none yet, and must still reach the backup (or Restore would
+        drop it).  Scripts.rvdata2 is left out -- only the script plugins
+        change it, and they keep their own backup.
+        """
+        backup_dir = data_dir + "_original"
+        names = set()
+        for d in (data_dir, backup_dir):
+            if os.path.isdir(d):
+                names.update(fn for fn in os.listdir(d)
+                             if fn.endswith(".rvdata2")
+                             and fn != "Scripts.rvdata2")
+        return [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
+                for fn in sorted(names)]
+
+    def refresh_backups(self, project_dir: str) -> list[str]:
+        """Before a resume merge: put a game update into the backup."""
+        data_dir = self._find_data_dir(project_dir)
+        if not data_dir or not os.path.isdir(data_dir + "_original"):
+            return []
+        return game_io.refresh_on_resume(
+            self._backup_pairs(data_dir), data_dir + "_original.manifest.json")
 
     def restore_originals(self, project_dir: str):
         """Restore Data_original/ → Data/."""

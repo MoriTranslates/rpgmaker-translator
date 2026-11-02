@@ -471,6 +471,19 @@ class KirikiriParser:
         log.info("Exported %d translations to scenario/", export_count)
         game_io.raise_export_problems(problems, changed_lines)
 
+    def refresh_backups(self, project_dir: str) -> list[str]:
+        """Before a resume merge: put a game update into the backup."""
+        scenario_dir = self._find_scenario_dir(project_dir)
+        if not scenario_dir:
+            return []
+        backup_dir = os.path.join(os.path.dirname(scenario_dir),
+                                  "scenario_original")
+        if not os.path.isdir(backup_dir):
+            return []
+        return game_io.refresh_on_resume(
+            game_io.tree_pairs(scenario_dir, backup_dir, (".ks",)),
+            backup_dir + ".manifest.json")
+
     def restore_originals(self, project_dir: str):
         """Restore original scenario files from backup."""
         scenario_dir = self._find_scenario_dir(project_dir)

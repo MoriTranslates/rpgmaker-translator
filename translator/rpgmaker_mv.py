@@ -635,11 +635,18 @@ class RPGMakerMVParser:
                 live_path = os.path.join(data_dir, filename)
                 if not os.path.isfile(live_path):
                     continue
-                # Backup predates this file (e.g. game updated after first
-                # export) — fall back to the live copy rather than skip it.
-                log.warning("Export: %s missing from %s, using live %s",
-                            filename, source_dir, live_path)
-                source_path = live_path
+                # The backup predates this file (game update with no usable
+                # manifest).  Back the live original up BEFORE writing it,
+                # so Restore Originals can bring it back.
+                try:
+                    if source_dir == backup_dir:
+                        game_io.backup_file_once(live_path, source_path)
+                    else:
+                        source_path = live_path
+                except OSError as exc:
+                    errors.append(f"{filename}: could not back it up "
+                                  f"before writing ({exc})")
+                    continue
 
             try:
                 with open(source_path, "r", encoding="utf-8-sig") as f:
@@ -1198,6 +1205,23 @@ class RPGMakerMVParser:
         """
         return game_io.backup_tree_once(data_dir, data_dir + "_original")
 
+    def refresh_backups(self, project_dir: str) -> list[str]:
+        """Before a resume merge: put a game update into the backup.
+
+        The export's own refresh, run without writing the game, so the
+        merge reads the updated originals.  Returns refreshed file names.
+        """
+        data_dir = self._find_data_dir(project_dir)
+        if not data_dir or not os.path.isdir(data_dir + "_original"):
+            return []
+        backup_dir = data_dir + "_original"
+        names = set()
+        for d in (backup_dir, data_dir):
+            names.update(fn for fn in os.listdir(d) if _is_parsed_data_file(fn))
+        return game_io.refresh_on_resume(
+            [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
+             for fn in sorted(names)], backup_dir + ".manifest.json")
+
     def restore_originals(self, project_dir: str) -> bool:
         """Restore data/ (and plugins.js / gamefont.css) from backup.
 
@@ -1269,14 +1293,16 @@ class RPGMakerMVParser:
         for MZ (and MV editor projects) it's at the project root.
         """
         for base in (project_dir, os.path.join(project_dir, "www")):
-            # A Restore Originals killed mid-swap leaves data.rmt-old and
-            # no data/: put it back so the game is found (and runs) again.
-            for name in ("data", "Data"):
-                game_io.recover_interrupted_restore(os.path.join(base, name))
             data = os.path.join(base, "data")
             if not os.path.isdir(data):
                 data = os.path.join(base, "Data")
             if os.path.isdir(data):
+                return base
+            # A Restore Originals killed mid-swap left data.rmt-old and no
+            # data/: still this game (read-only check; the folder is put
+            # back by _find_data_dir on open / export / restore).
+            if any(game_io.interrupted_swap(os.path.join(base, n))
+                   for n in ("data", "Data")):
                 return base
         return None
 
@@ -1301,7 +1327,14 @@ class RPGMakerMVParser:
     # ── Private: find data dir ─────────────────────────────────────────
 
     def _find_data_dir(self, project_dir: str) -> Optional[str]:
-        """Locate the data/ directory inside the project."""
+        """Locate the data/ directory inside the project.
+
+        Puts back a data/ folder left aside by a killed Restore Originals
+        (the note is shown by the main window).
+        """
+        for base in (project_dir, os.path.join(project_dir, "www")):
+            for name in ("data", "Data"):
+                game_io.recover_interrupted_restore(os.path.join(base, name))
         content_root = self.find_content_root(project_dir)
         if content_root:
             for name in ("data", "Data"):

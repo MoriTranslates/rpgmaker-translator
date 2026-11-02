@@ -309,6 +309,18 @@ class CSVGameParser:
         manifest.finish()
         game_io.raise_export_problems(problems, changed_lines)
 
+    def refresh_backups(self, project_dir: str) -> list[str]:
+        """Before a resume merge: put a game update into the backup."""
+        data_dir = os.path.join(project_dir, "data")
+        backup_dir = os.path.join(project_dir, "data_original")
+        if not os.path.isdir(backup_dir) or not os.path.isdir(data_dir):
+            return []
+        names = sorted(n for n in os.listdir(data_dir)
+                       if any(n.lower().endswith(x) for x in self.extensions))
+        return game_io.refresh_on_resume(
+            [(n, os.path.join(data_dir, n), os.path.join(backup_dir, n))
+             for n in names], backup_dir + ".manifest.json")
+
     def restore_originals(self, project_dir: str):
         """Restore original files from backup."""
         backup_dir = os.path.join(project_dir, "data_original")

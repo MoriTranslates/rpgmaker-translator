@@ -259,8 +259,11 @@ def test_mv_changed_line_is_reported_and_keeps_game_text(mv_game, mv_parser):
 def _kill_between_renames(data_dir):
     """Recreate the on-disk state of a restore killed mid-swap."""
     import shutil
+    from translator import game_io
     shutil.copytree(data_dir, data_dir + ".rmt-restore")   # finished copy
     os.rename(data_dir, data_dir + ".rmt-old")             # first rename
+    with open(os.path.join(data_dir + ".rmt-old", game_io.SWAP_MARKER), "w") as f:
+        f.write("restore in progress\n")                 # what restore_tree writes
 
 
 def test_mv_restore_recovers_after_kill_between_renames(mv_game, mv_parser):
@@ -268,12 +271,15 @@ def test_mv_restore_recovers_after_kill_between_renames(mv_game, mv_parser):
     mv_parser.save_project(mv_game, mv_parser.load_project(mv_game))
     data = os.path.join(mv_game, "data")
     _kill_between_renames(data)
-    assert detect_engine(mv_game) is RPGMakerMVHandler      # still found
-    assert os.path.isdir(data)
-    assert not os.path.exists(data + ".rmt-old")
-    assert not os.path.exists(data + ".rmt-restore")
-    mv_parser.restore_originals(mv_game)                     # and restorable
+    from translator import game_io
+    game_io.take_recovery_notes()
+    assert detect_engine(mv_game) is RPGMakerMVHandler      # still found...
+    assert not os.path.isdir(data)                          # ...read-only
+    mv_parser.restore_originals(mv_game)                    # explicit action
     assert os.path.isdir(data) and not os.path.exists(data + ".rmt-old")
+    assert any("interrupted" in n for n in game_io.take_recovery_notes())
+    # the half-built copy is kept aside, never deleted
+    assert os.path.isdir(data + ".rmt-restore.leftover-1")
 
 
 def test_mv_open_after_kill_between_renames(mv_game, mv_parser):
@@ -301,7 +307,7 @@ def test_ace_restore_recovers_after_kill_between_renames(tmp_path):
     RPGMakerAceParser().save_project(str(game), [])
     _kill_between_renames(str(game / "Data"))
     assert detect_engine(str(game)) is RPGMakerAceHandler
-    assert (game / "Data").is_dir()
+    assert not (game / "Data").is_dir()                     # detection is read-only
     RPGMakerAceParser().restore_originals(str(game))
     assert (game / "Data").is_dir()
     assert not os.path.exists(str(game / "Data") + ".rmt-old")
@@ -752,25 +758,71 @@ def test_merge_keeps_unchanged_adds_new_resets_changed():
              _entry("b", "F", "dialog", "新しい", "", "untranslated"),
              _entry("d", "F", "dialog", "追加", "", "untranslated")]
     stats = proj.merge_fresh_originals(fresh)
-    assert stats == {"status": "merged", "new": 1, "changed": 1, "unchanged": 1}
+    assert {k: stats[k] for k in ("status", "new", "changed", "unchanged")} == {"status": "merged", "new": 1, "changed": 1, "unchanged": 1}
     by = {e.id: e for e in proj.entries}
     assert (by["a"].translation, by["a"].status) == ("Same", "reviewed")
     assert (by["b"].original, by["b"].translation, by["b"].status) == \
         ("新しい", "", "untranslated")
-    assert proj.migration_orphans[0]["translation"] == "Old"
-    assert by["c"].translation == "Kept"          # never removed
+    orphans = {o["id"]: o for o in proj.migration_orphans}
+    assert orphans["b"]["translation"] == "Old"
+    # "c" left the game (its file and kind were parsed): retired, but its
+    # translation stays recoverable
+    assert "c" not in by and orphans["c"]["translation"] == "Kept"
+    assert stats["retired"] == 1
     assert by["d"].status == "untranslated"
 
 
+def test_merge_keeps_entries_it_could_not_check():
+    """An unreadable file, or a kind the parse did not produce at all
+    (parse options), is "couldn't check", never "removed"."""
+    proj = _proj([_entry("u", "Unreadable", "dialog", "読めない", "EN", "reviewed"),
+                  _entry("c", "F", "comment", "注釈", "EN", "reviewed"),
+                  _entry("a", "F", "dialog", "同じ", "Same", "reviewed")])
+    fresh = [_entry("a", "F", "dialog", "同じ", "", "untranslated")]
+    stats = proj.merge_fresh_originals(fresh, unreadable_files={"Unreadable"})
+    assert stats["kept_unchecked"] == 2 and stats["retired"] == 0
+    assert {e.id for e in proj.entries} == {"a", "u", "c"}
+
+
+def _many(n, text="原文"):
+    return [_entry(str(i), "F", "dialog", f"{text}{i}", f"EN{i}") for i in range(n)]
+
+
 def test_merge_refuses_when_most_translated_lines_would_change():
-    proj = _proj([_entry(str(i), "F", "dialog", f"原文{i}", f"EN{i}")
-                  for i in range(4)])
+    proj = _proj(_many(30))
     fresh = [_entry(str(i), "F", "dialog", f"English {i}", "", "untranslated")
-             for i in range(3)]
+             for i in range(30)]
     stats = proj.merge_fresh_originals(fresh)
     assert stats["status"] == "low_match"
-    assert [e.translation for e in proj.entries] == ["EN0", "EN1", "EN2", "EN3"]
+    assert [e.translation for e in proj.entries] == [f"EN{i}" for i in range(30)]
     assert not proj.migration_orphans
+    # the user can still go ahead; nothing is lost
+    stats = proj.merge_fresh_originals(fresh, force=True)
+    assert stats["status"] == "merged" and stats["changed"] == 30
+    assert len(proj.migration_orphans) == 30
+
+
+def test_merge_small_project_is_never_blocked():
+    """A tiny project (below the minimum) merges even if most lines changed."""
+    proj = _proj(_many(2) + [_entry("x", "F", "dialog", "未訳", "", "untranslated")])
+    fresh = [_entry("0", "F", "dialog", "変わった", "", "untranslated"),
+             _entry("1", "F", "dialog", "原文1", "", "untranslated"),
+             _entry("x", "F", "dialog", "未訳", "", "untranslated"),
+             _entry("2", "F", "dialog", "追加", "", "untranslated")]
+    stats = proj.merge_fresh_originals(fresh)
+    assert stats["status"] == "merged" and stats["changed"] == 1 and stats["new"] == 1
+
+
+def test_merge_respects_skipped_status():
+    """Fix 5: the fresh parse's "skipped" and the user's own skip survive."""
+    proj = _proj([_entry("a", "F", "dialog", "同じ", "", "untranslated"),
+                  _entry("b", "F", "dialog", "古い", "", "skipped")])
+    fresh = [_entry("a", "F", "dialog", "同じ", "", "skipped"),
+             _entry("b", "F", "dialog", "新しい", "", "untranslated")]
+    proj.merge_fresh_originals(fresh)
+    by = {e.id: e for e in proj.entries}
+    assert by["a"].status == "skipped"           # parser says skip
+    assert by["b"].status == "skipped"           # user skipped this slot
 
 
 def test_mv_game_update_lines_are_merged_after_export(mv_game, mv_parser):
@@ -1041,7 +1093,7 @@ def test_rm2k_resume_merge_reads_original_backups(tmp_path):
         _rm2k_map("新しい台詞", "はい"))
     proj = TranslationProject(project_path=str(tmp_path), entries=entries)
     stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
-    assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
+    assert {k: stats[k] for k in ("status", "new", "changed", "unchanged")} == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
     by = {e.id: e for e in proj.entries}
     assert by["Map0001.lmu/Ev1(EV)/p1/dialog_0"].status == "untranslated"
     assert by["Map0001.lmu/Ev1(EV)/p1/choice_1_0"].status == "reviewed"
@@ -1101,7 +1153,7 @@ def test_kirikiri_resume_merge_reads_backup(tmp_path):
         "*start\r\n新しい台詞です[p]\r\n\r\n二つ目[p]\r\n\r\n三つ目[p]\r\n".encode("cp932"))
     proj = TranslationProject(project_path=str(tmp_path), entries=entries)
     stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
-    assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
+    assert {k: stats[k] for k in ("status", "new", "changed", "unchanged")} == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
     assert any(e.original.startswith("新しい台詞") and e.status == "untranslated"
                for e in proj.entries)
     assert sum(e.status == "reviewed" for e in proj.entries) == 2
@@ -1244,7 +1296,7 @@ def test_srpg_resume_merge_reads_backup(tmp_path):
     (tmp_path / "data_original.dts").write_bytes(_srpg_dts(["新しい一つ目", "二つ目", "三つ目"]))
     proj = TranslationProject(project_path=str(tmp_path), entries=entries)
     stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
-    assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
+    assert {k: stats[k] for k in ("status", "new", "changed", "unchanged")} == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
 
 
 def test_no_control_bytes_in_source_files():
@@ -1313,7 +1365,7 @@ def test_csv_resume_merge_reads_backup(tmp_path):
         "com,hen1,hen2,hen2_en\r\ns,s,変更,\r\ns,s,二行目,\r\ns,s,三行目,\r\n".encode("utf-8"))
     proj = TranslationProject(project_path=str(tmp_path), entries=entries)
     stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
-    assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
+    assert {k: stats[k] for k in ("status", "new", "changed", "unchanged")} == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
 
 
 def _crowd_sce(lines):
@@ -1363,7 +1415,7 @@ def test_crowd_resume_merge_reads_backup(tmp_path):
         _crowd_sce(["新しい一つ目", "二つ目", "三つ目"]))
     proj = TranslationProject(project_path=str(tmp_path), entries=entries)
     stats = proj.merge_fresh_originals(p.load_originals(str(tmp_path)))
-    assert stats == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
+    assert {k: stats[k] for k in ("status", "new", "changed", "unchanged")} == {"status": "merged", "new": 0, "changed": 1, "unchanged": 2}
 
 
 def test_mv_patch_zip_reports_lines_it_could_not_place(mv_game, mv_parser, tmp_path):
@@ -1385,3 +1437,37 @@ def test_mv_patch_zip_reports_lines_it_could_not_place(mv_game, mv_parser, tmp_p
     assert texts[0] == "新しい台詞"
     assert items[1]["name"].startswith("EN ")              # the rest is included
     assert os.path.exists(path)
+
+
+
+def test_restore_never_puts_junk_rmt_old_in_place(tmp_path):
+    """Fix 16: a .rmt-old folder WITHOUT the swap marker is junk from a
+    failed cleanup: it is never renamed into place, and never deleted."""
+    from translator import game_io
+    backup, live = tmp_path / "bak", tmp_path / "data"
+    backup.mkdir()
+    (backup / "a.txt").write_text("orig")
+    junk = tmp_path / "data.rmt-old"
+    junk.mkdir()
+    (junk / "a.txt").write_text("old translated")
+    assert not game_io.recover_interrupted_restore(str(live))
+    assert not live.exists()
+    live.mkdir()
+    (live / "a.txt").write_text("EN")
+    game_io.restore_tree(str(backup), str(live))
+    assert (live / "a.txt").read_text() == "orig"
+    assert (tmp_path / "data.rmt-old.leftover-1" / "a.txt").read_text() == "old translated"
+
+
+def test_restore_keeps_files_the_backup_never_had(tmp_path):
+    """Fix 3: a file added by a game update after the backup is kept."""
+    from translator import game_io
+    backup, live = tmp_path / "bak", tmp_path / "data"
+    backup.mkdir()
+    live.mkdir()
+    (backup / "Map001.json").write_text("orig")
+    (live / "Map001.json").write_text("EN")
+    (live / "Map002.json").write_text("added by update")
+    game_io.restore_tree(str(backup), str(live))
+    assert (live / "Map001.json").read_text() == "orig"
+    assert (live / "Map002.json").read_text() == "added by update"

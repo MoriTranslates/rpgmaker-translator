@@ -188,27 +188,75 @@ def backup_tree_once(src_dir: str, backup_dir: str,
     return True
 
 
+# Written into <folder>.rmt-old right after restore_tree moved the live
+# folder aside, removed again before that copy is deleted.  Only a folder
+# holding it is a swap that was killed half-way; anything else named
+# .rmt-old is junk from a failed cleanup and is never put back in place.
+SWAP_MARKER = ".rmt-swap-in-progress"
+
+RECOVERED_NOTE = (
+    "Restore Originals was interrupted last time (the app or PC stopped "
+    "half-way), so the game's {name} folder was missing. It has been put "
+    "back exactly as it was before that restore -- still translated. Run "
+    "Restore Originals again if you wanted the original files.")
+
+
+_recovery_notes: list[str] = []
+
+
+def take_recovery_notes() -> list[str]:
+    """User-facing notes for recoveries since the last call (then cleared)."""
+    notes = list(_recovery_notes)
+    _recovery_notes.clear()
+    return notes
+
+
+def interrupted_swap(live_dir: str) -> bool:
+    """Read-only check: was a restore of *live_dir* killed mid-swap?"""
+    live_dir = os.fspath(live_dir)
+    return (not os.path.exists(live_dir)
+            and os.path.isfile(os.path.join(live_dir + ".rmt-old", SWAP_MARKER)))
+
+
+def _set_aside(path: str) -> str:
+    """Rename *path* to a free ``<path>.leftover-N`` name; never delete."""
+    n = 1
+    while os.path.exists(f"{path}.leftover-{n}"):
+        n += 1
+    os.rename(path, f"{path}.leftover-{n}")
+    log.warning("Kept leftover folder %s as %s.leftover-%d", path, path, n)
+    return f"{path}.leftover-{n}"
+
+
 def recover_interrupted_restore(live_dir: str) -> bool:
     """Undo a restore that was killed between its two renames.
 
-    ``restore_tree`` moves *live_dir* to ``<live_dir>.rmt-old`` and then
-    renames the finished copy into place.  A kill in between leaves no
-    *live_dir* at all -- the game won't start and the engine isn't even
-    detected.  Put the folder back as it was before that restore (the
-    user can simply restore again).  Returns True if it recovered.
+    ``restore_tree`` moves *live_dir* to ``<live_dir>.rmt-old`` (marking it
+    with ``SWAP_MARKER``) and then renames the finished copy into place.  A
+    kill in between leaves no *live_dir*: the game won't start.  Put the
+    folder back as it was before that restore; the half-built copy is kept
+    aside, never deleted.  Call this only from explicit open / export /
+    restore paths (never from detection) and tell the user: see
+    ``RECOVERED_NOTE``.  Returns True if it recovered.
     """
     live_dir = os.fspath(live_dir)
-    aside = live_dir + ".rmt-old"
-    if os.path.exists(live_dir) or not os.path.isdir(aside):
+    if not interrupted_swap(live_dir):
         return False
+    aside = live_dir + ".rmt-old"
     os.rename(aside, live_dir)
+    try:
+        os.remove(os.path.join(live_dir, SWAP_MARKER))
+    except OSError as exc:
+        # Harmless: the folder is back; a stale marker inside a live folder
+        # is never looked at (only <name>.rmt-old is).
+        log.warning("Could not remove %s: %s", SWAP_MARKER, exc)
     staging = live_dir + ".rmt-restore"
     if os.path.isdir(staging):
-        # A complete or partial copy of the backup -- the backup itself is
-        # untouched, so losing this copy loses nothing.
-        shutil.rmtree(staging, ignore_errors=True)
+        _set_aside(staging)
     log.warning("Recovered %s from an interrupted Restore Originals",
                 live_dir)
+    _recovery_notes.append(
+        RECOVERED_NOTE.format(name=os.path.basename(live_dir) + "/"))
     return True
 
 
@@ -244,32 +292,67 @@ def restore_tree(backup_dir: str, live_dir: str,
 
     staging = live_dir + ".rmt-restore"
     aside = live_dir + ".rmt-old"
-    if os.path.isdir(staging):
-        shutil.rmtree(staging)
-    if os.path.exists(aside):
-        # Left over from an interrupted restore — the live folder was
-        # already put back, or never moved; the aside copy is stale.
-        if os.path.isdir(live_dir):
-            shutil.rmtree(aside, ignore_errors=True)
-        else:
-            os.rename(aside, live_dir)
+    # A killed swap is put back first; any other leftover is moved out of
+    # the way under a unique name -- never deleted, never put in place.
+    recover_interrupted_restore(live_dir)
+    for leftover in (staging, aside):
+        if os.path.exists(leftover):
+            _set_aside(leftover)
     try:
         shutil.copytree(backup_dir, staging)
+        # Files the backup has never seen were added to the game after it
+        # was taken (game update): keep them, restore only replaces.
+        if os.path.isdir(live_dir):
+            for dirpath, _dirs, files in os.walk(live_dir):
+                rel = os.path.relpath(dirpath, live_dir)
+                for fn in files:
+                    dst = os.path.join(staging, rel, fn)
+                    if not os.path.exists(dst):
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        shutil.copy2(os.path.join(dirpath, fn), dst)
+                        log.info("Restore keeps %s (not in the backup)",
+                                 os.path.join(rel, fn))
     except BaseException:
+        # Our own half-built copy: the backup and the live folder are
+        # untouched, so removing it loses nothing.
         shutil.rmtree(staging, ignore_errors=True)
         raise
     had_live = os.path.isdir(live_dir)
     if had_live:
         os.rename(live_dir, aside)
+        try:
+            with open(os.path.join(aside, SWAP_MARKER), "w") as f:
+                f.write("restore in progress\n")
+        except OSError:
+            # Without the marker a kill now could not be recovered
+            # automatically: undo the first rename and stop.
+            os.rename(aside, live_dir)
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
     try:
         os.rename(staging, live_dir)
     except BaseException:
         if had_live:
             os.rename(aside, live_dir)
+            try:
+                os.remove(os.path.join(live_dir, SWAP_MARKER))
+            except OSError as exc:
+                # Harmless: only <name>.rmt-old folders are checked for it
+                log.warning("Could not remove %s: %s", SWAP_MARKER, exc)
         shutil.rmtree(staging, ignore_errors=True)
         raise
     if had_live:
+        # Done: the old (translated) folder goes.  Drop the marker first so
+        # a partly failed delete can never be mistaken for a killed swap.
+        try:
+            os.remove(os.path.join(aside, SWAP_MARKER))
+        except OSError as exc:
+            log.warning("Could not remove %s: %s", SWAP_MARKER, exc)
         shutil.rmtree(aside, ignore_errors=True)
+        if os.path.exists(aside):
+            # Partly deleted (locked file / antivirus): keep it out of the
+            # way under a unique name instead of leaving a .rmt-old behind.
+            _set_aside(aside)
 
 
 # ── Export manifest / game-update detection ──────────────────────────
@@ -372,7 +455,8 @@ class ExportManifest:
         self.exists = not self.pending
 
 
-def refresh_changed_originals(pairs, manifest: ExportManifest) -> list[str]:
+def refresh_changed_originals(pairs, manifest: ExportManifest,
+                              mark_pending: bool = True) -> list[str]:
     """Re-baseline backups for game files that changed after the backup.
 
     *pairs* is an iterable of ``(key, live_path, backup_path)``.  A live
@@ -383,14 +467,16 @@ def refresh_changed_originals(pairs, manifest: ExportManifest) -> list[str]:
     * the live file is not what we last wrote, and
     * it differs from the backup (or the backup has no copy of it).
 
-    Always marks the manifest pending (``begin``) before returning, so
-    callers write game files only after that marker is safely on disk.
+    With *mark_pending* (exports), always marks the manifest pending
+    (``begin``) before returning, so callers write game files only after
+    that marker is safely on disk.
 
     Returns the keys that were refreshed.
     """
     refreshed = []
     if not manifest.exists:
-        manifest.begin()
+        if mark_pending:
+            manifest.begin()
         return refreshed
     for key, live, bak in pairs:
         if not os.path.isfile(live):
@@ -405,7 +491,27 @@ def refresh_changed_originals(pairs, manifest: ExportManifest) -> list[str]:
         refreshed.append(key)
         log.warning("Game file %s changed since the backup was taken — "
                     "backup refreshed from the current file", key)
-    manifest.begin()
+    if mark_pending:
+        manifest.begin()
+    return refreshed
+
+
+def refresh_on_resume(pairs, manifest_path: str) -> list[str]:
+    """The export's game-update refresh, run when a project is resumed.
+
+    Without it the resume merge read the backup as it was before the
+    update, saw no change, and the "re-open the project" advice did
+    nothing until an export had run.  Same rules as an export: a live file
+    goes into the backup only when the manifest knows what we last wrote
+    and the live file is neither that nor the backup.  The manifest is not
+    marked pending (nothing is about to be written to the game).
+    """
+    manifest = ExportManifest(manifest_path)
+    if not manifest.exists:
+        return []
+    refreshed = refresh_changed_originals(pairs, manifest, mark_pending=False)
+    if refreshed:
+        manifest.save()
     return refreshed
 
 

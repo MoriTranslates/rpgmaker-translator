@@ -299,6 +299,17 @@ class CrowdParser:
         manifest.finish()
         game_io.raise_export_problems(problems, changed_lines)
 
+    def refresh_backups(self, project_dir: str) -> list[str]:
+        """Before a resume merge: put a game update into the backup."""
+        backup_dir = os.path.join(project_dir, "sce_original")
+        if not os.path.isdir(backup_dir):
+            return []
+        return game_io.refresh_on_resume(
+            [(os.path.basename(p), p,
+              os.path.join(backup_dir, os.path.basename(p)))
+             for p in self._find_sce_files(project_dir)],
+            backup_dir + ".manifest.json")
+
     def restore_originals(self, project_dir: str):
         """Restore original .sce from backup."""
         backup_dir = os.path.join(project_dir, "sce_original")
