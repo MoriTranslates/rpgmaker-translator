@@ -612,3 +612,14 @@ def test_open_project_shows_load_warnings(qapp, monkeypatch, tmp_path):
     assert "Some Game Files Could Not Be Read" in titles
     text = dict(shown)["Some Game Files Could Not Be Read"]
     assert "Wolf RPG Editor 3.x isn't supported yet" in text
+
+
+def test_ace_unreadable_file_is_a_load_warning(tmp_path):
+    from translator.rpgmaker_ace import RPGMakerAceParser
+    game, _live = _ace_one_map_game(tmp_path, ["こんにちは"])
+    (game / "Data" / "Map002.rvdata2").write_bytes(b"\x04\x08garbage")
+    (game / "Data" / "CommonEvents.rvdata2").write_bytes(b"not marshal")
+    p = RPGMakerAceParser()
+    assert p.load_project(str(game))            # the good map still loads
+    assert any(w.startswith("Map002.rvdata2") for w in p.load_warnings)
+    assert any(w.startswith("CommonEvents.rvdata2") for w in p.load_warnings)

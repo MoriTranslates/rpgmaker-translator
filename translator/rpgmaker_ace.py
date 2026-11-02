@@ -174,6 +174,8 @@ class RPGMakerAceParser:
     def __init__(self):
         self.context_size = 3
         self._require_japanese = True
+        # Files the last load_project() could not read, for the UI
+        self.load_warnings: list[str] = []
         self._actor_names: dict[int, str] = {}
         self._face_to_actor: dict[tuple, int] = {}
 
@@ -245,6 +247,11 @@ class RPGMakerAceParser:
             })
         return actors
 
+    def _note_load_failure(self, filename: str, exc: Exception):
+        """Record a data file that could not be read (logged + shown)."""
+        log.error("Failed to read %s: %s", filename, exc)
+        self.load_warnings.append(f"{filename}: {exc}")
+
     def load_project(self, project_dir: str) -> list:
         """Load all translatable entries from a VX Ace project."""
         data_dir = self._find_data_dir(project_dir)
@@ -253,6 +260,7 @@ class RPGMakerAceParser:
                 f"No 'Data' folder found in {project_dir}.\n"
                 "Please select an RPG Maker VX Ace project folder."
             )
+        self.load_warnings = []
 
         self._actor_names = self._load_actor_names(data_dir)
         self._face_to_actor = self._load_face_to_actor(data_dir)
@@ -434,7 +442,7 @@ class RPGMakerAceParser:
             try:
                 data = self._read_rvdata2(path)
             except Exception as exc:
-                log.error("Failed to read %s: %s", path, exc)
+                self._note_load_failure(os.path.basename(path), exc)
                 continue
 
             if not isinstance(data, list):
@@ -463,7 +471,8 @@ class RPGMakerAceParser:
             return []
         try:
             data = self._read_rvdata2(path)
-        except Exception:
+        except Exception as exc:
+            self._note_load_failure("System.rvdata2", exc)
             return []
 
         entries = []
@@ -549,7 +558,7 @@ class RPGMakerAceParser:
             try:
                 data = self._read_rvdata2(path)
             except Exception as exc:
-                log.error("Failed to read %s: %s", path, exc)
+                self._note_load_failure(os.path.basename(path), exc)
                 continue
 
             # Map display name
@@ -579,7 +588,8 @@ class RPGMakerAceParser:
             return []
         try:
             data = self._read_rvdata2(path)
-        except Exception:
+        except Exception as exc:
+            self._note_load_failure("CommonEvents.rvdata2", exc)
             return []
         if not isinstance(data, list):
             return []
@@ -601,7 +611,8 @@ class RPGMakerAceParser:
             return []
         try:
             data = self._read_rvdata2(path)
-        except Exception:
+        except Exception as exc:
+            self._note_load_failure("Troops.rvdata2", exc)
             return []
         if not isinstance(data, list):
             return []
