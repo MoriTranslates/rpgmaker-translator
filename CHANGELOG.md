@@ -150,7 +150,8 @@ Engines:
   before it is used (the cached copy is re-checked too).
 - "Open in RPG Maker" now warns that saving in the RPG Maker editor rewrites the game's data
   files, and that the next export will then report them as changed outside the translator and
-  write none of them until you run Restore Originals.
+  write none of them until you run Restore Originals (only if the game was not updated
+  meanwhile; after an update, reinstall or re-copy the game instead).
 - "Open in RPG Maker" no longer runs a shell command, so folder names containing `&` can't run
   other commands.
 - SECURITY.md now describes what is actually sent to cloud providers, that API keys are stored in

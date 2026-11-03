@@ -175,14 +175,22 @@ def export_advice(partial) -> str:
     if getattr(partial, "unrecorded", None):
         advice.append("What this export wrote could not be recorded (disk "
                       "full? a file in use?). Free some space and export "
-                      "again; if the next export lists files as changed "
-                      "outside the translator, run Restore Originals and "
+                      "again. If the next export lists files as changed "
+                      "outside the translator: if the game was updated, "
+                      "reinstall or re-copy the game (or re-download the "
+                      "update) and start a new project -- do not use Restore "
+                      "Originals, it would mix old and new files. Only if "
+                      "the game was NOT updated, run Restore Originals and "
                       "export again.")
     if getattr(partial, "unverified", None):
         advice.append("Files that can't be verified were not written: an "
                       "earlier export was interrupted, so the app can't tell "
-                      "its own output from other changes. Run Restore "
-                      "Originals, then export again.")
+                      "its own output from other changes. If the game was "
+                      "updated, reinstall or re-copy the game (or "
+                      "re-download the update) and start a new project -- "
+                      "do not use Restore Originals, it would mix old and "
+                      "new files. Only if the game was NOT updated, run "
+                      "Restore Originals, then export again.")
     if getattr(partial, "outside", None):
         advice.append(OUTSIDE_ADVICE)
     if getattr(partial, "unsupported", None):

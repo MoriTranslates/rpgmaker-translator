@@ -911,6 +911,8 @@ def test_pending_manifest_never_rolls_back_an_update(mv_game, mv_parser):
     assert _sha(items) == updated
     advice = game_io.export_advice(ei.value)
     assert "Restore Originals, then export again" in advice
+    assert "reinstall or re-copy the game" in advice
+    assert "NOT updated" in advice
 
 
 def test_kill_mid_export_then_update_own_output_still_recognised(
@@ -1151,3 +1153,18 @@ def test_tyrano_lang_js_survives_a_failed_manifest_save(tmp_path,
         assert ei.value.unrecorded
     game_io._write_ahead.clear()
     p.save_project(str(tmp_path), entries)    # own lang.js: not "outside"
+
+
+def test_restore_advice_always_has_the_game_was_updated_branch():
+    """Final review M2: telling the user to Restore Originals after a game
+    update leaves the game half old, half new."""
+    class _P:
+        errors = ()
+        changed = unsafe = unsupported = outside = ()
+        unverified = ["Items.json"]
+        unrecorded = ["export record (disk full)"]
+    advice = game_io.export_advice(_P())
+    for part in advice.split("\n\n"):
+        if "Restore Originals" in part:
+            assert "reinstall or re-copy the game" in part
+            assert "NOT updated" in part

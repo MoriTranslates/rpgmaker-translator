@@ -3521,7 +3521,9 @@ class MainWindow(QMainWindow):
             "If you save the project in RPG Maker, it rewrites the game's data "
             "files. The next export will then report them as changed outside "
             "the translator and write none of them, until you run Restore "
-            "Originals.\n\nOpen in RPG Maker anyway?",
+            "Originals (only if the game was not updated meanwhile; after "
+            "an update, reinstall or re-copy the game instead).\n\n"
+            "Open in RPG Maker anyway?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         ) != QMessageBox.StandardButton.Yes:
