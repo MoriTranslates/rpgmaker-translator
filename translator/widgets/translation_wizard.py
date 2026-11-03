@@ -867,6 +867,8 @@ class TranslationWizard(QDialog):
                 disable_splash = getattr(self.mw, '_disable_splash', False)
                 if disable_splash:
                     handler.parser.disable_splash_plugin(project_path)
+                # our post-export plugins.js / gamefont.css are recorded
+                notes += handler.parser.note_own_files(project_path)
 
             # RM2K/2K3: auto-copy EasyRPG Player
             easyrpg_note = ""

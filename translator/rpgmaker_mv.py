@@ -603,10 +603,14 @@ class RPGMakerMVParser:
         # wrote was changed outside the translator (game update, RPG Maker
         # re-save, hand edit): it is not written and the backup is never
         # touched -- no rollback, no English taken as the original.
+        # plugins.js and gamefont.css are judged the same way: a game
+        # update to them is never rebuilt from the old backup.
         self.last_export_notes = []
         outside = set(game_io.changed_outside(
             [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
-             for fn in sorted(candidates)], manifest))
+             for fn in sorted(candidates)]
+            + self._extra_pairs(project_dir), manifest))
+        self.last_outside = set(outside)
 
         errors = []
         skipped_lines: dict[str, int] = {}
@@ -664,28 +668,96 @@ class RPGMakerMVParser:
                 log.warning("Export failed for %s: %s", filename, exc)
                 errors.append(f"{filename}: {exc}")
 
-        manifest.finish()
-
         # Export plugin translations (plugins.js is outside data/)
         self.plugin_unplaced = 0
-        try:
-            self._save_plugins(project_dir, entries)
-        except (OSError, ValueError) as exc:
-            log.warning("Export failed for plugins.js: %s", exc)
-            errors.append(f"plugins.js: {exc}")
-        if self.plugin_unplaced:
-            skipped_lines["plugins.js"] = self.plugin_unplaced
+        if "plugins.js" not in outside:
+            try:
+                self._save_plugins(project_dir, entries)
+            except (OSError, ValueError) as exc:
+                log.warning("Export failed for plugins.js: %s", exc)
+                errors.append(f"plugins.js: {exc}")
+            if self.plugin_unplaced:
+                skipped_lines["plugins.js"] = self.plugin_unplaced
 
         # Swap game font for English readability
-        try:
-            self._swap_gamefont(project_dir, self.game_font)
-        except OSError as exc:
-            log.warning("Export failed for gamefont.css: %s", exc)
-            errors.append(f"gamefont.css: {exc}")
+        if "gamefont.css" not in outside:
+            try:
+                self._swap_gamefont(project_dir, self.game_font)
+            except OSError as exc:
+                log.warning("Export failed for gamefont.css: %s", exc)
+                errors.append(f"gamefont.css: {exc}")
+
+        # Record them (inside the pending window, like the data files)
+        for key, live, _bak in self._extra_pairs(project_dir, all_live=True):
+            if key not in outside:
+                manifest.record(key, live)
+        manifest.finish()
 
         game_io.raise_export_problems(errors, skipped_lines,
                                       outside=sorted(outside),
                                       manifest=manifest)
+
+    def _extra_pairs(self, project_dir: str, all_live: bool = False) -> list:
+        """(key, live, backup) for plugins.js and gamefont.css.
+
+        Only those that exist (with *all_live*, those whose live file
+        exists, backup or not -- for recording what we wrote).
+        """
+        out = []
+        plugins_path = self._find_plugins_file(project_dir)
+        if plugins_path:
+            out.append(("plugins.js", plugins_path, os.path.join(
+                os.path.dirname(plugins_path),
+                os.path.basename(plugins_path).replace(
+                    "plugins.", "plugins_original."))))
+        root = self.find_content_root(project_dir)
+        if root:
+            fonts = os.path.join(root, "fonts")
+            out.append(("gamefont.css", os.path.join(fonts, "gamefont.css"),
+                        os.path.join(fonts, "gamefont_original.css")))
+        return [(k, live, bak) for k, live, bak in out
+                if os.path.isfile(live) and (all_live or os.path.isfile(bak))]
+
+    def _blocked_extra_keys(self, project_dir: str) -> set:
+        """plugins.js / gamefont.css keys that must not be written now:
+        changed outside the translator, or can't be verified.
+
+        Checked BEFORE a post-export step (word wrap, splash) writes, so
+        those steps never touch a game update either.
+        """
+        data_dir = self._find_data_dir(project_dir)
+        if not data_dir:
+            return set()
+        manifest = game_io.ExportManifest(
+            data_dir + "_original.manifest.json")
+        return {key for key, live, bak in self._extra_pairs(project_dir)
+                if game_io.is_changed_outside(key, live, bak, manifest)}
+
+    def note_own_files(self, project_dir: str,
+                       skip: set | None = None) -> list[str]:
+        """Record our post-export changes to plugins.js / gamefont.css
+        (word wrap plugin, splash) so the next export knows them as ours.
+
+        A file found changed outside the translator (*skip*; by default
+        what the last export found) is never recorded -- that would make
+        the update look like ours.
+        Returns user-facing problems (a record that could not be saved).
+        """
+        data_dir = self._find_data_dir(project_dir)
+        if not data_dir:
+            return []
+        manifest = game_io.ExportManifest(
+            data_dir + "_original.manifest.json")
+        if not manifest.present:
+            return []
+        if skip is None:
+            skip = getattr(self, "last_outside", set())
+        for key, live, _bak in self._extra_pairs(project_dir, all_live=True):
+            if key not in skip:
+                manifest.record(key, live)
+        manifest.save()
+        return [f"Couldn't record what was written, so the next export may "
+                f"flag these files: {r}" for r in manifest.record_failed]
 
     @staticmethod
     def _atomic_write_text(path: str, text: str):
@@ -3857,6 +3929,11 @@ class RPGMakerMVParser:
         plugins_path = self._find_plugins_file(project_dir)
         if not plugins_path:
             return False
+        blocked = self._blocked_extra_keys(project_dir)
+        if "plugins.js" in blocked:
+            log.warning("disable_splash_plugin: plugins.js was changed "
+                        "outside the translator; left alone")
+            return False
 
         try:
             plugins = self._load_plugins_js(plugins_path)
@@ -3875,6 +3952,7 @@ class RPGMakerMVParser:
             self._backup_plugins_file(plugins_path)
             self._write_plugins_js(plugins_path, plugins)
             log.info("disable_splash_plugin: disabled splash in %s", plugins_path)
+            self.note_own_files(project_dir, blocked)   # our own change
         return disabled
 
     # ── Word wrap plugin injection ─────────────────────────────────
@@ -3899,6 +3977,12 @@ class RPGMakerMVParser:
         if not plugins_path:
             log.warning("inject_wordwrap_plugin: plugins.js not found in %s", project_dir)
             return False
+        # A game update to plugins.js / gamefont.css is never written over
+        blocked = self._blocked_extra_keys(project_dir)
+        if "plugins.js" in blocked:
+            log.warning("inject_wordwrap_plugin: plugins.js was changed "
+                        "outside the translator; left alone")
+            return False
 
         # Write the JS file next to plugins.js (js/plugins/ folder)
         js_dir = os.path.dirname(plugins_path)
@@ -3915,7 +3999,7 @@ class RPGMakerMVParser:
         if not os.path.isdir(fonts_dir):
             fonts_dir = os.path.join(os.path.dirname(www_dir), "fonts")
         gamefont_css = os.path.join(fonts_dir, "gamefont.css")
-        if os.path.isdir(fonts_dir):
+        if os.path.isdir(fonts_dir) and "gamefont.css" not in blocked:
             # Backup original if it exists
             if os.path.isfile(gamefont_css):
                 backup_css = os.path.join(fonts_dir, "gamefont_original.css")
@@ -3958,6 +4042,7 @@ class RPGMakerMVParser:
             existing["parameters"] = plugin_params
             log.info("inject_wordwrap_plugin: updated in plugins.js")
             self._write_plugins_js(plugins_path, plugins)
+            self.note_own_files(project_dir, blocked)   # our own change
             return True
 
         plugins.append({
@@ -3969,6 +4054,7 @@ class RPGMakerMVParser:
         self._write_plugins_js(plugins_path, plugins)
         log.info("inject_wordwrap_plugin: added to %s (%d plugins total)",
                  plugins_path, len(plugins))
+        self.note_own_files(project_dir, blocked)       # our own change
         return True
 
     def remove_wordwrap_plugin(self, project_dir: str):
@@ -3980,32 +4066,41 @@ class RPGMakerMVParser:
         # Remove JS file
         js_dir = os.path.dirname(plugins_path)
         js_path = os.path.join(js_dir, "plugins", f"{self.INJECTED_PLUGIN_NAME}.js")
+        # A game update to plugins.js / gamefont.css is never written over
+        blocked = self._blocked_extra_keys(project_dir)
 
         # Unregister from plugins.js first — a registered plugin whose .js
-        # is missing stops the game from booting.
-        try:
-            plugins = self._load_plugins_js(plugins_path)
-        except (json.JSONDecodeError, OSError) as e:
-            log.warning("remove_wordwrap_plugin: failed to parse %s: %s", plugins_path, e)
-            plugins = None
-        if plugins:
-            kept = [p for p in plugins
-                    if not (isinstance(p, dict)
-                            and p.get("name") == self.INJECTED_PLUGIN_NAME)]
-            if len(kept) != len(plugins):
-                self._write_plugins_js(plugins_path, kept)
-                log.info("remove_wordwrap_plugin: unregistered from plugins.js")
+        # is missing stops the game from booting.  If plugins.js was
+        # changed outside the translator it is left alone, and so is the
+        # .js it may still load.
+        if "plugins.js" in blocked:
+            log.warning("remove_wordwrap_plugin: plugins.js was changed "
+                        "outside the translator; left alone")
+        else:
+            try:
+                plugins = self._load_plugins_js(plugins_path)
+            except (json.JSONDecodeError, OSError) as e:
+                log.warning("remove_wordwrap_plugin: failed to parse %s: %s", plugins_path, e)
+                plugins = None
+            if plugins:
+                kept = [p for p in plugins
+                        if not (isinstance(p, dict)
+                                and p.get("name") == self.INJECTED_PLUGIN_NAME)]
+                if len(kept) != len(plugins):
+                    self._write_plugins_js(plugins_path, kept)
+                    log.info("remove_wordwrap_plugin: unregistered from plugins.js")
 
-        if os.path.isfile(js_path):
-            os.remove(js_path)
+            if os.path.isfile(js_path):
+                os.remove(js_path)
 
         # Restore original gamefont.css if we swapped it
         www_dir = os.path.dirname(js_dir)
         fonts_dir = os.path.join(www_dir, "fonts")
         backup_css = os.path.join(fonts_dir, "gamefont_original.css")
         gamefont_css = os.path.join(fonts_dir, "gamefont.css")
-        if os.path.isfile(backup_css):
+        if os.path.isfile(backup_css) and "gamefont.css" not in blocked:
             import shutil
             shutil.copy2(backup_css, gamefont_css)
             os.remove(backup_css)
             log.info("remove_wordwrap_plugin: restored original gamefont.css")
+        self.note_own_files(project_dir, blocked)       # our own change

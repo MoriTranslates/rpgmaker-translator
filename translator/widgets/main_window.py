@@ -3248,13 +3248,20 @@ class MainWindow(QMainWindow):
                     if self.parser.disable_splash_plugin(self.project.project_path):
                         plugin_msg += "\n'Made with RPG Maker' splash disabled."
 
-                if self._show_translation_splash:
+                # never written over a plugins.js changed outside the app
+                if self._show_translation_splash and "plugins.js" not in (
+                        getattr(self.parser, "last_outside", None) or ()):
                     try:
                         from ..splash_generator import inject_splash
                         if inject_splash(self.project.project_path):
                             plugin_msg += "\nTranslation splash screen injected."
                     except Exception as exc:
                         log.warning("Splash injection failed: %s", exc)
+
+                # Our own post-export changes to plugins.js / gamefont.css
+                # are recorded, so the next export knows them as ours
+                notes += self.handler.parser.note_own_files(
+                    self.project.project_path)
 
             # RM2K/2K3: auto-copy EasyRPG Player for locale-independent play
             if self.handler.key == "rpgmaker_2k":

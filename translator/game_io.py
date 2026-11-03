@@ -612,6 +612,8 @@ class ExportManifest:
                 self.files = raw["files"]
                 self.tracks_all = raw.get("tracks_all") is True
                 self.was_pending = bool(raw.get("pending", False))
+                # saving again (e.g. note_own_files) keeps a crash marker
+                self.pending = self.was_pending
                 self.exists = not self.was_pending
         except (OSError, ValueError):
             # Missing or unreadable: no records.  If the file (or a

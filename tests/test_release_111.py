@@ -968,3 +968,112 @@ def test_torn_journal_line_is_ignored(tmp_path):
         f.write('{"path": "a", "size": 1, "sha256": "x"}\n{"path": "b", "si')
     m = game_io.ExportManifest(str(tmp_path / "x.manifest.json"))
     assert list(m.intended) == ["a"] and m.present
+
+
+# ── Round-2 review M2: plugins.js / gamefont.css updates not rebuilt ─
+
+def _exported(mv_game, mv_parser):
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "translated"
+    mv_parser.save_project(mv_game, entries)
+    return entries
+
+
+def test_plugins_js_update_is_never_rebuilt_from_the_backup(mv_game,
+                                                            mv_parser):
+    """Round-2 M2 repro: a plugin a game update added to plugins.js was
+    dropped by the next export, with nothing reported."""
+    entries = _exported(mv_game, mv_parser)
+    js = os.path.join(mv_game, "js", "plugins.js")
+    assert os.path.isfile(os.path.join(mv_game, "js", "plugins_original.js"))
+    plugins = mv_parser._load_plugins_js(js)
+    plugins.append({"name": "NewUpdatePlugin", "status": True,
+                    "description": "", "parameters": {}})
+    mv_parser._write_plugins_js(js, plugins)          # the game update
+    game_io._write_ahead.clear()
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert "plugins.js" in ei.value.outside
+    assert any(p.get("name") == "NewUpdatePlugin"
+               for p in mv_parser._load_plugins_js(js))
+
+
+def test_gamefont_update_is_never_overwritten(mv_game, mv_parser):
+    entries = _exported(mv_game, mv_parser)
+    css = os.path.join(mv_game, "fonts", "gamefont.css")
+    with open(css, "w", encoding="utf-8") as f:
+        f.write("/* updated by the game */\n")
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert ei.value.outside == ["gamefont.css"]
+    assert "updated by the game" in open(css, encoding="utf-8").read()
+
+
+def test_our_own_plugin_and_font_writes_are_not_flagged(mv_game, mv_parser):
+    """Export, then the post-export word wrap injection (as the main window
+    does), then export again: complete -- our writes are recorded."""
+    entries = _exported(mv_game, mv_parser)
+    assert mv_parser.inject_wordwrap_plugin(mv_game, max_chars=40)
+    assert mv_parser.note_own_files(mv_game) == []
+    mv_parser.save_project(mv_game, entries)          # no PartialExportError
+    mv_parser.save_project(mv_game, entries)
+
+
+def test_post_export_steps_leave_a_changed_plugins_js_alone(mv_game,
+                                                            mv_parser):
+    """The word wrap / splash steps that run after a (partial) export
+    don't write over a plugins.js changed outside the translator, and
+    don't record it as ours: the next export still reports it."""
+    entries = _exported(mv_game, mv_parser)
+    js = os.path.join(mv_game, "js", "plugins.js")
+    plugins = mv_parser._load_plugins_js(js)
+    plugins.append({"name": "MadeWithMv", "status": True,
+                    "description": "", "parameters": {}})
+    mv_parser._write_plugins_js(js, plugins)          # the game update
+    with open(js, "rb") as f:
+        updated = f.read()
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert "plugins.js" in ei.value.outside
+    assert mv_parser.inject_wordwrap_plugin(mv_game, max_chars=40) is False
+    assert mv_parser.disable_splash_plugin(mv_game) is False
+    mv_parser.remove_wordwrap_plugin(mv_game)
+    assert mv_parser.note_own_files(mv_game) == []
+    with open(js, "rb") as f:
+        assert f.read() == updated
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert "plugins.js" in ei.value.outside
+    with open(js, "rb") as f:
+        assert f.read() == updated
+
+
+def test_word_wrap_step_leaves_a_changed_gamefont_alone(mv_game, mv_parser):
+    entries = _exported(mv_game, mv_parser)
+    css = os.path.join(mv_game, "fonts", "gamefont.css")
+    with open(css, "w", encoding="utf-8") as f:
+        f.write("/* updated by the game */\n")
+    with pytest.raises(game_io.PartialExportError):
+        mv_parser.save_project(mv_game, entries)
+    assert mv_parser.inject_wordwrap_plugin(mv_game, max_chars=40)
+    mv_parser.remove_wordwrap_plugin(mv_game)
+    assert "updated by the game" in open(css, encoding="utf-8").read()
+    assert os.path.isfile(os.path.join(mv_game, "fonts",
+                                       "gamefont_original.css"))
+
+
+def test_own_word_wrap_write_is_recognised_and_updated(mv_game, mv_parser):
+    """Normal path: our earlier plugins.js write is known as ours, and
+    re-exporting rewrites it (rebuilt from the backup, then re-injected)."""
+    entries = _exported(mv_game, mv_parser)
+    js = os.path.join(mv_game, "js", "plugins.js")
+    assert mv_parser.inject_wordwrap_plugin(mv_game, max_chars=40)
+    assert any(p.get("name") == mv_parser.INJECTED_PLUGIN_NAME
+               for p in mv_parser._load_plugins_js(js))
+    mv_parser.save_project(mv_game, entries)          # complete
+    assert mv_parser.last_outside == set()
+    assert not any(p.get("name") == mv_parser.INJECTED_PLUGIN_NAME
+                   for p in mv_parser._load_plugins_js(js))
+    assert mv_parser.inject_wordwrap_plugin(mv_game, max_chars=30)
+    mv_parser.save_project(mv_game, entries)          # still complete
