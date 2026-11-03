@@ -1576,7 +1576,8 @@ class WolfRPGParser:
             changed[label] = changed.get(label, 0) + 1
         game_io.raise_export_problems(skipped, changed,
                                       unsupported=unsupported,
-                                      outside=sorted(outside))
+                                      outside=sorted(outside),
+                                      manifest=manifest)
 
     def _apply_commands(self, commands, key_prefix: str, translations: dict,
                         originals: dict, label: str,

@@ -654,7 +654,8 @@ class RPGMaker2KParser:
                     and trans != self._orig_map.get(eid)):
                 changed_lines[fname] = changed_lines.get(fname, 0) + 1
         game_io.raise_export_problems(problems, changed_lines,
-                                      outside=sorted(outside))
+                                      outside=sorted(outside),
+                                      manifest=manifest)
 
     def _orig_ok(self, entry_id: str, current: str) -> bool:
         """Does the game still hold *entry_id*'s original at its position?

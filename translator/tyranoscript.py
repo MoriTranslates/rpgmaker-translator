@@ -306,7 +306,8 @@ class TyranoScriptParser:
         manifest.save()
         self._patch_game_fonts(project_dir)
         game_io.raise_export_problems(problems, changed_lines,
-                                      outside=sorted(outside))
+                                      outside=sorted(outside),
+                                      manifest=manifest)
 
     def _system_files(self, project_dir: str) -> list:
         """(key, live, .bak) for lang.js and Config.tjs where they exist."""

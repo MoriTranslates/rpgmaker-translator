@@ -45,18 +45,22 @@ class PartialExportError(OSError):
                          the line they go into (fix the translation)
     * ``unsupported`` -- parts of the game this version can't write
     * ``outside``     -- files changed outside the translator (not written)
+    * ``unverified``  -- files that could not be verified (not written)
+    * ``unrecorded``  -- what was written could not be recorded
     A plain ``PartialExportError(problems)`` counts every problem as an error.
     """
 
     def __init__(self, problems: list[str], summary: str = "", *,
                  errors=None, changed=None, unsafe=None, unsupported=None,
-                 outside=None):
+                 outside=None, unverified=None, unrecorded=None):
         self.problems = list(problems)
         self.errors = list(self.problems if errors is None else errors)
         self.changed = dict(changed or {})
         self.unsafe = list(unsafe or [])
         self.unsupported = list(unsupported or [])
         self.outside = list(outside or [])
+        self.unverified = list(unverified or [])
+        self.unrecorded = list(unrecorded or [])
         shown = "\n  ".join(self.problems[:20])
         more = (f"\n  ... and {len(self.problems) - 20} more"
                 if len(self.problems) > 20 else "")
@@ -81,18 +85,34 @@ def outside_problem(fn: str) -> str:
             f"re-save or hand edit) — not written, backup not touched")
 
 
+def unverified_problem(fn: str) -> str:
+    return (f"{fn}: can't be verified (an earlier export was interrupted or "
+            f"couldn't record what it wrote) — not written, backup not "
+            f"touched")
+
+
 def raise_export_problems(errors: list[str], skipped: dict[str, int],
                           unsafe: list[str] = (), unsupported: list[str] = (),
-                          outside: list[str] = ()):
+                          outside: list[str] = (), manifest=None):
     """Raise PartialExportError for unwritten files and/or skipped lines.
 
     *skipped* maps a file to the number of translations that were NOT
     written because the game text at their place no longer matched their
     original (game update or hand edit): the game's text was kept.
     *unsafe* / *unsupported* / *outside*: see ``PartialExportError``.
+    With the export's *manifest*, files it could not verify are told apart
+    from *outside*, and a failed record or save of the manifest is reported.
     """
     skipped = {fn: n for fn, n in skipped.items() if n}
-    problems = (list(errors) + [outside_problem(fn) for fn in outside]
+    unverified = sorted(k for k in outside
+                        if manifest is not None and k in manifest.unverified)
+    outside = [k for k in outside if k not in unverified]
+    unrecorded = list(getattr(manifest, "record_failed", None) or [])
+    problems = (list(errors)
+                + [f"Couldn't record what was written, so the next export "
+                   f"may flag these files: {r}" for r in unrecorded]
+                + [unverified_problem(fn) for fn in unverified]
+                + [outside_problem(fn) for fn in outside]
                 + list(unsupported) + list(unsafe)
                 + [changed_line_problem(fn, n)
                    for fn, n in sorted(skipped.items())])
@@ -102,6 +122,11 @@ def raise_export_problems(errors: list[str], skipped: dict[str, int],
     if errors:
         parts.append(f"{len(errors)} file(s) could not be written "
                      f"(is the game running?)")
+    if unrecorded:
+        parts.append("what was written could not be recorded")
+    if unverified:
+        parts.append(f"{len(unverified)} file(s) could not be verified and "
+                     f"were not written")
     if outside:
         parts.append(f"{len(outside)} file(s) were changed outside the "
                      f"translator and were not written")
@@ -116,7 +141,8 @@ def raise_export_problems(errors: list[str], skipped: dict[str, int],
     raise PartialExportError(
         problems, "Export incomplete — " + "; ".join(parts) + ":",
         errors=errors, changed=skipped, unsafe=unsafe,
-        unsupported=unsupported, outside=outside)
+        unsupported=unsupported, outside=outside, unverified=unverified,
+        unrecorded=unrecorded)
 
 
 # What the user can do about lines whose game text changed.  The app does
@@ -146,6 +172,17 @@ def export_advice(partial) -> str:
     if errors:
         advice.append("For files that could not be written: close the game, "
                       "free disk space if needed, and export again.")
+    if getattr(partial, "unrecorded", None):
+        advice.append("What this export wrote could not be recorded (disk "
+                      "full? a file in use?). Free some space and export "
+                      "again; if the next export lists files as changed "
+                      "outside the translator, run Restore Originals and "
+                      "export again.")
+    if getattr(partial, "unverified", None):
+        advice.append("Files that can't be verified were not written: an "
+                      "earlier export was interrupted, so the app can't tell "
+                      "its own output from other changes. Run Restore "
+                      "Originals, then export again.")
     if getattr(partial, "outside", None):
         advice.append(OUTSIDE_ADVICE)
     if getattr(partial, "unsupported", None):
@@ -175,6 +212,7 @@ def atomic_write_bytes(path: str, data: bytes) -> None:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
+        _before_replace(tmp, path)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -199,6 +237,7 @@ def atomic_write_text(path: str, text: str, encoding: str = "utf-8",
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
+        _before_replace(tmp, path)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -214,6 +253,7 @@ def atomic_copy(src: str, dst: str) -> None:
     tmp = _tmp_name(dst)
     try:
         shutil.copy2(src, tmp)
+        _before_replace(tmp, dst)
         os.replace(tmp, dst)
     except BaseException:
         try:
@@ -506,20 +546,60 @@ def _same_content(a: str, b: str) -> bool:
     return sha256_file(a) == sha256_file(b)
 
 
+def _norm(path: str) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+# Manifests of exports in progress, by manifest path.  Every atomic write
+# under a manifest's folder is journaled to it BEFORE the file is renamed
+# into place (see ``_before_replace``), so a crash can never leave our own
+# output unrecognisable.
+_write_ahead: dict[str, "ExportManifest"] = {}
+
+
+def _before_replace(tmp: str, dst: str) -> None:
+    """Write-ahead hook of the atomic writers: journal *tmp*'s hash as the
+    content about to land at *dst*.  Raises if it can't -- then the file is
+    not written (no record, no write)."""
+    for m in list(_write_ahead.values()):
+        m._intend(dst, tmp)
+
+
 class ExportManifest:
     """Records the size + hash of every file an export wrote.
 
     Stored as JSON *beside* the backup (never inside it, so a restore never
     copies it into the game, and parsers never see it as game data).
+
+    Write-ahead: while an export runs (``begin`` .. ``finish``) every game
+    file written under the manifest's folder is first journaled with the
+    hash it is about to get (``<manifest>.journal``), and recorded after
+    the write.  So after a crash, a failed record or a failed final save,
+    the next export still recognises the app's own output.
     """
 
     VERSION = 1
 
     def __init__(self, path: str):
         self.path = os.fspath(path)
+        self.journal = self.path + ".journal"
+        self.root = _norm(os.path.dirname(self.path) or ".")
         self.files: dict[str, dict] = {}
+        # content this app was about to write, by normalised live path
+        self.intended: dict[str, dict] = {}
         self.exists = False
         self.pending = False
+        # The manifest on disk was left pending: an export crashed, or
+        # could not save what it wrote.
+        self.was_pending = False
+        # Was there ever a manifest (or journal) for this backup?  Only a
+        # project that never had one (exported with 1.1.0) gets the 1.1.0
+        # behaviour; anything else that can't be verified is not written.
+        self.present = os.path.exists(self.path) or os.path.exists(self.journal)
+        # A record or the final save failed in THIS export (reported).
+        self.record_failed: list[str] = []
+        # Keys that could not be verified this export (see check_live).
+        self.unverified: set[str] = set()
         # True when this manifest was created together with the backup, so
         # every write this app ever made to the game is recorded in it: a
         # file with no record was never written by us.  (Manifests made
@@ -531,17 +611,45 @@ class ExportManifest:
             if isinstance(raw, dict) and isinstance(raw.get("files"), dict):
                 self.files = raw["files"]
                 self.tracks_all = raw.get("tracks_all") is True
-                # A manifest left "pending" by an export that crashed or
-                # couldn't record what it wrote can't tell our output from
-                # a game update: treat it like no manifest (never refresh).
-                self.exists = not raw.get("pending", False)
+                self.was_pending = bool(raw.get("pending", False))
+                self.exists = not self.was_pending
         except (OSError, ValueError):
-            # Missing or unreadable manifest: behave as for a v1.1.0 backup
-            # -- never re-baseline, the safe direction.
+            # Missing or unreadable: no records.  If the file (or a
+            # journal) is there at all, check_live treats unmatched files
+            # as "can't verify" -- never as unchanged.
+            pass
+        self._read_journal()
+
+    def _read_journal(self) -> None:
+        try:
+            with open(self.journal, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                        self.intended[rec["path"]] = {
+                            "size": rec["size"], "sha256": rec["sha256"]}
+                    except (ValueError, KeyError, TypeError):
+                        # A torn last line from a crash: that write never
+                        # reached its rename (the line is written first).
+                        continue
+        except OSError:
+            # No journal: nothing was in flight.
             pass
 
-    def is_ours(self, key: str, live_path: str) -> bool:
-        rec = self.files.get(key)
+    def _intend(self, dst: str, tmp: str) -> None:
+        d = _norm(dst)
+        if (d.endswith(".manifest.json") or d.endswith(".journal")
+                or not (d == self.root or d.startswith(self.root + os.sep))):
+            return
+        rec = {"size": os.path.getsize(tmp), "sha256": sha256_file(tmp)}
+        with open(self.journal, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"path": d, **rec}) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        self.intended[d] = rec
+
+    @staticmethod
+    def _matches(rec, live_path: str) -> bool:
         if not rec or not os.path.isfile(live_path):
             return False
         try:
@@ -551,12 +659,22 @@ class ExportManifest:
             return False
         return sha256_file(live_path) == rec.get("sha256")
 
+    def is_ours(self, key: str, live_path: str) -> bool:
+        """Is *live_path* what this app last wrote (record or journal)?"""
+        return (self._matches(self.files.get(key), live_path)
+                or self._matches(self.intended.get(_norm(live_path)),
+                                 live_path))
+
     def record(self, key: str, live_path: str) -> None:
         try:
             self.files[key] = {"size": os.path.getsize(live_path),
                                "sha256": sha256_file(live_path)}
-        except OSError:
+        except OSError as exc:
+            # The journal still holds what was written, so the next export
+            # recognises it; this export says the record failed.
             self.files.pop(key, None)
+            self.record_failed.append(f"{key} ({exc})")
+            log.warning("Could not record %s in %s: %s", key, self.path, exc)
 
     def forget(self, key: str) -> None:
         self.files.pop(key, None)
@@ -566,32 +684,50 @@ class ExportManifest:
             {"version": self.VERSION, "pending": self.pending,
              "tracks_all": self.tracks_all,
              "files": self.files}, ensure_ascii=False, indent=1))
+        self.present = True
 
     def begin(self) -> None:
-        """Mark an export as in progress, BEFORE any game file is written.
+        """Mark an export as in progress, BEFORE any game file is written,
+        and journal every write from now on.
 
         Raises OSError if that can't be recorded -- the export must then
-        not touch the game, or a later export could mistake our own output
-        for a game update and copy English into the backup.
+        not touch the game.
         """
         self.pending = True
         self._write()
+        _write_ahead[self.path] = self
 
     def save(self) -> None:
         """Write the manifest, keeping the current pending state."""
         try:
             self._write()
         except OSError as exc:
-            # Harmless to lose: if this was the pending marker, it is still
-            # on disk from begin(); without a manifest nothing is refreshed.
+            # Reported by finish()/raise_export_problems: the journal keeps
+            # what was written, so the next export still recognises it.
+            self.record_failed.append(f"export record ({exc})")
             log.warning("Could not write export manifest %s: %s",
                         self.path, exc)
 
     def finish(self) -> None:
-        """Record a completed export (clears the pending marker)."""
+        """Record a completed export (clears the pending marker).
+
+        The journal is dropped only when everything was recorded and
+        saved; otherwise it stays, and the failure is reported.
+        """
+        if _write_ahead.get(self.path) is self:
+            del _write_ahead[self.path]
         self.pending = False
         self.save()
         self.exists = not self.pending
+        if not self.record_failed:
+            try:
+                os.remove(self.journal)
+            except FileNotFoundError:
+                pass                    # nothing was journaled
+            except OSError as exc:
+                # Harmless: a journal only ever adds "this is ours" hashes
+                # of files this app wrote.
+                log.warning("Could not remove %s: %s", self.journal, exc)
 
     def start_with_backup(self) -> None:
         """A new backup was just made: this manifest sees every write."""
@@ -602,36 +738,46 @@ class ExportManifest:
 # ── Files changed outside the translator: fail closed ────────────────
 #
 # The backup is never replaced from the live game.  Each export compares a
-# live file with what this app last wrote (manifest) and with the backup:
-# a file that matches neither was changed by something else -- a game
-# update, RPG Maker re-saving it, a hand edit -- and is neither written nor
-# copied anywhere.  No guessing about which of those it was.
+# live file with what this app wrote (manifest records and the write-ahead
+# journal) and with the backup:
+#   * matches one of them: ours or original -- exported as usual;
+#   * matches none, manifest complete: changed outside the translator
+#     (game update, RPG Maker re-save, hand edit) -- not written;
+#   * matches none, but the manifest was left pending (an export crashed
+#     or couldn't save its record) or has no record of the file: can't be
+#     verified -- not written either ("couldn't check" is never "fine");
+#   * no manifest or journal ever existed (a project exported with
+#     1.1.0): the 1.1.0 behaviour.
 
-def _known(key: str, manifest: ExportManifest) -> bool:
-    """Can the manifest tell our output apart for *key*?"""
-    return manifest.exists and (manifest.tracks_all or key in manifest.files)
+def check_live(key: str, live: str, bak: str,
+               manifest: ExportManifest) -> str:
+    """"ok", "outside" or "unverified" for one game file.  Hashes are
+    streamed, so file size doesn't matter."""
+    if not os.path.isfile(live) or not os.path.isfile(bak):
+        return "ok"
+    if _same_content(live, bak) or manifest.is_ours(key, live):
+        return "ok"
+    if not manifest.present:
+        return "ok"                         # 1.1.0 project: 1.1.0 behaviour
+    if manifest.was_pending or not manifest.exists or (
+            key not in manifest.files and not manifest.tracks_all):
+        return "unverified"
+    return "outside"
 
 
 def is_changed_outside(key: str, live: str, bak: str,
                        manifest: ExportManifest) -> bool:
-    """Does *live* match neither our last write nor the backup?
-
-    False when the manifest can't judge *key* (a backup from 1.1.0, or an
-    export that crashed): then the export behaves as 1.1.0 did.  Hashes
-    are streamed, so file size doesn't matter.
-    """
-    if not os.path.isfile(live) or not os.path.isfile(bak):
-        return False
-    if not _known(key, manifest):
-        return False
-    if manifest.is_ours(key, live):
-        return False
-    return not _same_content(live, bak)
+    """Must *live* be left alone (changed outside, or can't be verified)?"""
+    state = check_live(key, live, bak, manifest)
+    if state == "unverified":
+        manifest.unverified.add(key)
+    return state != "ok"
 
 
 def changed_outside(pairs, manifest: ExportManifest) -> list[str]:
-    """Keys of *pairs* ``(key, live, backup)`` changed outside the app.
+    """Keys of *pairs* ``(key, live, backup)`` that must not be written.
 
+    Those that could not be verified are also in ``manifest.unverified``.
     Always marks the manifest pending (``begin``) before returning, so
     callers write game files only after that marker is safely on disk.
     The backup is never written.
@@ -639,8 +785,8 @@ def changed_outside(pairs, manifest: ExportManifest) -> list[str]:
     out = [key for key, live, bak in pairs
            if is_changed_outside(key, live, bak, manifest)]
     for key in out:
-        log.warning("Game file %s was changed outside the translator: "
-                    "not written", key)
+        log.warning("Game file %s was changed outside the translator or "
+                    "can't be verified: not written", key)
     manifest.begin()
     return out
 
@@ -662,7 +808,8 @@ def read_only_source(key: str, live: str, bak: str,
 
     For packages built from the game (the MV/MZ install zip): the backup's
     original; the live file when the backup has no copy; None when the live
-    file was changed outside the translator (left out and reported).
+    file was changed outside the translator or can't be verified (left out
+    and reported).
     """
     if is_changed_outside(key, live, bak, manifest):
         return None

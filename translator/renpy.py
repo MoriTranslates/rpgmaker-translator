@@ -486,7 +486,8 @@ class RenPyParser:
         manifest.finish()
         log.info("Exported %d translations to .rpy files", exported)
         game_io.raise_export_problems(problems, changed_lines, unsafe=unsafe,
-                                      outside=sorted(outside))
+                                      outside=sorted(outside),
+                                      manifest=manifest)
 
     def _export_file(self, source_path: str, target_path: str,
                      fname: str, trans_map: dict) -> int:

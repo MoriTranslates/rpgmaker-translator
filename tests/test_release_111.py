@@ -883,3 +883,88 @@ def test_csv_without_safe_column_gets_cant_write_advice(tmp_path):
     assert ei.value.unsupported and not ei.value.errors
     advice = game_io.export_advice(ei.value)
     assert "can't write" in advice and "close the game" not in advice
+
+
+# ── Round-2 review M1: a crashed export never turns the check off ────
+
+class _Killed(BaseException):
+    """Stands in for the process being killed mid-export."""
+
+
+def test_pending_manifest_never_rolls_back_an_update(mv_game, mv_parser):
+    """Round-2 M1 repro: export -> manifest left pending -> game update ->
+    export.  Items.json used to be rewritten from the old backup, and the
+    export said "complete"."""
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "reviewed"
+    mv_parser.save_project(mv_game, entries)
+    game_io.ExportManifest(os.path.join(
+        mv_game, "data_original.manifest.json")).begin()   # crash marker
+    game_io._write_ahead.clear()
+    _update_items(mv_game)
+    items = os.path.join(mv_game, "data", "Items.json")
+    updated = _sha(items)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert ei.value.unverified == ["Items.json"] and not ei.value.outside
+    assert _sha(items) == updated
+    advice = game_io.export_advice(ei.value)
+    assert "Restore Originals, then export again" in advice
+
+
+def test_kill_mid_export_then_update_own_output_still_recognised(
+        mv_game, mv_parser, monkeypatch):
+    """Write-ahead: files written by an export that was killed are still
+    ours on the next export (journal); a game update after the kill is not
+    written."""
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "reviewed"
+    mv_parser.save_project(mv_game, entries)
+    for e in entries:
+        e.translation = "EN2 " + e.id                      # new output
+    real = game_io.atomic_write_text
+    written = []
+
+    def dies_on_third(path, *a, **k):
+        if path.endswith(".json") and "data" + os.sep in path \
+                and not path.endswith(".manifest.json"):
+            if len(written) == 2:
+                raise _Killed()
+            written.append(path)
+        return real(path, *a, **k)
+    monkeypatch.setattr(game_io, "atomic_write_text", dies_on_third)
+    with pytest.raises(_Killed):
+        mv_parser.save_project(mv_game, entries)
+    monkeypatch.setattr(game_io, "atomic_write_text", real)
+    game_io._write_ahead.clear()
+    assert len(written) == 2
+    _update_items(mv_game)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    # our own half-export is recognised; only the updated file is held back
+    assert ei.value.unverified + ei.value.outside == ["Items.json"]
+
+
+def test_present_manifest_without_record_is_not_the_110_fallback(
+        mv_game, mv_parser):
+    """Only a project that never had a manifest gets 1.1.0 behaviour."""
+    import shutil
+    data = os.path.join(mv_game, "data")
+    shutil.copytree(data, data + "_original")
+    with open(data + "_original.manifest.json", "w", encoding="utf-8") as f:
+        f.write('{"version": 1, "pending": true, "files": {}}')
+    entries = mv_parser.load_project(mv_game)
+    _update_items(mv_game, rename_first=False)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert ei.value.unverified == ["Items.json"]
+
+
+def test_torn_journal_line_is_ignored(tmp_path):
+    m = game_io.ExportManifest(str(tmp_path / "x.manifest.json"))
+    with open(m.journal, "w", encoding="utf-8") as f:
+        f.write('{"path": "a", "size": 1, "sha256": "x"}\n{"path": "b", "si')
+    m = game_io.ExportManifest(str(tmp_path / "x.manifest.json"))
+    assert list(m.intended) == ["a"] and m.present

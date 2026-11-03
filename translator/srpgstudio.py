@@ -325,7 +325,8 @@ class SRPGStudioParser:
         if game_io.changed_outside(
                 [("data.dts", dts_path, backup_path)], manifest):
             manifest.finish()       # nothing written: clear the marker
-            game_io.raise_export_problems([], {}, outside=["data.dts"])
+            game_io.raise_export_problems([], {}, outside=["data.dts"],
+                                          manifest=manifest)
         # Backup on first export (atomic copy)
         if game_io.backup_file_once(dts_path, backup_path):
             manifest.start_with_backup()

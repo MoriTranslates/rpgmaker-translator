@@ -394,7 +394,8 @@ class RPGMakerAceParser:
                 problems.append(f"{filename} ({exc})")
         manifest.finish()
         game_io.raise_export_problems(problems, skipped,
-                                      outside=sorted(outside))
+                                      outside=sorted(outside & all_files),
+                                      manifest=manifest)
 
     @staticmethod
     def _backup_pairs(data_dir: str) -> list:

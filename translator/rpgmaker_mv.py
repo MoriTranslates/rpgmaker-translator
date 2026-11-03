@@ -684,7 +684,8 @@ class RPGMakerMVParser:
             errors.append(f"gamefont.css: {exc}")
 
         game_io.raise_export_problems(errors, skipped_lines,
-                                      outside=sorted(outside))
+                                      outside=sorted(outside),
+                                      manifest=manifest)
 
     @staticmethod
     def _atomic_write_text(path: str, text: str):
@@ -906,7 +907,8 @@ class RPGMakerMVParser:
             )
             zf.writestr("README.txt", readme)
         self.last_patch_skipped = skipped_lines
-        game_io.raise_export_problems([], skipped_lines, outside=outside)
+        game_io.raise_export_problems([], skipped_lines, outside=outside,
+                                      manifest=manifest)
 
     def export_game_folder_as_patch(self, game_path: str, zip_path: str,
                                     game_title: str = "") -> dict:

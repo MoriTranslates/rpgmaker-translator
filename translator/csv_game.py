@@ -301,7 +301,8 @@ class CSVGameParser:
         manifest.finish()
         game_io.raise_export_problems(problems, changed_lines,
                                       unsupported=unsupported,
-                                      outside=sorted(outside))
+                                      outside=sorted(outside),
+                                      manifest=manifest)
 
     def restore_originals(self, project_dir: str):
         """Restore original files from backup."""

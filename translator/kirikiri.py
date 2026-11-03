@@ -468,7 +468,8 @@ class KirikiriParser:
         manifest.finish()
         log.info("Exported %d translations to scenario/", export_count)
         game_io.raise_export_problems(problems, changed_lines,
-                                      outside=sorted(outside))
+                                      outside=sorted(outside),
+                                      manifest=manifest)
 
     def restore_originals(self, project_dir: str):
         """Restore original scenario files from backup."""
