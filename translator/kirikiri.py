@@ -359,12 +359,12 @@ class KirikiriParser:
         # interrupted copy is never mistaken for a complete backup)
         manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
         if game_io.backup_tree_once(scenario_dir, backup_dir):
-            manifest.save()
+            manifest.start_with_backup()
         self.last_export_notes: list[str] = []
+        # Files changed outside the translator (game update, hand edit) are
+        # not written; the backup is never touched.
         pairs = game_io.tree_pairs(scenario_dir, backup_dir, (".ks",))
-        refreshed = game_io.refresh_changed_originals(pairs, manifest)
-        if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+        outside = set(game_io.changed_outside(pairs, manifest))
         problems: list[str] = []
         written: list[tuple[str, str]] = []
         # file -> translations not written because the game text changed
@@ -380,7 +380,7 @@ class KirikiriParser:
         # so reverted entries don't keep English from an earlier export.
         for ks in Path(backup_dir).rglob("*.ks"):
             rel_path = str(ks.relative_to(Path(backup_dir))).replace("\\", "/")
-            if rel_path not in by_file:
+            if rel_path not in by_file and rel_path not in outside:
                 live_path = os.path.join(scenario_dir, rel_path)
                 try:
                     os.makedirs(os.path.dirname(live_path), exist_ok=True)
@@ -391,10 +391,27 @@ class KirikiriParser:
 
         export_count = 0
         for rel_path, file_entries in by_file.items():
+            if rel_path in outside:
+                continue
             # Always read from backup for idempotent re-export
             backup_path = os.path.join(backup_dir, rel_path)
             live_path = os.path.join(scenario_dir, rel_path)
-            source = backup_path if os.path.exists(backup_path) else live_path
+            source = backup_path
+            if not os.path.exists(backup_path) and os.path.exists(live_path):
+                # Not in the backup: back the game's copy up first, but only
+                # if this app provably never wrote it (else it may hold an
+                # older export's English) -- otherwise it is not written.
+                if not game_io.never_written(rel_path, manifest):
+                    changed_lines[rel_path] = len(file_entries)
+                    log.warning("%s is not in the backup: not written",
+                                rel_path)
+                    continue
+                try:
+                    os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                    game_io.backup_file_once(live_path, backup_path)
+                except OSError as exc:
+                    problems.append(f"{rel_path} (could not back it up: {exc})")
+                    continue
 
             if not os.path.exists(source):
                 log.warning("Source file not found: %s", source)
@@ -450,7 +467,8 @@ class KirikiriParser:
             manifest.record(rel_path, live_path)
         manifest.finish()
         log.info("Exported %d translations to scenario/", export_count)
-        game_io.raise_export_problems(problems, changed_lines)
+        game_io.raise_export_problems(problems, changed_lines,
+                                      outside=sorted(outside))
 
     def restore_originals(self, project_dir: str):
         """Restore original scenario files from backup."""

@@ -1399,15 +1399,20 @@ class WolfRPGParser:
         manifest = game_io.ExportManifest(str(backup_dir) + '.manifest.json')
         if game_io.backup_tree_once(str(self.data_dir), str(backup_dir),
                                     only=list(_WOLF_DATA_SUBDIRS)):
-            manifest.save()
+            manifest.start_with_backup()
         self.last_export_notes: list[str] = []
 
-        # A game update after the first export must not be rolled back:
-        # re-baseline any live file that is neither the original nor ours.
-        refreshed = game_io.refresh_changed_originals(
-            self._data_file_pairs(backup_dir), manifest)
-        if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+        # Files changed outside the translator (game update, editor
+        # re-save, hand edit) are not written; the backup is never touched.
+        outside = set(game_io.changed_outside(
+            self._data_file_pairs(backup_dir), manifest))
+        # their entries' file names, so their lines aren't counted again
+        outside_files = set()
+        for key in outside:
+            stem = key.rsplit('/', 1)[1].rsplit('.', 1)[0]
+            outside_files.add(f'MapData/{stem}' if key.startswith('MapData/')
+                              else 'CommonEvents' if stem == 'CommonEvent'
+                              else f'Database/{stem}')
 
         # Re-read maps, common events and DB structure from backup for
         # idempotent re-export
@@ -1433,6 +1438,8 @@ class WolfRPGParser:
         # Apply to maps
         for wolf_map in self.maps:
             file_name = f'MapData/{wolf_map.name}'
+            if f'MapData/{wolf_map.path.name}' in outside:
+                continue
             modified = False
             for ev in wolf_map.events:
                 for page in ev.pages:
@@ -1455,7 +1462,7 @@ class WolfRPGParser:
                 skipped.append(f'MapData/{wolf_map.path.name} ({exc})')
 
         # Apply to common events
-        if self.common_events:
+        if self.common_events and 'BasicData/CommonEvent.dat' not in outside:
             file_name = 'CommonEvents'
             modified = False
             for ce in self.common_events.events:
@@ -1482,6 +1489,8 @@ class WolfRPGParser:
         reported_dbs: set[str] = set()
         for db in self.databases:
             file_name = f'Database/{db.name}'
+            if f'BasicData/{db.name}.dat' in outside:
+                continue
             db_trans = {}
             db_orig = {}
             for key, val in translations.items():
@@ -1557,7 +1566,8 @@ class WolfRPGParser:
             if key in self._visited_keys or trans == originals.get(key):
                 continue
             file = key_file.get(key, '')
-            if file in unreadable or file in reported_dbs or (
+            if (file in unreadable or file in reported_dbs
+                    or file in outside_files) or (
                     file.startswith('Database/') and file not in loaded_dbs):
                 continue
             label = (file.split('/', 1)[1] + '.mps' if file.startswith('MapData/')
@@ -1565,7 +1575,8 @@ class WolfRPGParser:
                      else file.split('/')[-1] + '.dat')
             changed[label] = changed.get(label, 0) + 1
         game_io.raise_export_problems(skipped, changed,
-                                      unsupported=unsupported)
+                                      unsupported=unsupported,
+                                      outside=sorted(outside))
 
     def _apply_commands(self, commands, key_prefix: str, translations: dict,
                         originals: dict, label: str,

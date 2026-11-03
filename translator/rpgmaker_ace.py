@@ -321,7 +321,7 @@ class RPGMakerAceParser:
         manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
         # Backup originals on first export
         if self._backup_data_dir(data_dir):
-            manifest.save()
+            manifest.start_with_backup()
         source_dir = backup_dir if os.path.isdir(backup_dir) else data_dir
 
         # Build lookup: file → [entries]
@@ -335,38 +335,35 @@ class RPGMakerAceParser:
 
         # Only files that hold game text are ever written (Scripts.rvdata2
         # is left to the script patchers, which keep their own backup).
+        # Files changed outside the translator (game update, RPG Maker
+        # re-save, hand edit) are not written; the backup is never touched.
         self.last_export_notes: list[str] = []
-        refreshed = game_io.refresh_changed_originals(
-            self._backup_pairs(data_dir), manifest)
-        if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+        outside = set(game_io.changed_outside(
+            self._backup_pairs(data_dir), manifest))
 
         problems: list[str] = []
         skipped: dict[str, int] = {}
         for filename in sorted(all_files):
+            if filename in outside:
+                continue
             file_entries = by_file.get(filename, [])
             source_path = os.path.join(source_dir, filename)
             out_path = os.path.join(data_dir, filename)
             if not os.path.exists(source_path) and os.path.isfile(out_path) \
                     and file_entries and source_path != out_path:
-                # The backup has no copy of this file.  The game's copy is
-                # taken as the original only if every translated line still
-                # finds its original there -- otherwise it may be English
-                # from an older export, and must never become the
-                # "original" in the backup.  Then nothing is written.
+                # The backup has no copy of this file.  Only a file this app
+                # provably never wrote is backed up and written; otherwise
+                # it may hold an older export's English: not written.
+                if not game_io.never_written(filename, manifest):
+                    skipped[filename] = len(file_entries)
+                    log.warning("%s is not in the backup: not written",
+                                filename)
+                    continue
                 try:
                     data = self._read_rvdata2(out_path)
                     n = self._apply_translations(data, filename, file_entries)
-                except Exception as exc:
-                    log.error("Failed to read %s: %s", filename, exc)
-                    problems.append(f"{filename} ({exc})")
-                    continue
-                if n:
-                    skipped[filename] = len(file_entries)
-                    log.warning("%s is not in the backup and its game copy "
-                                "is not the original: not written", filename)
-                    continue
-                try:
+                    if n:
+                        skipped[filename] = n
                     game_io.backup_file_once(out_path, source_path)
                     self._write_rvdata2(out_path, data)
                     manifest.record(filename, out_path)
@@ -396,17 +393,16 @@ class RPGMakerAceParser:
                 log.error("Failed to export %s: %s", filename, exc)
                 problems.append(f"{filename} ({exc})")
         manifest.finish()
-        game_io.raise_export_problems(problems, skipped)
+        game_io.raise_export_problems(problems, skipped,
+                                      outside=sorted(outside))
 
     @staticmethod
     def _backup_pairs(data_dir: str) -> list:
         """(name, live, backup) for every data file in either folder.
 
-        Every file, not only those with entries, so an update to any of them
-        refreshes the backup (files the backup lacks are never taken into
-        it by the refresh; Restore keeps them).  Scripts.rvdata2 is left
-        out -- only the script plugins change it, and they keep their own
-        backup.
+        Used to find files changed outside the translator.  Scripts.rvdata2
+        is left out -- only the script plugins change it, and they keep
+        their own backup.
         """
         backup_dir = data_dir + "_original"
         names = set()

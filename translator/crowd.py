@@ -195,12 +195,12 @@ class CrowdParser:
             os.makedirs(backup_dir)
         manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
         self.last_export_notes: list[str] = []
-        refreshed = game_io.refresh_changed_originals(
+        # Scripts changed outside the translator (game update, hand edit)
+        # are not written; backups are never touched.
+        outside = set(game_io.changed_outside(
             [(os.path.basename(p), p,
               os.path.join(backup_dir, os.path.basename(p)))
-             for p in sce_files], manifest)
-        if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+             for p in sce_files], manifest))
         problems: list[str] = []
         # file -> translations not written because the game text changed
         changed_lines: dict[str, int] = {}
@@ -221,6 +221,8 @@ class CrowdParser:
 
         for sce_path in sce_files:
             sce_name = os.path.basename(sce_path)
+            if sce_name in outside:
+                continue
             file_entries = entries_by_file.get(sce_name, [])
 
             # Create backup on first export
@@ -283,7 +285,8 @@ class CrowdParser:
             except (OSError, ValueError) as exc:
                 problems.append(f"{sce_name} ({exc})")
         manifest.finish()
-        game_io.raise_export_problems(problems, changed_lines)
+        game_io.raise_export_problems(problems, changed_lines,
+                                      outside=sorted(outside))
 
     def restore_originals(self, project_dir: str):
         """Restore original .sce from backup."""

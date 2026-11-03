@@ -75,7 +75,9 @@ def test_restore_tree_failure_leaves_live_intact(tmp_path, monkeypatch):
     assert not (tmp_path / "scenario.rmt-restore").exists()
 
 
-def test_refresh_changed_originals_rules(tmp_path):
+def test_changed_outside_rules(tmp_path):
+    """1.1.1: files that match neither our last write nor the backup are
+    reported, and nothing is ever copied into the backup."""
     live = tmp_path / "data"
     bak = tmp_path / "data_original"
     live.mkdir()
@@ -89,8 +91,8 @@ def test_refresh_changed_originals_rules(tmp_path):
     m = game_io.ExportManifest(str(bak) + ".manifest.json")
     pairs = [(n, str(live / n), str(bak / n))
              for n in ("ours.json", "update.json", "new.json")]
-    # No manifest yet (legacy backup): nothing is re-baselined.
-    assert game_io.refresh_changed_originals(pairs, m) == []
+    # No manifest yet (1.1.0 backup): no judgement, 1.1.0 behaviour.
+    assert game_io.changed_outside(pairs, m) == []
 
     m.record("ours.json", str(live / "ours.json"))
     m.record("update.json", str(live / "update.json"))
@@ -98,15 +100,10 @@ def test_refresh_changed_originals_rules(tmp_path):
     # The game is updated: update.json changes, a new file appears.
     (live / "update.json").write_text("JP2-v2", encoding="utf-8")
     m = game_io.ExportManifest(str(bak) + ".manifest.json")
-    refreshed = game_io.refresh_changed_originals(pairs, m)
-    assert sorted(refreshed) == ["update.json"]
-    assert (bak / "update.json").read_text(encoding="utf-8") == "JP2-v2"
-    # 1.1.1: a file the backup lacks is never taken into it (it could be
-    # English written by a 1.1.0 export), and the replaced backup is kept.
+    assert game_io.changed_outside(pairs, m) == ["update.json"]
+    # The backup is never written from the live game.
+    assert (bak / "update.json").read_text(encoding="utf-8") == "JP2"
     assert not (bak / "new.json").exists()
-    kept = tmp_path / "data_original.replaced" / "update.json.backup-1"
-    assert kept.read_text(encoding="utf-8") == "JP2"
-    # Our own export output is never baked into the backup.
     assert (bak / "ours.json").read_text(encoding="utf-8") == "JP1"
 
 
@@ -178,11 +175,14 @@ def test_wolf_game_update_is_not_rolled_back(tmp_path):
     # Game update replaces the DB after the first export.
     (game / "BasicData" / "DataBase.dat").write_bytes(b"JP-DB v2")
     p = WolfRPGParser()
-    p.save_project(str(game), [])
+    # 1.1.1: changed outside the translator -> not written, reported, and
+    # the backup is never replaced from the live game.
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(game), [])
+    assert ei.value.outside == ["BasicData/DataBase.dat"]
     assert (game / "BasicData" / "DataBase.dat").read_bytes() == b"JP-DB v2"
     assert (tmp_path / "WolfGame_original" / "BasicData" /
-            "DataBase.dat").read_bytes() == b"JP-DB v2"
-    assert p.last_export_notes and "changed since" in p.last_export_notes[0]
+            "DataBase.dat").read_bytes() == b"JP-DB"
 
 
 def test_wolf_existing_data_wolf_bak_does_not_break_export(tmp_path):
@@ -349,17 +349,18 @@ def test_mv_game_update_after_export_is_not_rolled_back(mv_game, mv_parser):
     with open(items_path, "w", encoding="utf-8") as f:
         json.dump(updated, f, ensure_ascii=False)
 
-    mv_parser.save_project(mv_game, entries)
-    with open(items_path, encoding="utf-8") as f:
-        live = json.load(f)
-    assert any(isinstance(x, dict) and x.get("name") == "アップデート品"
-               for x in live)                      # update kept
-    assert any(isinstance(x, dict) and x.get("name") == "Potion EN"
-               for x in live)                      # translation still applied
-    assert mv_parser.last_export_notes
-    # Third export with no changes: nothing is re-baselined again
-    mv_parser.save_project(mv_game, entries)
-    assert mv_parser.last_export_notes == []
+    backup_before = open(backup_items, "rb").read()
+    # 1.1.1: changed outside the translator -> not written (the update is
+    # kept, never rolled back), reported, backup untouched -- every time.
+    for _ in range(2):
+        with pytest.raises(game_io.PartialExportError) as ei:
+            mv_parser.save_project(mv_game, entries)
+        assert ei.value.outside == ["Items.json"]
+        with open(items_path, encoding="utf-8") as f:
+            live = json.load(f)
+        assert any(isinstance(x, dict) and x.get("name") == "アップデート品"
+                   for x in live)                      # update kept
+        assert open(backup_items, "rb").read() == backup_before
 
 
 def test_mv_parser_restore_failure_leaves_data_intact(mv_game, mv_parser, monkeypatch):

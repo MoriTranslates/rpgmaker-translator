@@ -139,13 +139,13 @@ class TyranoScriptParser:
             os.path.dirname(scenario_dir), "scenario_original")
         manifest = game_io.ExportManifest(original_dir + ".manifest.json")
         if game_io.backup_tree_once(scenario_dir, original_dir):
-            manifest.save()
+            manifest.start_with_backup()
         self.last_export_notes: list[str] = []
-        refreshed = game_io.refresh_changed_originals(
+        # Files changed outside the translator (game update, hand edit) are
+        # not written; their backups are never touched.
+        outside = set(game_io.changed_outside(
             game_io.tree_pairs(scenario_dir, original_dir, (".ks",))
-            + self._system_pairs(project_dir, manifest), manifest)
-        if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+            + self._system_pairs(project_dir, manifest), manifest))
         problems: list[str] = []
 
         # Build eval_var replacement map: 'original_jp' -> 'translated_en'
@@ -195,9 +195,14 @@ class TyranoScriptParser:
         all_ks_files.update(lookup.keys())
 
         for file_key in sorted(all_ks_files):
+            if file_key in outside:
+                continue
             src = os.path.join(original_dir, file_key)
             dst = os.path.join(scenario_dir, file_key)
             if not os.path.isfile(src):
+                # Not in the backup: never written (its lines are counted)
+                if lookup.get(file_key):
+                    changed_lines[file_key] = len(lookup[file_key])
                 continue
 
             translations = dict(lookup.get(file_key, {}))
@@ -286,19 +291,22 @@ class TyranoScriptParser:
         manifest.finish()
 
         # Export system files
-        n = self._export_lang_js(project_dir, entries)
+        n = (0 if "_system/lang.js" in outside
+             else self._export_lang_js(project_dir, entries))
         if n:
             changed_lines["tyrano/lang.js"] = n
-        if self._export_config_title(project_dir, entries):
+        if ("_system/Config.tjs" not in outside
+                and self._export_config_title(project_dir, entries)):
             changed_lines["system/Config.tjs"] = 1
-        # Remember what we wrote, so a game update to these files is told
-        # apart from our own output next time (and refreshes their .bak)
+        # Remember what we wrote, so a later change to these files is told
+        # apart from our own output next time
         for key, live, bak in self._system_files(project_dir):
-            if os.path.isfile(bak):
+            if os.path.isfile(bak) and key not in outside:
                 manifest.record(key, live)
         manifest.save()
         self._patch_game_fonts(project_dir)
-        game_io.raise_export_problems(problems, changed_lines)
+        game_io.raise_export_problems(problems, changed_lines,
+                                      outside=sorted(outside))
 
     def _system_files(self, project_dir: str) -> list:
         """(key, live, .bak) for lang.js and Config.tjs where they exist."""
@@ -317,10 +325,10 @@ class TyranoScriptParser:
         return out
 
     def _system_pairs(self, project_dir: str, manifest) -> list:
-        """System files the refresh may update: only those this version
-        has recorded writing.  (A lang.js translated by an older version
-        is English but unknown to the manifest; treating it as a game
-        update would copy the English over the original .bak.)"""
+        """System files checked for outside changes: only those this
+        version has recorded writing.  (A lang.js translated by an older
+        version is English but unknown to the manifest; their .bak copies
+        are never written from the live file anyway.)"""
         return [p for p in self._system_files(project_dir)
                 if p[0] in manifest.files]
 

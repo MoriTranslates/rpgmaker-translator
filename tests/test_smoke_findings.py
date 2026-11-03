@@ -381,8 +381,8 @@ def test_ace_export_skips_line_whose_original_changed(tmp_path):
     entries = p.load_project(str(game))
     for e in entries:
         e.translation, e.status = "EN " + e.id, "reviewed"
-    p.save_project(str(game), entries)
-    # game update: the line and one choice change
+    # game update before the first export (after it, the whole file would be
+    # "changed outside the translator": see test_release_111)
     live.write_bytes(ruby_writes(_ace_map(["新しい台詞"], ["はい", "やめる"])))
     with pytest.raises(game_io.PartialExportError) as ei:
         p.save_project(str(game), entries)
@@ -839,8 +839,7 @@ def test_renpy_export_skips_line_whose_original_changed(tmp_path):
     entries = p.load_project(str(game))
     for e in entries:
         e.translation, e.status = "EN " + e.original, "reviewed"
-    p.save_project(str(game), entries)
-    live = game / "game" / "script.rpy"
+    live = game / "game" / "script.rpy"           # update before 1st export
     live.write_bytes(('define e = Character("エリカ")\nlabel start:\n'
                       '    e "新しい台詞"\n    e "同じ台詞"\n').encode("utf-8"))
     with pytest.raises(game_io.PartialExportError) as ei:

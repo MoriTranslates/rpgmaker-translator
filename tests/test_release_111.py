@@ -136,7 +136,7 @@ def test_parsers_have_no_merge_entry_points():
 
 # ── Honest messages after a game update ──────────────────────────────
 
-def test_export_after_update_skips_changed_lines_and_says_new_project(
+def test_export_after_update_reports_the_file_and_says_new_project(
         mv_game, mv_parser):
     entries = mv_parser.load_project(mv_game)
     for e in entries:
@@ -146,14 +146,14 @@ def test_export_after_update_skips_changed_lines_and_says_new_project(
     snapshot = [(e.id, e.original, e.translation, e.status) for e in entries]
     with pytest.raises(game_io.PartialExportError) as ei:
         mv_parser.save_project(mv_game, entries)
-    assert ei.value.changed == {"Items.json": 1}
-    assert not ei.value.errors
-    note = " ".join(mv_parser.last_export_notes)
+    assert ei.value.outside == ["Items.json"]
+    assert not ei.value.errors and not ei.value.changed
     advice = game_io.export_advice(ei.value)
-    for text in (note, advice, str(ei.value)):
+    for text in (advice, str(ei.value)):
         assert "re-open" not in text.lower() and "resume" not in text.lower()
-    assert "new project" in note and "new project" in advice
-    assert "skipped" in advice
+    assert "changed outside the translator" in str(ei.value)
+    assert "new project on a clean copy" in advice
+    assert "Restore Originals first" in advice
     # the project itself is untouched by the export
     assert [(e.id, e.original, e.translation, e.status)
             for e in entries] == snapshot
@@ -298,22 +298,6 @@ def test_mv_english_file_missing_from_backup_is_never_adopted(mv_game,
     assert _sha(live) == before
 
 
-def test_mv_japanese_file_missing_from_backup_is_backed_up_then_written(
-        mv_game, mv_parser, tmp_path):
-    entries = _mv_translated(mv_game, mv_parser)
-    live = os.path.join(mv_game, "data", "Map001.json")
-    jp = (tmp_path / "jp.json")
-    jp.write_bytes(open(live, "rb").read())
-    mv_parser.save_project(mv_game, entries)
-    os.remove(os.path.join(mv_game, "data_original", "Map001.json"))
-    with open(live, "wb") as f:                        # Japanese again
-        f.write(jp.read_bytes())
-    mv_parser.save_project(mv_game, entries)          # complete
-    bak = os.path.join(mv_game, "data_original", "Map001.json")
-    assert _sha(bak) == _sha(str(jp))
-    assert "EN " in open(live, encoding="utf-8-sig").read()
-
-
 def test_mv_file_missing_from_backup_without_lines_is_left_alone(
         mv_game, mv_parser):
     entries = mv_parser.load_project(mv_game)
@@ -367,53 +351,6 @@ def test_renpy_english_script_missing_from_backup_is_never_adopted(tmp_path):
     assert _sha(s) == before
 
 
-def test_refresh_refuses_a_live_file_that_looks_translated(tmp_path):
-    """Review H3 at export: English the manifest doesn't know (hand-fixed
-    export, another fan patch) must not replace the Japanese backup."""
-    live, bak = tmp_path / "data", tmp_path / "data_original"
-    live.mkdir()
-    bak.mkdir()
-    (bak / "Map.json").write_text("「" + "こんにちは" * 100 + "」",
-                                  encoding="utf-8")
-    (live / "Map.json").write_text('"' + "Hello there " * 100 + '"',
-                                   encoding="utf-8")
-    m = game_io.ExportManifest(str(bak) + ".manifest.json")
-    m.finish()
-    m = game_io.ExportManifest(str(bak) + ".manifest.json")
-    res = game_io.refresh_changed_originals(
-        [("Map.json", str(live / "Map.json"), str(bak / "Map.json"))], m)
-    assert list(res) == [] and res.refused == ["Map.json"] and res
-    assert "こんにちは" in (bak / "Map.json").read_text(encoding="utf-8")
-    kept = tmp_path / "data_original.replaced" / "Map.json.game-1"
-    assert "Hello there" in kept.read_text(encoding="utf-8")
-    note = game_io.refreshed_note(res)
-    assert "look translated" in note and "data_original.replaced" in note
-
-
-def test_refresh_keeps_the_old_backup_and_stops_if_it_cannot(tmp_path):
-    live, bak = tmp_path / "data", tmp_path / "data_original"
-    live.mkdir()
-    bak.mkdir()
-    (bak / "Map.json").write_text("古い", encoding="utf-8")
-    (live / "Map.json").write_text("新しい", encoding="utf-8")
-    pairs = [("Map.json", str(live / "Map.json"), str(bak / "Map.json"))]
-    m = game_io.ExportManifest(str(bak) + ".manifest.json")
-    m.finish()
-    # the folder for kept copies can't be created: nothing is replaced
-    (tmp_path / "data_original.replaced").write_text("in the way")
-    with pytest.raises(OSError):
-        game_io.refresh_changed_originals(
-            pairs, game_io.ExportManifest(str(bak) + ".manifest.json"))
-    assert (bak / "Map.json").read_text(encoding="utf-8") == "古い"
-    os.remove(tmp_path / "data_original.replaced")
-    res = game_io.refresh_changed_originals(
-        pairs, game_io.ExportManifest(str(bak) + ".manifest.json"))
-    assert list(res) == ["Map.json"]
-    assert (bak / "Map.json").read_text(encoding="utf-8") == "新しい"
-    assert (tmp_path / "data_original.replaced" / "Map.json.backup-1"
-            ).read_text(encoding="utf-8") == "古い"
-
-
 # ── MV/MZ install package (review H1) ────────────────────────────────
 
 def _zip_json(zp, arc):
@@ -457,12 +394,12 @@ def test_patch_zip_reads_an_update_without_touching_the_backup(
     zp = str(tmp_path / "p.zip")
     with pytest.raises(game_io.PartialExportError) as ei:
         mv_parser.export_patch_zip(mv_game, entries, zp)
-    assert ei.value.changed == {"Items.json": 1}
+    assert ei.value.outside == ["Items.json"]
     assert _tree_hashes(data, data + "_original") == before   # read-only
-    items = _zip_json(zp, "_translation/data/Items.json")
-    assert items[1]["name"] == "ハイポーション"          # the update, kept
-    assert any(isinstance(i, dict) and i.get("name") == "アップデート品"
-               for i in items)
+    # neither the old backup (would roll the player back) nor the changed
+    # file ships: install.bat leaves the player's own Items.json alone
+    assert _zip_json(zp, "_translation/data/Items.json") is None
+    assert _zip_json(zp, "_translation/data/Actors.json") is not None
 
 
 def test_patch_zip_counts_lines_of_a_file_the_game_no_longer_has(
@@ -619,3 +556,132 @@ def test_wolf_unwritable_database_is_counted_once_with_its_cause(
     assert "LZ4" in ei.value.unsupported[0]
     advice = game_io.export_advice(ei.value)
     assert "can't write" in advice and "new project" not in advice
+
+
+# ── Fail closed: changed outside the translator (release review H1/M1/M2) ─
+
+def test_editor_resave_is_reported_never_adopted_and_restore_gives_japanese(
+        mv_game, mv_parser):
+    """Blind review H1, end to end: export, RPG Maker re-saves a JSON
+    (same content, compact form), export again.  The backup is unchanged,
+    the file is reported and not written, Restore gives back Japanese."""
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "reviewed"
+    mv_parser.save_project(mv_game, entries)
+    data = os.path.join(mv_game, "data")
+    backup_before = _tree_hashes(data + "_original")
+    actors = os.path.join(data, "Actors.json")
+    with open(actors, encoding="utf-8-sig") as f:
+        content = json.load(f)
+    with open(actors, "w", encoding="utf-8") as f:              # the editor
+        json.dump(content, f, ensure_ascii=False, separators=(",", ":"))
+    resaved = _sha(actors)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert ei.value.outside == ["Actors.json"]
+    assert "Restore Originals first" in game_io.export_advice(ei.value)
+    assert _tree_hashes(data + "_original") == backup_before
+    assert _sha(actors) == resaved                                # not written
+    mv_parser.restore_originals(mv_game)
+    with open(actors, encoding="utf-8-sig") as f:
+        names = [a["name"] for a in json.load(f) if a]
+    assert names and not any(n.startswith("EN ") for n in names)
+    mv_parser.save_project(mv_game, entries)                      # complete
+
+
+def test_update_that_cuts_most_japanese_is_never_rolled_back(mv_game,
+                                                             mv_parser):
+    """Blind review M1: an update replacing most of a map's text used to be
+    "refused" and then overwritten from the old backup."""
+    from test_smoke_findings import _set_page
+    _set_page(mv_game, [(401, "長い日本語の台詞" * 30)])
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "reviewed"
+    mv_parser.save_project(mv_game, entries)
+    path = os.path.join(mv_game, "data", "Map001.json")
+    with open(os.path.join(mv_game, "data_original", "Map001.json"),
+              encoding="utf-8-sig") as f:
+        m = json.load(f)
+    m["events"][1]["pages"][0]["list"][1]["parameters"] = ["Short."]
+    m["newKey"] = 1
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(m, f, ensure_ascii=False)
+    updated = _sha(path)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert ei.value.outside == ["Map001.json"]
+    assert _sha(path) == updated                       # update kept as is
+
+
+def test_project_from_110_falls_back_to_110_behaviour(mv_game, mv_parser):
+    """No manifest (a 1.1.0 backup): nothing can be judged, so the file is
+    exported from the backup as 1.1.0 did -- and the export records it, so
+    the next change outside is caught."""
+    import shutil
+    data = os.path.join(mv_game, "data")
+    shutil.copytree(data, data + "_original")            # 1.1.0 backup only
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "reviewed"
+    _update_items(mv_game, rename_first=False)
+    mv_parser.save_project(mv_game, entries)             # 1.1.0 behaviour
+    with open(os.path.join(data, "Items.json"), encoding="utf-8-sig") as f:
+        assert not any(isinstance(i, dict) and i.get("name") == "アップデート品"
+                       for i in json.load(f))
+    _update_items(mv_game, rename_first=False)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert ei.value.outside == ["Items.json"]
+
+
+def test_new_file_this_app_never_wrote_is_backed_up_then_written(
+        mv_game, mv_parser):
+    """A map added after the first backup, in a game whose manifest was
+    made with the backup: provably never written by us, so its original
+    is backed up before the first write."""
+    import shutil
+    entries = mv_parser.load_project(mv_game)
+    mv_parser.save_project(mv_game, entries)
+    data = os.path.join(mv_game, "data")
+    shutil.copy(os.path.join(data + "_original", "Map001.json"),
+                os.path.join(data, "Map002.json"))
+    jp = _sha(os.path.join(data, "Map002.json"))
+    new = [e for e in mv_parser.load_project(mv_game)
+           if e.file == "Map002.json"]
+    assert new
+    for e in new:
+        e.translation, e.status = "EN " + e.id, "translated"
+    mv_parser.save_project(mv_game, entries + new)
+    assert _sha(os.path.join(data + "_original", "Map002.json")) == jp
+    assert "EN Map002" in open(os.path.join(data, "Map002.json"),
+                               encoding="utf-8-sig").read()
+
+
+def test_outside_check_streams_large_files(tmp_path):
+    """Blind review M2: no whole-file reads or heuristics; memory stays
+    flat whatever the file size."""
+    import tracemalloc
+    live, bak = tmp_path / "data.dts", tmp_path / "data_original.dts"
+    block = os.urandom(1 << 20)
+    with open(bak, "wb") as f:
+        for _ in range(48):
+            f.write(block)
+    with open(live, "wb") as f:
+        for _ in range(48):
+            f.write(block)
+        f.write(b"x")
+    m = game_io.ExportManifest(str(bak) + ".manifest.json")
+    m.files["data.dts"] = {"size": 1, "sha256": "0"}
+    m.finish()
+    m = game_io.ExportManifest(str(bak) + ".manifest.json")
+    tracemalloc.start()
+    try:
+        assert game_io.changed_outside(
+            [("data.dts", str(live), str(bak))], m) == ["data.dts"]
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 * (1 << 20), peak
+    assert not hasattr(game_io, "_looks_translated")

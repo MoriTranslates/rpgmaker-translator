@@ -320,13 +320,15 @@ class SRPGStudioParser:
 
         manifest = game_io.ExportManifest(backup_path + ".manifest.json")
         self.last_export_notes: list[str] = []
-        refreshed = game_io.refresh_changed_originals(
-            [("data.dts", dts_path, backup_path)], manifest)
-        if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+        # data.dts changed outside the translator (game update, editor,
+        # hand edit): not written, backup never touched.
+        if game_io.changed_outside(
+                [("data.dts", dts_path, backup_path)], manifest):
+            manifest.finish()       # nothing written: clear the marker
+            game_io.raise_export_problems([], {}, outside=["data.dts"])
         # Backup on first export (atomic copy)
         if game_io.backup_file_once(dts_path, backup_path):
-            manifest.save()
+            manifest.start_with_backup()
             log.info("Created backup: %s", backup_path)
 
         # Always read from backup for idempotent re-export

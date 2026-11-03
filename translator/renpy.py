@@ -420,13 +420,13 @@ class RenPyParser:
         manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
         rpy_names = _rpy_files(game_dir)
         if game_io.backup_tree_once(game_dir, backup_dir, only=rpy_names):
-            manifest.save()
+            manifest.start_with_backup()
+        # Scripts changed outside the translator (game update, hand edit)
+        # are not written; the backup is never touched.
         self.last_export_notes: list[str] = []
-        refreshed = game_io.refresh_changed_originals(
+        outside = set(game_io.changed_outside(
             [(f, os.path.join(game_dir, f), os.path.join(backup_dir, f))
-             for f in rpy_names], manifest)
-        if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+             for f in rpy_names], manifest))
 
         # Build translation map
         trans_map = {}
@@ -443,27 +443,28 @@ class RenPyParser:
         unsafe: list[str] = []
         changed_lines: dict[str, int] = {}
         for fname in rpy_names:
+            if fname in outside:
+                continue
             # Read from backup (idempotent re-export)
             source = os.path.join(backup_dir, fname)
             target = os.path.join(game_dir, fname)
             try:
                 if not os.path.isfile(source):
-                    # The backup has no copy (made by a version that only
-                    # read game/*.rpy, or before a game update added the
-                    # script).  The game's copy becomes the backup only if
-                    # every translated line still finds its original there:
-                    # it may hold English from an older export, which must
-                    # never become the "original".
+                    # The backup has no copy.  The game's copy is backed
+                    # up and written only when this app provably never
+                    # wrote it: the manifest was made with the backup, or
+                    # it is a script in a subfolder (1.1.0 only ever read
+                    # and wrote game/*.rpy) with no record of a write.
+                    # Otherwise it may hold an older export's English.
                     mine = [eid for eid in trans_map
                             if eid.startswith(f"{fname}/")]
                     if not mine:
                         continue            # nothing to write: leave it
-                    self._export_file(target, target, fname, trans_map,
-                                      dry_run=True)
-                    if self._changed_lines:
+                    if not (game_io.never_written(fname, manifest)
+                            or ("/" in fname
+                                and fname not in manifest.files)):
                         changed_lines[fname] = len(mine)
-                        log.warning("%s is not in the backup and its game "
-                                    "copy is not the original: not written",
+                        log.warning("%s is not in the backup: not written",
                                     fname)
                         continue
                     os.makedirs(os.path.dirname(source), exist_ok=True)
@@ -484,14 +485,12 @@ class RenPyParser:
 
         manifest.finish()
         log.info("Exported %d translations to .rpy files", exported)
-        game_io.raise_export_problems(problems, changed_lines, unsafe=unsafe)
+        game_io.raise_export_problems(problems, changed_lines, unsafe=unsafe,
+                                      outside=sorted(outside))
 
     def _export_file(self, source_path: str, target_path: str,
-                     fname: str, trans_map: dict,
-                     dry_run: bool = False) -> int:
+                     fname: str, trans_map: dict) -> int:
         """Apply translations to a single .rpy file. Returns count.
-
-        With *dry_run* nothing is written; only the counters are set.
 
         Entries are addressed by label + line index, so each line must still
         hold the entry's original text; otherwise (game update) the game's
@@ -583,9 +582,7 @@ class RenPyParser:
                     and entry.translation != entry.original):
                 self._changed_lines += 1
 
-        if dry_run:
-            pass                                # only count, write nothing
-        elif changed:
+        if changed:
             game_io.atomic_write_text(target_path, "".join(output_lines))
         elif (os.path.normcase(os.path.abspath(source_path)) !=
               os.path.normcase(os.path.abspath(target_path))):

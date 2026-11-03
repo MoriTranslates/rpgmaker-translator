@@ -339,11 +339,16 @@ def test_tyrano_lang_js_update_is_not_rolled_back(tmp_path):
     # game update: lang.js gains a key (the .bak still has the old file)
     lang.write_text('var tyrano_lang = {"word":{"go":"進む","back":"戻る"}};\n',
                     encoding="utf-8")
-    p.save_project(str(tmp_path), entries)
+    bak_before = (lang.parent / "lang.js.bak").read_bytes()
+    # 1.1.1: changed outside the translator -> not written, reported, and
+    # the .bak is never replaced from the live file.
+    from translator import game_io
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(tmp_path), entries)
+    assert ei.value.outside == ["_system/lang.js"]
     text = lang.read_text(encoding="utf-8")
-    assert '"back":"戻る"' in text                 # update kept
-    assert '"go":"EN"' in text                     # translation still applied
-    assert '"back":"戻る"' in (lang.parent / "lang.js.bak").read_text(encoding="utf-8")
+    assert '"back":"戻る"' in text and '"go":"進む"' in text   # update kept
+    assert (lang.parent / "lang.js.bak").read_bytes() == bak_before
 
 
 def test_tyrano_old_export_lang_js_is_never_taken_as_update(tmp_path):

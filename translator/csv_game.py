@@ -193,16 +193,19 @@ class CSVGameParser:
 
         manifest = game_io.ExportManifest(backup_dir + ".manifest.json")
         self.last_export_notes: list[str] = []
-        refreshed = game_io.refresh_changed_originals(
+        # Files changed outside the translator (game update, Excel, hand
+        # edit) are not written; backups are never touched.
+        outside = set(game_io.changed_outside(
             [(fn, os.path.join(data_dir, fn), os.path.join(backup_dir, fn))
-             for fn in sorted(all_files)], manifest)
-        if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+             for fn in sorted(all_files)], manifest))
         problems: list[str] = []
+        unsupported: list[str] = []
         # file -> translations not written because the game text changed
         changed_lines: dict[str, int] = {}
 
         for filename in sorted(all_files):
+            if filename in outside:
+                continue
             file_entries = entries_by_file.get(filename, [])
             fpath = os.path.join(data_dir, filename)
             if not os.path.isfile(fpath):
@@ -244,7 +247,7 @@ class CSVGameParser:
                 if source != fpath:
                     game_io.atomic_copy(source, fpath)  # undo any older export
                 manifest.record(filename, fpath)
-                problems.append(
+                unsupported.append(
                     f"{filename} (no empty English column next to the "
                     f"Japanese text -- not written, to avoid overwriting game "
                     f"data; {len(file_entries)} translations)")
@@ -296,7 +299,9 @@ class CSVGameParser:
 
             log.info("Exported %d translations to %s", applied, filename)
         manifest.finish()
-        game_io.raise_export_problems(problems, changed_lines)
+        game_io.raise_export_problems(problems, changed_lines,
+                                      unsupported=unsupported,
+                                      outside=sorted(outside))
 
     def restore_originals(self, project_dir: str):
         """Restore original files from backup."""

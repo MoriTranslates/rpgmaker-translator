@@ -12,12 +12,11 @@ guarantees are the same for all engines:
   is never mistaken for a full backup later.
 * ``restore_tree`` — copies the backup to a temp dir first and only then
   swaps it in, so a failed restore leaves the live folder untouched.
-* ``ExportManifest`` + ``refresh_changed_originals`` — remember what each
-  export wrote.  If a live file later differs from both the backup and what
-  we wrote, the game was updated after the backup was taken; at export the
-  backup is re-baselined from it (the old copy kept aside) instead of
-  silently rolling the update back.  Never on resume, never for a file the
-  backup lacks, never for a live file that looks translated.
+* ``ExportManifest`` + ``changed_outside`` — remember what each export
+  wrote.  A live file that later matches neither the backup nor what we
+  wrote was changed outside the translator (game update, RPG Maker re-save,
+  hand edit): it is not written and is reported.  The backup is never
+  replaced from the live game.
 * ``PartialExportError`` — raised when some files were written and others
   failed, so the UI never reports "Export Complete" for a partial export.
 """
@@ -45,16 +44,19 @@ class PartialExportError(OSError):
     * ``unsafe``      -- translations not written because they would break
                          the line they go into (fix the translation)
     * ``unsupported`` -- parts of the game this version can't write
+    * ``outside``     -- files changed outside the translator (not written)
     A plain ``PartialExportError(problems)`` counts every problem as an error.
     """
 
     def __init__(self, problems: list[str], summary: str = "", *,
-                 errors=None, changed=None, unsafe=None, unsupported=None):
+                 errors=None, changed=None, unsafe=None, unsupported=None,
+                 outside=None):
         self.problems = list(problems)
         self.errors = list(self.problems if errors is None else errors)
         self.changed = dict(changed or {})
         self.unsafe = list(unsafe or [])
         self.unsupported = list(unsupported or [])
+        self.outside = list(outside or [])
         shown = "\n  ".join(self.problems[:20])
         more = (f"\n  ... and {len(self.problems) - 20} more"
                 if len(self.problems) > 20 else "")
@@ -74,17 +76,24 @@ def changed_line_problem(fn: str, n: int) -> str:
             f"changed (game update or edit), so the game's text was kept")
 
 
+def outside_problem(fn: str) -> str:
+    return (f"{fn}: changed outside the translator (game update, RPG Maker "
+            f"re-save or hand edit) — not written, backup not touched")
+
+
 def raise_export_problems(errors: list[str], skipped: dict[str, int],
-                          unsafe: list[str] = (), unsupported: list[str] = ()):
+                          unsafe: list[str] = (), unsupported: list[str] = (),
+                          outside: list[str] = ()):
     """Raise PartialExportError for unwritten files and/or skipped lines.
 
     *skipped* maps a file to the number of translations that were NOT
     written because the game text at their place no longer matched their
     original (game update or hand edit): the game's text was kept.
-    *unsafe* / *unsupported*: see ``PartialExportError``.
+    *unsafe* / *unsupported* / *outside*: see ``PartialExportError``.
     """
     skipped = {fn: n for fn, n in skipped.items() if n}
-    problems = (list(errors) + list(unsupported) + list(unsafe)
+    problems = (list(errors) + [outside_problem(fn) for fn in outside]
+                + list(unsupported) + list(unsafe)
                 + [changed_line_problem(fn, n)
                    for fn, n in sorted(skipped.items())])
     if not problems:
@@ -93,6 +102,9 @@ def raise_export_problems(errors: list[str], skipped: dict[str, int],
     if errors:
         parts.append(f"{len(errors)} file(s) could not be written "
                      f"(is the game running?)")
+    if outside:
+        parts.append(f"{len(outside)} file(s) were changed outside the "
+                     f"translator and were not written")
     if unsupported:
         parts.append(f"{len(unsupported)} part(s) of the game can't be "
                      f"written by this version")
@@ -104,7 +116,7 @@ def raise_export_problems(errors: list[str], skipped: dict[str, int],
     raise PartialExportError(
         problems, "Export incomplete — " + "; ".join(parts) + ":",
         errors=errors, changed=skipped, unsafe=unsafe,
-        unsupported=unsupported)
+        unsupported=unsupported, outside=outside)
 
 
 # What the user can do about lines whose game text changed.  The app does
@@ -118,6 +130,13 @@ CHANGED_LINES_ADVICE = (
     "over your existing work).")
 
 
+OUTSIDE_ADVICE = (
+    "Files changed outside the translator were not written and their backup "
+    "was not touched. If the game was updated, start a new project on a "
+    "clean copy of the updated game; if you edited it in RPG Maker, Restore "
+    "Originals first or re-export from a clean copy.")
+
+
 def export_advice(partial) -> str:
     """What the user can do, by cause of the problems in *partial*."""
     advice = []
@@ -127,6 +146,8 @@ def export_advice(partial) -> str:
     if errors:
         advice.append("For files that could not be written: close the game, "
                       "free disk space if needed, and export again.")
+    if getattr(partial, "outside", None):
+        advice.append(OUTSIDE_ADVICE)
     if getattr(partial, "unsupported", None):
         advice.append("Parts this version can't write keep their original "
                       "text; exporting again won't change that.")
@@ -493,11 +514,17 @@ class ExportManifest:
         self.files: dict[str, dict] = {}
         self.exists = False
         self.pending = False
+        # True when this manifest was created together with the backup, so
+        # every write this app ever made to the game is recorded in it: a
+        # file with no record was never written by us.  (Manifests made
+        # after a backup from an older version can't say that.)
+        self.tracks_all = False
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
             if isinstance(raw, dict) and isinstance(raw.get("files"), dict):
                 self.files = raw["files"]
+                self.tracks_all = raw.get("tracks_all") is True
                 # A manifest left "pending" by an export that crashed or
                 # couldn't record what it wrote can't tell our output from
                 # a game update: treat it like no manifest (never refresh).
@@ -531,6 +558,7 @@ class ExportManifest:
     def _write(self) -> None:
         atomic_write_text(self.path, json.dumps(
             {"version": self.VERSION, "pending": self.pending,
+             "tracks_all": self.tracks_all,
              "files": self.files}, ensure_ascii=False, indent=1))
 
     def begin(self) -> None:
@@ -559,181 +587,80 @@ class ExportManifest:
         self.save()
         self.exists = not self.pending
 
+    def start_with_backup(self) -> None:
+        """A new backup was just made: this manifest sees every write."""
+        self.tracks_all = True
+        self.save()
 
-class RefreshResult(list):
-    """Keys whose backup was re-baselined, plus what was refused / kept.
 
-    ``refused``  -- keys whose live file looked like a translation (far less
-                    Japanese than the backup): the backup was left alone.
-    ``kept_dir`` -- folder holding the copies saved before anything was
-                    replaced (old backups, and refused live files).
-    True when anything was refreshed or refused, so callers that only
-    check ``if refreshed:`` still show the note.
+# ── Files changed outside the translator: fail closed ────────────────
+#
+# The backup is never replaced from the live game.  Each export compares a
+# live file with what this app last wrote (manifest) and with the backup:
+# a file that matches neither was changed by something else -- a game
+# update, RPG Maker re-saving it, a hand edit -- and is neither written nor
+# copied anywhere.  No guessing about which of those it was.
+
+def _known(key: str, manifest: ExportManifest) -> bool:
+    """Can the manifest tell our output apart for *key*?"""
+    return manifest.exists and (manifest.tracks_all or key in manifest.files)
+
+
+def is_changed_outside(key: str, live: str, bak: str,
+                       manifest: ExportManifest) -> bool:
+    """Does *live* match neither our last write nor the backup?
+
+    False when the manifest can't judge *key* (a backup from 1.1.0, or an
+    export that crashed): then the export behaves as 1.1.0 did.  Hashes
+    are streamed, so file size doesn't matter.
     """
-
-    def __init__(self, *args):
-        super().__init__(*args)
-        self.refused: list[str] = []
-        self.kept_dir = ""
-
-    def __bool__(self):
-        return bool(len(self) or self.refused)
-
-
-# A live file is not taken as a game update when it holds less than this
-# share of the backup's Japanese (only judged when the backup has at least
-# _JP_MIN_FOR_CHECK Japanese characters).
-_JP_KEEP_RATIO = 0.5
-_JP_MIN_FOR_CHECK = 200
+    if not os.path.isfile(live) or not os.path.isfile(bak):
+        return False
+    if not _known(key, manifest):
+        return False
+    if manifest.is_ours(key, live):
+        return False
+    return not _same_content(live, bak)
 
 
-def _japanese_counts(path: str) -> tuple[int, int]:
-    """Japanese characters in *path* read as UTF-8 and as cp932."""
-    from . import JAPANESE_RE
-    with open(path, "rb") as f:
-        raw = f.read()
-    return (len(JAPANESE_RE.findall(raw.decode("utf-8", "ignore"))),
-            len(JAPANESE_RE.findall(raw.decode("cp932", "ignore"))))
-
-
-def _looks_translated(live: str, bak: str) -> bool:
-    """Does *live* hold far less Japanese than *bak* (a translation, a fan
-    patch or a hand-edited export, rather than a game update)?"""
-    b_utf8, b_sjis = _japanese_counts(bak)
-    l_utf8, l_sjis = _japanese_counts(live)
-    # compare in the encoding that finds the most Japanese in the backup
-    b, live_n = (b_utf8, l_utf8) if b_utf8 >= b_sjis else (b_sjis, l_sjis)
-    return b >= _JP_MIN_FOR_CHECK and live_n < b * _JP_KEEP_RATIO
-
-
-def kept_copies_dir(manifest: ExportManifest) -> str:
-    """Where copies are saved before a backup file is replaced.
-
-    Beside the backup, never inside it (a restore would copy it into the
-    game) -- ``data_original.manifest.json`` -> ``data_original.replaced``.
-    """
-    base = manifest.path
-    if base.endswith(".manifest.json"):
-        base = base[:-len(".manifest.json")]
-    return base + ".replaced"
-
-
-def _keep_copy(src: str, key: str, kept_dir: str, tag: str) -> str:
-    """Copy *src* into *kept_dir* under a new name; raises on failure."""
-    name = key.replace("/", "__").replace("\\", "__")
-    n = 1
-    while os.path.exists(os.path.join(kept_dir, f"{name}.{tag}-{n}")):
-        n += 1
-    dst = os.path.join(kept_dir, f"{name}.{tag}-{n}")
-    os.makedirs(kept_dir, exist_ok=True)
-    atomic_copy(src, dst)
-    return dst
-
-
-def refresh_changed_originals(pairs, manifest: ExportManifest) -> RefreshResult:
-    """Re-baseline backups for game files that changed after the backup.
-
-    *pairs* is an iterable of ``(key, live_path, backup_path)``.  A live
-    file is copied over its backup only when **all** of these hold:
-
-    * a manifest exists (so we know what earlier exports wrote — without one
-      a difference from the backup is most likely our own previous output),
-    * the backup HAS a copy of the file (a file the backup lacks can't be
-      compared with any original: it may be a 1.1.0 export's English
-      output, and must never be taken as the "original"),
-    * the live file is not what we last wrote and differs from the backup,
-    * the live file does not hold far less Japanese than the backup (then
-      it is a translation -- a fan patch, a hand-edited export -- not a
-      game update; it is refused and saved aside instead).
-
-    Before a backup file is replaced, the old copy is saved in
-    ``kept_copies_dir``; if that fails, OSError is raised and nothing is
-    replaced (the export must then stop before writing the game).
+def changed_outside(pairs, manifest: ExportManifest) -> list[str]:
+    """Keys of *pairs* ``(key, live, backup)`` changed outside the app.
 
     Always marks the manifest pending (``begin``) before returning, so
     callers write game files only after that marker is safely on disk.
+    The backup is never written.
     """
-    result = RefreshResult()
-    if not manifest.exists:
-        manifest.begin()
-        return result
-    kept_dir = kept_copies_dir(manifest)
-    for key, live, bak in pairs:
-        if not os.path.isfile(live) or not os.path.isfile(bak):
-            continue
-        if manifest.is_ours(key, live):
-            continue
-        if _same_content(live, bak):
-            continue
-        if _looks_translated(live, bak):
-            # The export will overwrite this live file from the backup:
-            # keep what was there.  Failing to keep it stops the export.
-            _keep_copy(live, key, kept_dir, "game")
-            result.refused.append(key)
-            result.kept_dir = kept_dir
-            log.warning("Game file %s differs from the backup but holds far "
-                        "less Japanese: not taken as a game update (copy "
-                        "kept in %s)", key, kept_dir)
-            continue
-        _keep_copy(bak, key, kept_dir, "backup")
-        result.kept_dir = kept_dir
-        atomic_copy(live, bak)
-        manifest.forget(key)
-        result.append(key)
-        log.warning("Game file %s changed since the backup was taken — "
-                    "backup refreshed from the current file (old copy in "
-                    "%s)", key, kept_dir)
+    out = [key for key, live, bak in pairs
+           if is_changed_outside(key, live, bak, manifest)]
+    for key in out:
+        log.warning("Game file %s was changed outside the translator: "
+                    "not written", key)
     manifest.begin()
-    return result
+    return out
+
+
+def never_written(key: str, manifest: ExportManifest) -> bool:
+    """Has this app provably never written *key* into the game?
+
+    Only a manifest created with the backup knows every write.  Used to
+    take a first backup of a file the backup has no copy of; without that
+    proof the file is left alone (it may hold an older export's English).
+    """
+    return (manifest.exists and manifest.tracks_all
+            and key not in manifest.files)
 
 
 def read_only_source(key: str, live: str, bak: str,
-                     manifest: ExportManifest) -> str:
+                     manifest: ExportManifest) -> str | None:
     """Which copy of a game file to translate, without writing anything.
 
     For packages built from the game (the MV/MZ install zip): the backup's
-    original, unless the live file is a game update the backup doesn't have
-    yet (same rule as ``refresh_changed_originals``, but nothing is copied),
-    or the backup has no copy at all.
+    original; the live file when the backup has no copy; None when the live
+    file was changed outside the translator (left out and reported).
     """
-    if not os.path.isfile(bak):
-        return live
-    if (manifest.exists and os.path.isfile(live)
-            and not manifest.is_ours(key, live)
-            and not _same_content(live, bak)
-            and not _looks_translated(live, bak)):
-        return live
-    return bak
-
-
-def refreshed_note(refreshed: list[str]) -> str:
-    """User-facing note for files whose backup was re-baselined (or not)."""
-    parts = []
-    kept = getattr(refreshed, "kept_dir", "")
-    if len(refreshed):
-        shown = ", ".join(refreshed[:8])
-        more = (f" and {len(refreshed) - 8} more"
-                if len(refreshed) > 8 else "")
-        parts.append(
-            f"{len(refreshed)} game file(s) changed since your first export "
-            f"(game update?): {shown}{more}. The backup was refreshed from "
-            f"the current files so the update is kept. This project does not "
-            f"pick up new or changed lines: translated lines whose text "
-            f"changed were skipped and are listed, and new lines stay "
-            f"untranslated. To translate the new version of the game, start "
-            f"a new project on a clean copy of it.")
-    refused = getattr(refreshed, "refused", [])
-    if refused:
-        shown = ", ".join(refused[:8])
-        more = f" and {len(refused) - 8} more" if len(refused) > 8 else ""
-        parts.append(
-            f"{len(refused)} game file(s) differ from the backup but look "
-            f"translated, not updated: {shown}{more}. The backup was kept "
-            f"as it was; a copy of each of those game files was saved "
-            f"before exporting.")
-    if parts and kept:
-        parts.append(f"Copies of everything replaced are in {kept}.")
-    return " ".join(parts)
+    if is_changed_outside(key, live, bak, manifest):
+        return None
+    return bak if os.path.isfile(bak) else live
 
 
 def tree_pairs(live_dir: str, backup_dir: str, suffixes: tuple[str, ...]):

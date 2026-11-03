@@ -586,18 +586,17 @@ class RPGMaker2KParser:
         lcf_files = ["RPG_RT.ldb"] + map_names
         self.last_export_notes: list[str] = []
 
-        # A game update after the first export must not be rolled back.
-        refreshed = game_io.refresh_changed_originals(
+        # Files changed outside the translator (game update, RPG Maker
+        # re-save, hand edit) are not written; backups are never touched.
+        outside = set(game_io.changed_outside(
             [(f, os.path.join(project_dir, f),
               _backup_path(os.path.join(project_dir, f))) for f in lcf_files],
-            manifest)
-        if refreshed:
-            self.last_export_notes.append(game_io.refreshed_note(refreshed))
+            manifest))
 
         # Create backups (atomic: an interrupted copy never becomes the
         # "original" every later export reads from)
         if game_io.backup_file_once(ldb_path, ldb_backup):
-            manifest.save()
+            manifest.start_with_backup()
 
         # Build translation map from entries.  An empty map still exports:
         # every file is then reset from its backup, so reverting all
@@ -618,8 +617,9 @@ class RPGMaker2KParser:
         source_ldb = ldb_backup if os.path.isfile(ldb_backup) else ldb_path
         self._changed = 0
         try:
-            self._export_ldb(source_ldb, ldb_path, trans_map)
-            manifest.record("RPG_RT.ldb", ldb_path)
+            if "RPG_RT.ldb" not in outside:
+                self._export_ldb(source_ldb, ldb_path, trans_map)
+                manifest.record("RPG_RT.ldb", ldb_path)
         except Exception as e:
             log.error("Failed to export RPG_RT.ldb: %s", e)
             problems.append(f"RPG_RT.ldb ({e})")
@@ -628,6 +628,8 @@ class RPGMaker2KParser:
 
         # Export maps
         for fname in map_names:
+            if fname in outside:
+                continue
             fpath = os.path.join(project_dir, fname)
             backup = _backup_path(fpath)
             self._changed = 0
@@ -645,13 +647,14 @@ class RPGMaker2KParser:
         # Entries whose place no longer exists (event / message removed by
         # a game update) were never looked at: not written, so count them.
         # Files that failed to export are already reported as problems.
-        failed = {p.split(" (", 1)[0] for p in problems}
+        failed = {p.split(" (", 1)[0] for p in problems} | outside
         for eid, trans in trans_map.items():
             fname = eid.split("/", 1)[0]
             if (eid not in self._visited_ids and fname not in failed
                     and trans != self._orig_map.get(eid)):
                 changed_lines[fname] = changed_lines.get(fname, 0) + 1
-        game_io.raise_export_problems(problems, changed_lines)
+        game_io.raise_export_problems(problems, changed_lines,
+                                      outside=sorted(outside))
 
     def _orig_ok(self, entry_id: str, current: str) -> bool:
         """Does the game still hold *entry_id*'s original at its position?
