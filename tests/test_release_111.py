@@ -748,3 +748,99 @@ def test_wizard_complete_run_says_complete(qapp, monkeypatch, tmp_path,
         wiz._cancelled = True          # pending step timers do nothing
         wiz.close()
         _close(win)
+
+
+# ── install.bat / uninstall.bat failure paths (release review M4) ────
+# The scripts run through cmd /c in temp folders only; no game is started.
+
+def _player_setup(mv_game, mv_parser, tmp_path, extra_in_package=False):
+    import shutil
+    import zipfile
+    if extra_in_package:            # the translator's (newer) game has more
+        shutil.copy(os.path.join(mv_game, "data", "Map001.json"),
+                    os.path.join(mv_game, "data", "Map002.json"))
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "translated"
+    zp = str(tmp_path / "p.zip")
+    mv_parser.export_patch_zip(mv_game, entries, zp, game_title="T")
+    player = tmp_path / "player"
+    shutil.copytree(os.path.join(mv_game, "data"), player / "data")
+    if extra_in_package:
+        os.remove(player / "data" / "Map002.json")
+    with zipfile.ZipFile(zp) as zf:
+        zf.extractall(player)
+    return player
+
+
+def _run_bat(player, script):
+    import subprocess
+    r = subprocess.run(["cmd", "/c", str(player / script)], cwd=player,
+                       stdin=subprocess.DEVNULL, capture_output=True,
+                       timeout=60)
+    return r.stdout.decode("utf-8", "replace")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="needs cmd.exe")
+def test_install_existing_backup_is_never_reused_silently(mv_game, mv_parser,
+                                                          tmp_path):
+    player = _player_setup(mv_game, mv_parser, tmp_path)
+    import shutil
+    shutil.copytree(player / "data", player / "data_original")   # old install
+    before = _tree_hashes(str(player / "data"))
+    out = _run_bat(player, "install.bat")          # no "YES" typed
+    assert "Backup already exists" in out and "FAILED" in out
+    assert "Nothing was changed" in out
+    assert _tree_hashes(str(player / "data")) == before
+    assert (player / "_translation").is_dir()       # can be re-run
+
+
+@pytest.mark.skipif(os.name != "nt", reason="needs cmd.exe")
+def test_install_failed_copy_puts_files_back_and_keeps_the_package(
+        mv_game, mv_parser, tmp_path):
+    import ctypes
+    from ctypes import wintypes
+    player = _player_setup(mv_game, mv_parser, tmp_path)
+    actors_before = _sha(str(player / "data" / "Actors.json"))
+    # Items.json held open by "the game": readable, but not writable
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                wintypes.DWORD, wintypes.LPVOID,
+                                wintypes.DWORD, wintypes.DWORD,
+                                wintypes.HANDLE]
+    h = k32.CreateFileW(str(player / "data" / "Items.json"),
+                        0x80000000, 0x1, None, 3, 0, None)  # read, share-read
+    assert h and h != wintypes.HANDLE(-1).value
+    try:
+        out = _run_bat(player, "install.bat")
+    finally:
+        k32.CloseHandle(h)
+    assert "FAILED" in out and "putting the previous files back" in out
+    assert (player / "_translation").is_dir()
+    assert _sha(str(player / "data" / "Actors.json")) == actors_before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="needs cmd.exe")
+def test_install_and_uninstall_handle_read_only_files_and_added_files(
+        mv_game, mv_parser, tmp_path):
+    import stat
+    player = _player_setup(mv_game, mv_parser, tmp_path,
+                           extra_in_package=True)
+    items = player / "data" / "Items.json"
+    jp = _sha(str(items))
+    os.chmod(items, stat.S_IREAD)                       # read-only game file
+    (player / "data" / "Map099.json").write_text("{}", encoding="utf-8")
+    try:
+        out = _run_bat(player, "install.bat")
+        assert "FAILED" not in out, out
+        assert "EN " in items.read_text(encoding="utf-8-sig")
+        assert (player / "data" / "Map002.json").is_file()   # package added
+        out = _run_bat(player, "uninstall.bat")
+        assert "FAILED" not in out, out
+        assert _sha(str(items)) == jp
+        assert not (player / "data" / "Map002.json").exists()  # removed again
+        assert (player / "data" / "Map099.json").is_file()      # player's own
+    finally:
+        if items.exists():
+            os.chmod(items, stat.S_IREAD | stat.S_IWRITE)

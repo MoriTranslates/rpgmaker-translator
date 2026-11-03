@@ -759,6 +759,7 @@ class RPGMakerMVParser:
             # Stored under _translation/ so extracting the zip doesn't
             # immediately overwrite game files — install.bat handles the swap
             data_file_count = 0
+            shipped: list[str] = []
             skipped_lines: dict[str, int] = {}
             # Every data file of the backup AND the live game: install.bat
             # puts these over the player's data/, and a file only the live
@@ -803,6 +804,7 @@ class RPGMakerMVParser:
                 zf.writestr(arc_path,
                             json.dumps(data, ensure_ascii=False, indent=2))
                 data_file_count += 1
+                shipped.append(filename)
             # Translated lines of files the game no longer has at all
             for filename, file_entries in by_file.items():
                 if filename.lower().endswith(".json") and filename not in names:
@@ -884,7 +886,8 @@ class RPGMakerMVParser:
             # uninstall.bat
             zf.writestr("uninstall.bat", self._build_uninstall_bat(
                 data_rel, js_rel, has_plugins, game_title,
-                inject_wordwrap=inject_wordwrap))
+                inject_wordwrap=inject_wordwrap,
+                package_files=shipped))
 
             # README.txt
             readme = (
@@ -937,6 +940,7 @@ class RPGMakerMVParser:
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             # Copy all JSON files from data/ directly into zip
             data_file_count = 0
+            shipped: list[str] = []
             for filename in sorted(os.listdir(data_dir)):
                 src = os.path.join(data_dir, filename)
                 if not os.path.isfile(src):
@@ -947,6 +951,7 @@ class RPGMakerMVParser:
                     content = f.read()
                 zf.writestr(f"_translation/{data_rel}/{filename}", content)
                 data_file_count += 1
+                shipped.append(filename)
 
             # Copy plugins.js if present
             has_plugins = False
@@ -962,7 +967,7 @@ class RPGMakerMVParser:
                 inject_wordwrap=False, font_name=None))
             zf.writestr("uninstall.bat", self._build_uninstall_bat(
                 data_rel, js_rel, has_plugins, game_title,
-                inject_wordwrap=False))
+                inject_wordwrap=False, package_files=shipped))
 
             readme = (
                 f"English Translation \u2014 {game_title or 'RPG Maker Game'}\n"
@@ -1031,27 +1036,43 @@ class RPGMakerMVParser:
             # Step 1: COPY the original data/ to data_original/ (built under
             # a temp name, renamed when complete).  data/ itself is never
             # removed: files this package doesn't have (a newer game
-            # version's maps...) must stay in the game.
+            # version's maps...) must stay in the game.  /R: read-only
+            # game files (disc / store installs) must not stop the copy.
             f'echo [Step 1] Backing up original files...',
-            f'if not exist "{dr}_original\\" (',
+            f'if exist "{dr}_original\\" goto :rmt_existing',
+            f'if exist "{dr}_rmt_tmp\\" rmdir /S /Q "{dr}_rmt_tmp"',
+            f'xcopy "{dr}" "{dr}_rmt_tmp\\" /E /I /H /K /Y /Q /R >nul',
+            "if errorlevel 1 (",
+            f'    echo   ERROR: Failed to back up {dr}\\ - nothing was changed',
             f'    if exist "{dr}_rmt_tmp\\" rmdir /S /Q "{dr}_rmt_tmp"',
-            f'    xcopy "{dr}" "{dr}_rmt_tmp\\" /E /I /H /K /Y /Q >nul',
-            "    if errorlevel 1 (",
-            f'        echo   ERROR: Failed to back up {dr}\\ - nothing was changed',
-            f'        if exist "{dr}_rmt_tmp\\" rmdir /S /Q "{dr}_rmt_tmp"',
-            "        set FAIL=1",
-            "        goto :done",
-            "    )",
-            f'    ren "{dr}_rmt_tmp" "{dr_base}_original"',
-            "    if errorlevel 1 (",
-            f'        echo   ERROR: Failed to name the backup {dr}_original\\ - nothing was changed',
-            "        set FAIL=1",
-            "        goto :done",
-            "    )",
-            f'    echo   Copied {dr}\\ to {dr}_original\\',
-            ") else (",
-            f'    echo   Backup already exists ^({dr}_original\\^)',
+            "    set FAIL=1",
+            "    goto :done",
             ")",
+            f'ren "{dr}_rmt_tmp" "{dr_base}_original"',
+            "if errorlevel 1 (",
+            f'    echo   ERROR: Failed to name the backup {dr}_original\\ - nothing was changed',
+            f'    if exist "{dr}_rmt_tmp\\" rmdir /S /Q "{dr}_rmt_tmp"',
+            "    set FAIL=1",
+            "    goto :done",
+            ")",
+            f'echo   Copied {dr}\\ to {dr}_original\\',
+            "goto :rmt_step2",
+            ":rmt_existing",
+            # A backup from an earlier install: it is what uninstall.bat
+            # will put back.  If the game was updated since, that would be
+            # the OLD version -- the player must decide, never silently.
+            f'echo   Backup already exists ^({dr}_original\\^), from an earlier install.',
+            "echo   uninstall.bat will put THOSE files back. If the game was updated",
+            "echo   since then, stop now: run the old uninstall.bat first, or delete",
+            f'echo   {dr}_original\\ yourself so a fresh backup is made.',
+            'set "RMT_OK="',
+            "set /p RMT_OK=  Type YES to keep the existing backup and continue: ",
+            'if /I not "%RMT_OK%"=="YES" (',
+            "    echo   Nothing was changed.",
+            "    set FAIL=1",
+            "    goto :done",
+            ")",
+            ":rmt_step2",
             "",
         ]
 
@@ -1059,23 +1080,42 @@ class RPGMakerMVParser:
             jr = js_rel.replace("/", "\\")
             lines += [
                 f'if exist "{jr}\\plugins.js" if not exist "{jr}\\plugins_original.js" (',
-                f'    ren "{jr}\\plugins.js" "plugins_original.js"',
-                f"    echo   Renamed {jr}\\plugins.js to plugins_original.js",
+                f'    copy /Y "{jr}\\plugins.js" "{jr}\\plugins_original.js" >nul',
+                f"    echo   Copied {jr}\\plugins.js to plugins_original.js",
                 ")",
                 "",
             ]
 
         # Step 2: Copy the translated files over data/ (files the package
         # doesn't have are kept)
+        # A copy of data/ as it is now is kept until Step 2 succeeded: a
+        # copy that fails half-way (locked file, disk full) is put back,
+        # and _translation is kept so the install can simply be re-run.
         lines += [
             f'echo [Step 2] Installing translated files...',
-            f'xcopy "{tr}" "{dr}\\" /E /I /H /K /Y /Q >nul',
+            f'if exist "{dr}_rmt_undo\\" rmdir /S /Q "{dr}_rmt_undo"',
+            f'xcopy "{dr}" "{dr}_rmt_undo\\" /E /I /H /K /Y /Q /R >nul',
             "if errorlevel 1 (",
-            f'    echo   ERROR: Failed to copy translated files into {dr}\\',
+            f'    echo   ERROR: Could not prepare the install - nothing in {dr}\\ was changed',
+            f'    if exist "{dr}_rmt_undo\\" rmdir /S /Q "{dr}_rmt_undo"',
             "    set FAIL=1",
-            ") else (",
-            f"    echo   Installed translated {dr}\\ ^({n_files} files^)",
+            "    goto :done",
             ")",
+            f'xcopy "{tr}" "{dr}\\" /E /I /H /Y /Q /R >nul',
+            "if errorlevel 1 (",
+            f'    echo   ERROR: Failed to copy translated files into {dr}\\ - putting the previous files back',
+            f'    xcopy "{dr}_rmt_undo" "{dr}\\" /E /I /H /K /Y /Q /R >nul',
+            "    if errorlevel 1 (",
+            f'        echo   ERROR: Could not put them all back. The previous files are in {dr}_rmt_undo\\',
+            "    ) else (",
+            f'        rmdir /S /Q "{dr}_rmt_undo"',
+            "        echo   The previous files were put back.",
+            "    )",
+            "    set FAIL=1",
+            "    goto :done",
+            ")",
+            f'rmdir /S /Q "{dr}_rmt_undo"',
+            f"echo   Installed translated {dr}\\ ^({n_files} files^)",
         ]
 
         if has_plugins and js_rel:
@@ -1114,10 +1154,11 @@ class RPGMakerMVParser:
                 ")",
             ]
 
-        # Cleanup _translation folder
+        # Cleanup _translation folder -- only after a successful install
+        # (after a failure it is kept so install.bat can be re-run)
         lines += [
             "",
-            'if exist "_translation\\" rmdir /S /Q "_translation"',
+            'if %FAIL%==0 if exist "_translation\\" rmdir /S /Q "_translation"',
             "",
             ":done",
             "echo.",
@@ -1136,9 +1177,18 @@ class RPGMakerMVParser:
     @staticmethod
     def _build_uninstall_bat(data_rel: str, js_rel: str,
                              has_plugins: bool, game_title: str,
-                             inject_wordwrap: bool = False) -> str:
-        """Generate uninstall.bat: copy the originals back over data/, then drop the backup."""
+                             inject_wordwrap: bool = False,
+                             package_files=()) -> str:
+        """Generate uninstall.bat: remove the files the package added, copy
+        the originals back over data/, then drop the backup.
+
+        *package_files*: data file names the package installs; any of them
+        the original game did not have is deleted again.
+        """
         dr = data_rel.replace("/", "\\")
+        # only plain names go into the script (no quoting / % surprises)
+        added = sorted(n for n in package_files
+                       if re.fullmatch(r"[A-Za-z0-9_.-]+", n))
         lines = [
             "@echo off",
             "chcp 65001 >nul 2>&1",
@@ -1161,11 +1211,19 @@ class RPGMakerMVParser:
             "",
             "set FAIL=0",
             "",
+        ]
+        # Files the package added that the original game never had
+        if added:
+            lines.append("echo Removing files the translation added...")
+        for n in added:
+            lines.append(f'if not exist "{dr}_original\\{n}" '
+                         f'if exist "{dr}\\{n}" del /F /Q "{dr}\\{n}"')
+        lines += [
             # Copy the originals back over data/ (never delete data/: a
             # file added after the install, e.g. by a game update, stays);
             # the backup is removed only when the copy succeeded.
             f'echo Restoring {dr}_original\\ to {dr}\\...',
-            f'xcopy "{dr}_original" "{dr}\\" /E /I /H /K /Y /Q >nul',
+            f'xcopy "{dr}_original" "{dr}\\" /E /I /H /K /Y /Q /R >nul',
             "if errorlevel 1 (",
             f'    echo   ERROR: Failed to copy {dr}_original\\ back to {dr}\\ - the backup was kept',
             "    set FAIL=1",
@@ -1180,7 +1238,7 @@ class RPGMakerMVParser:
             lines += [
                 "",
                 f'if exist "{jr}\\plugins_original.js" (',
-                f'    if exist "{jr}\\plugins.js" del "{jr}\\plugins.js"',
+                f'    if exist "{jr}\\plugins.js" del /F "{jr}\\plugins.js"',
                 f'    ren "{jr}\\plugins_original.js" "plugins.js"',
                 "    if errorlevel 1 (",
                 "        echo   ERROR: Failed to restore plugins.js",
@@ -1208,7 +1266,7 @@ class RPGMakerMVParser:
             lines += [
                 "",
                 f'if exist "{fr}\\gamefont_original.css" (',
-                f'    if exist "{fr}\\gamefont.css" del "{fr}\\gamefont.css"',
+                f'    if exist "{fr}\\gamefont.css" del /F "{fr}\\gamefont.css"',
                 f'    ren "{fr}\\gamefont_original.css" "gamefont.css"',
                 "    echo   Restored original font.",
                 ")",
