@@ -685,3 +685,66 @@ def test_outside_check_streams_large_files(tmp_path):
         tracemalloc.stop()
     assert peak < 8 * (1 << 20), peak
     assert not hasattr(game_io, "_looks_translated")
+
+
+# ── Wizard shows incomplete results (release review M3) ──────────────
+
+def _wizard(qapp, monkeypatch, tmp_path, mv_game, mv_parser):
+    from translator.widgets import translation_wizard as tw
+    win, shown = _window(qapp, monkeypatch, tmp_path)
+    monkeypatch.setattr(tw.QMessageBox, "warning",
+                        lambda _p, title, text, *a, **k:
+                        shown.append(("warning", title, text)))
+    win._sync_project_type("rpgmaker_mv")
+    entries = mv_parser.load_project(mv_game)
+    for e in entries:
+        e.translation, e.status = "EN " + e.id, "translated"
+    win.project = TranslationProject(project_path=mv_game,
+                                     project_type="rpgmaker_mv",
+                                     entries=entries)
+    wiz = tw.TranslationWizard(win)
+    wiz._problems, wiz._step_index, wiz._steps = [], 0, []
+    return win, wiz, shown
+
+
+def test_wizard_keeps_an_incomplete_patch_and_export_until_the_end(
+        qapp, monkeypatch, tmp_path, mv_game, mv_parser):
+    win, wiz, shown = _wizard(qapp, monkeypatch, tmp_path, mv_game,
+                              mv_parser)
+    try:
+        def partial_export(path, entries):
+            raise game_io.PartialExportError(
+                ["x"], errors=[], outside=["Items.json"])
+        monkeypatch.setattr(win.handler, "save_project", partial_export)
+        wiz._run_export()
+        assert "failed" not in wiz.detail_label.text().lower()
+        assert "INCOMPLETE" in wiz.detail_label.text()
+        # a patch with a line whose original is gone
+        win.project.entries.append(_entry("Map077.json/1/0/0", "Map077.json",
+                                          "dialog", "消えた", "Gone"))
+        wiz._run_patch_zip()
+        wiz._finish()
+        text = wiz.detail_label.text()
+        assert "Export Incomplete" in text and "Install package INCOMPLETE" in text
+        assert "changed outside the translator" in text      # with advice
+        assert "problems" in wiz.step_label.text()
+        assert any(t == "Wizard Finished With Problems" for _k, t, _x in shown)
+    finally:
+        wiz._cancelled = True          # pending step timers do nothing
+        wiz.close()
+        _close(win)
+
+
+def test_wizard_complete_run_says_complete(qapp, monkeypatch, tmp_path,
+                                          mv_game, mv_parser):
+    win, wiz, shown = _wizard(qapp, monkeypatch, tmp_path, mv_game,
+                              mv_parser)
+    try:
+        wiz._finish()
+        assert wiz.step_label.text() == "Translation complete!"
+        assert not any(t == "Wizard Finished With Problems"
+                       for _k, t, _x in shown)
+    finally:
+        wiz._cancelled = True          # pending step timers do nothing
+        wiz.close()
+        _close(win)

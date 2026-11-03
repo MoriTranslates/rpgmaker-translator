@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -426,6 +427,9 @@ class TranslationWizard(QDialog):
             self._steps.append(WizardStep.PATCH_ZIP)
 
         self._step_index = 0
+        # Incomplete / failed export and patch results, shown by _finish()
+        # (the step label is overwritten as the wizard moves on)
+        self._problems: list[str] = []
 
         # Connect to batch engine signals for live progress
         self._connect_signals()
@@ -842,7 +846,16 @@ class TranslationWizard(QDialog):
                                 r'<WordWrap>', '', e.translation, flags=re.IGNORECASE)
                         to_export.append(e)
 
-            handler.save_project(project_path, to_export)
+            from ..game_io import PartialExportError, export_advice
+            partial = None
+            try:
+                handler.save_project(project_path, to_export)
+            except PartialExportError as exc:
+                # Most files were written: finish the post-export steps,
+                # but never report this as a complete export.
+                partial = exc
+            notes = list(getattr(handler.parser, "last_export_notes",
+                                 None) or [])
 
             # MV/MZ-specific: inject word wrap plugin + disable splash
             if handler.has_plugin_system:
@@ -863,7 +876,15 @@ class TranslationWizard(QDialog):
             self.mw._autosave()
             self.progress_bar.setRange(0, 1)
             self.progress_bar.setValue(1)
-            msg = f"Done — {len(translated)} entries exported to game."
+            if partial is not None:
+                msg = "Export INCOMPLETE — see the summary at the end."
+                self._problems.append(
+                    f"Export Incomplete:\n{partial}\n\n"
+                    + export_advice(partial))
+            else:
+                msg = f"Done — {len(translated)} entries exported to game."
+            if notes:
+                self._problems.append("\n\n".join(notes))
             if easyrpg_note:
                 msg += f"\n{easyrpg_note}"
             self.detail_label.setText(msg)
@@ -873,6 +894,7 @@ class TranslationWizard(QDialog):
             self.progress_bar.setRange(0, 1)
             self.progress_bar.setValue(1)
             self.detail_label.setText(f"Export failed: {exc}")
+            self._problems.append(f"Export failed: {exc}")
 
         self._step_index += 1
         QTimer.singleShot(500, self._run_next_step)
@@ -918,8 +940,11 @@ class TranslationWizard(QDialog):
                 parser.export_patch_zip(project_path, translated, zip_path)
                 done = f"Done — patch saved to {zip_path}"
             except PartialExportError as partial:
-                done = (f"Patch saved to {zip_path}, but INCOMPLETE.\n"
-                        f"{partial}\n\n{export_advice(partial)}")
+                done = (f"Patch saved to {zip_path}, but INCOMPLETE — see "
+                        f"the summary at the end.")
+                self._problems.append(
+                    f"Install package INCOMPLETE ({zip_path}):\n{partial}"
+                    f"\n\n{export_advice(partial)}")
 
             self.progress_bar.setRange(0, 1)
             self.progress_bar.setValue(1)
@@ -930,6 +955,7 @@ class TranslationWizard(QDialog):
             self.progress_bar.setRange(0, 1)
             self.progress_bar.setValue(1)
             self.detail_label.setText(f"Patch zip failed: {exc}")
+            self._problems.append(f"Patch zip failed: {exc}")
 
         self._step_index += 1
         QTimer.singleShot(500, self._run_next_step)
@@ -941,9 +967,15 @@ class TranslationWizard(QDialog):
         self.mw._wizard_active = False
         self._update_state()
 
-        self.step_label.setText("Translation complete!")
-        self.step_label.setStyleSheet(
-            theme.heading_css() + f" color: {theme.c('ok')};")
+        problems = list(getattr(self, "_problems", []))
+        if problems:
+            self.step_label.setText("Finished — with problems (see below)")
+            self.step_label.setStyleSheet(
+                theme.heading_css() + f" color: {theme.c('warn')};")
+        else:
+            self.step_label.setText("Translation complete!")
+            self.step_label.setStyleSheet(
+                theme.heading_css() + f" color: {theme.c('ok')};")
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(1)
 
@@ -954,7 +986,13 @@ class TranslationWizard(QDialog):
         parts = [f"{translated}/{total} translated"]
         if remaining:
             parts.append(f"{remaining} remaining")
-        self.detail_label.setText(" | ".join(parts))
+        summary = " | ".join(parts)
+        if problems:
+            summary += "\n\n" + "\n\n".join(problems)
+        self.detail_label.setText(summary)
+        if problems:
+            QMessageBox.warning(self, "Wizard Finished With Problems",
+                                "\n\n".join(problems))
 
         self.mw.trans_table.refresh()
         self.mw.file_tree.refresh_stats(self.mw.project)
