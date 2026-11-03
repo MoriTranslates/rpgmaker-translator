@@ -485,11 +485,31 @@ def test_restore_reports_success_when_only_the_cleanup_fails(tmp_path,
     game_io.take_cleanup_notes()
     game_io.restore_tree(str(backup), str(live))       # must not raise
     assert (live / "a.json").read_text() == "JP"
-    notes = game_io.take_cleanup_notes()
+    notes = game_io.take_cleanup_notes(str(tmp_path))
     assert len(notes) == 1 and "data.rmt-old" in notes[0]
+
+
+def test_cleanup_note_never_leaks_to_another_restore(tmp_path, monkeypatch):
+    """Release review L1: a note queued by a restore whose later step
+    failed must not show up at the next restore of another game."""
     from translator.widgets.main_window import MainWindow
-    game_io._cleanup_notes.append(notes[0])
-    assert "Note:" in MainWindow._restore_cleanup_text()
+    a, b = tmp_path / "A", tmp_path / "B"
+    for g in (a, b):
+        (g / "data_original").mkdir(parents=True)
+        (g / "data").mkdir()
+        (g / "data_original" / "x.json").write_text("JP")
+        (g / "data" / "x.json").write_text("EN")
+    monkeypatch.setattr(game_io.shutil, "rmtree",
+                        lambda p, *x, **k: None)          # leftover stays
+    monkeypatch.setattr(game_io, "_set_aside",
+                        lambda p: (_ for _ in ()).throw(PermissionError()))
+    game_io.take_cleanup_notes()
+    game_io.restore_tree(str(a / "data_original"), str(a / "data"))
+    # (game A's restore then failed later: its note was never taken)
+    assert MainWindow._restore_cleanup_text(str(b)) == ""
+    game_io.restore_tree(str(b / "data_original"), str(b / "data"))
+    assert "Note:" in MainWindow._restore_cleanup_text(str(b))
+    assert MainWindow._restore_cleanup_text(str(b)) == ""
 
 
 def test_restore_does_not_keep_our_crashed_temp_files(tmp_path):
@@ -844,3 +864,22 @@ def test_install_and_uninstall_handle_read_only_files_and_added_files(
     finally:
         if items.exists():
             os.chmod(items, stat.S_IREAD | stat.S_IWRITE)
+
+
+def test_csv_without_safe_column_gets_cant_write_advice(tmp_path):
+    """Release review L3: "no empty English column" was filed as a write
+    error ("close the game, free disk space")."""
+    from translator.csv_game import CSVGameParser
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "scene.x").write_text("com,hen1,msg,se\n" + "".join(
+        f"s,s,台詞{i}です,{i % 3}\n" for i in range(10)), encoding="utf-8")
+    p = CSVGameParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "Line", "translated"
+    with pytest.raises(game_io.PartialExportError) as ei:
+        p.save_project(str(tmp_path), entries)
+    assert ei.value.unsupported and not ei.value.errors
+    advice = game_io.export_advice(ei.value)
+    assert "can't write" in advice and "close the game" not in advice

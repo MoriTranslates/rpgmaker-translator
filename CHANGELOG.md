@@ -33,20 +33,21 @@ Game files and backups:
 - **Restore Originals is safe to interrupt.** A failed restore leaves the game as it was. If the
   app or PC stops in the middle of the final swap, the game folder is put back the next time the
   game is opened, exported or restored (RPG Maker MV/MZ, VX Ace, Kirikiri, TyranoScript; Wolf RPG
-  on the next restore), and you are told. Leftover copies are kept aside, never deleted.
+  on the next restore; for RPG Maker MV/MZ also when a saved project is resumed), and you are told.
+  Leftover copies are kept aside, never deleted.
 - **Restore Originals keeps files a game update added** instead of deleting them. If only the
   final clean-up fails (a file in use), the restore is reported as done, with a note saying where
   the leftover copy is, instead of "Restore Failed".
-- **Game updates are no longer rolled back.** When you update a game after exporting with this
-  version, the next export notices the changed files and puts them into the backup (including
-  TyranoScript's `lang.js` / `Config.tjs`). It used to copy the old files back over the update.
-  The replaced backup files are kept in a `…_original.replaced` folder next to the backup. A
-  changed file that holds far less Japanese than the backup (a hand-edited export, another
-  patch) is not taken as an update. A file the backup has no copy of is never copied into it as
-  the "original" unless every translated line still finds its Japanese text there, so English
-  written by an older export can't become the original. (Backups made by 1.1.0 can't tell an
-  update from the app's own output, so for those nothing is refreshed until the first export
-  with this version.)
+- **Files changed outside the translator are never overwritten, and the backup is never
+  replaced.** Each export now remembers exactly what it wrote. If a game file later matches
+  neither that nor the backup -- a game update, RPG Maker re-saving it, a hand edit -- the next
+  export leaves that file alone, does not touch the backup, and reports it as "changed outside
+  the translator" in "Export Incomplete". It used to copy the old backup over a game update. If
+  the game was updated, start a new project on a clean copy of the updated game; if you edited
+  it in RPG Maker, run Restore Originals first or re-export from a clean copy. A data file the
+  backup has no copy of is only written when the app can prove it never wrote it before.
+  **Projects exported with 1.1.0** have no such record yet: their first export with this version
+  works as in 1.1.0 (files are rewritten from the backup), and from then on changes are caught.
 
 Translations in the right place:
 
@@ -70,25 +71,30 @@ Honest reports:
 - **"Export Complete" only when it really is**, for every engine. You now see "Export Incomplete"
   with the files and line counts when a file could not be written, or when translated lines
   could not be placed because the game's text changed or the line is gone. The advice matches
-  the cause. The install package (patch zip) reports missing lines the same way.
-- **After a game update, the export says what happened**: translated lines whose game text
-  changed are skipped and listed, and the game keeps its new text there. This version does not
-  add a game update's new or changed lines to an existing project; to translate the new version,
-  start a new project on a clean copy of the updated game (Import Translations can bring over
-  your existing work). Resuming a project never writes to the game files or the backup (apart
-  from putting back a folder that an interrupted Restore Originals left out) and never changes
-  your existing lines because the game changed.
+  the cause. The install package (patch zip) and the Translation Wizard report the same way; the
+  wizard keeps an incomplete export or package on screen at the end instead of "complete".
+- **This version does not merge a game update into an existing project.** To translate a new
+  version of a game, start a new project on a clean copy of it (Import Translations can bring over
+  your existing work). Resuming a project never changes or removes your existing lines and never
+  writes to the backup. For RPG Maker MV/MZ, resuming still adds plugin and `System.json` entries
+  the project doesn't have yet (as before), and puts back a folder an interrupted Restore
+  Originals left out.
 - **Files that can't be read are listed** when you open a project, instead of their text silently
   missing.
 
 Install package (RPG Maker MV/MZ patch zip):
 
-- **The package contains every data file**, including files only the current game has (added by
-  an update). They used to be left out without a word.
+- **The package contains every data file**, including files only the current game has. They
+  used to be left out without a word. A file changed outside the translator is left out and
+  reported (the player's own copy is kept).
 - **`install.bat` never removes a game file.** It copies `data/` to `data_original/` and copies
   the translated files over `data/`; files the package doesn't have stay in the game. Before, it
-  renamed or deleted `data/`, so the player's game could lose a map and crash.
-  `uninstall.bat` copies the originals back.
+  renamed or deleted `data/`, so the player's game could lose a map and crash. If copying fails
+  half-way, the previous files are put back and the package is kept so it can be run again.
+  Read-only game files no longer stop it. A `data_original/` left by an earlier install is not
+  reused without asking (uninstall would put those older files back).
+- **`uninstall.bat`** removes the data files the package added, copies the originals back, and
+  deletes `data_original/` only when that worked. Files a later game update added are kept.
 
 Your work is kept:
 

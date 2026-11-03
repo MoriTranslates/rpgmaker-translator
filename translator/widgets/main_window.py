@@ -857,9 +857,9 @@ class MainWindow(QMainWindow):
         return game_io.export_advice(partial)
 
     @staticmethod
-    def _restore_cleanup_text() -> str:
-        """Notes about leftovers of a restore that succeeded (or "")."""
-        notes = game_io.take_cleanup_notes()
+    def _restore_cleanup_text(project_dir: str) -> str:
+        """Notes about leftovers of this game's restore (or "")."""
+        notes = game_io.take_cleanup_notes(project_dir)
         return ("\n\nNote: " + "\n".join(notes)) if notes else ""
 
     def _show_recovery_notes(self, project_dir: str | None):
@@ -3404,6 +3404,7 @@ class MainWindow(QMainWindow):
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
+            game_io.take_cleanup_notes()    # nothing stale from earlier
             try:
                 self.handler.restore_originals(self.project.project_path)
                 # A killed earlier restore was put back and then completed
@@ -3412,12 +3413,14 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self, "Restore Complete",
                     self.handler.get_restore_message()
-                    + self._restore_cleanup_text()
+                    + self._restore_cleanup_text(self.project.project_path)
                 )
             except FileNotFoundError as e:
                 QMessageBox.information(self, "No Backup Found", str(e))
             except Exception as e:
-                QMessageBox.critical(self, "Restore Failed", str(e))
+                QMessageBox.critical(
+                    self, "Restore Failed", str(e)
+                    + self._restore_cleanup_text(self.project.project_path))
             return
 
         # MV/MZ: directory-based restore with atomic swap
@@ -3449,6 +3452,7 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
+        game_io.take_cleanup_notes()        # nothing stale from earlier
         try:
             # Copy the backup aside first, then swap it in: a failed copy
             # leaves the live data/ folder exactly as it was.
@@ -3464,10 +3468,13 @@ class MainWindow(QMainWindow):
             if plugins_restored:
                 msg += "plugins.js has also been restored from backup.\n"
             msg += "The backups are still available."
-            QMessageBox.information(self, "Restore Complete",
-                                    msg + self._restore_cleanup_text())
+            QMessageBox.information(
+                self, "Restore Complete",
+                msg + self._restore_cleanup_text(self.project.project_path))
         except Exception as e:
-            QMessageBox.critical(self, "Restore Failed", str(e))
+            QMessageBox.critical(
+                self, "Restore Failed", str(e)
+                + self._restore_cleanup_text(self.project.project_path))
 
     # ── Open in RPG Maker ─────────────────────────────────────────
 

@@ -464,19 +464,25 @@ def restore_tree(backup_dir: str, live_dir: str,
             except OSError as exc:
                 log.warning("Could not move leftover %s aside: %s", aside, exc)
                 where = aside
-            _cleanup_notes.append(
+            _cleanup_notes.append((live_dir,
                 f"The original files were restored, but the old translated "
                 f"copy could not be fully deleted (a file is in use?). It "
                 f"was left in {where}; delete that folder when the game is "
-                f"closed.")
+                f"closed."))
 
 
-_cleanup_notes: list[str] = []
+# (restored folder, note) -- leftovers of restores that otherwise succeeded
+_cleanup_notes: list[tuple[str, str]] = []
 
 
-def take_cleanup_notes() -> list[str]:
-    """Notes about leftovers from restores that otherwise succeeded."""
-    notes = list(_cleanup_notes)
+def take_cleanup_notes(project_dir: str | None = None) -> list[str]:
+    """Notes about leftovers from restores that otherwise succeeded.
+
+    With *project_dir*, only notes for folders inside that game; all notes
+    are cleared either way, so one never shows up for another restore.
+    """
+    notes = [note for path, note in _cleanup_notes
+             if project_dir is None or _inside(path, project_dir)]
     _cleanup_notes.clear()
     return notes
 
