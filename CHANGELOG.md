@@ -9,7 +9,11 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
-## [1.1.1] - 2026-11-02
+## [1.1.1] - 2026-11-03
+
+**VX Ace users: please update.** Earlier versions (1.0.0–1.1.0) could save broken data into exported
+VX Ace games, which can cause crashes or wrong text. If you exported a VX Ace game with an older
+version, run Restore Originals, then export again with 1.1.1.
 
 A safety release. Code reviews and tests on copies of real games found ways the app could damage
 game folders, put translations in the wrong place or lose your review work. This release fixes the
