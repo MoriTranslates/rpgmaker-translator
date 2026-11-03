@@ -225,45 +225,45 @@ class CrowdParser:
                 continue
             file_entries = entries_by_file.get(sce_name, [])
 
-            # Create backup on first export
-            backup_path = os.path.join(backup_dir, sce_name)
-            if game_io.backup_file_once(sce_path, backup_path):
-                log.info("Backed up %s to sce_original/", sce_name)
-
-            # Always read from backup for idempotent re-export
-            source = backup_path if os.path.exists(backup_path) else sce_path
-            with open(source, "rb") as f:
-                enc_data = f.read()
-
-            dec_data = decrypt_sce(enc_data, self._key, self._mod)
-            # surrogateescape: undecodable bytes survive the round trip
-            # byte-for-byte instead of becoming '?' on re-encode.
-            text = dec_data.decode("cp932", errors="surrogateescape")
-
-            # Entries are addressed by (field, line number): re-parse the
-            # source like load did and only write entries whose original is
-            # still there; a changed line keeps the game's text (reported).
-            fresh = {e.id: e.original
-                     for e in self._parse_script(text, sce_name)}
-
-            # Build translation map: (field, line_number) -> entry
-            trans_map = {}
-            for entry in file_entries:
-                if entry.translation and entry.status in ("translated", "reviewed"):
-                    now = fresh.get(entry.id)
-                    if now is None or not _same_text(now, entry.original):
-                        if entry.translation != entry.original:
-                            changed_lines[sce_name] = (
-                                changed_lines.get(sce_name, 0) + 1)
-                        continue
-                    # Entry ID format: "filename/type/line_num"
-                    parts = entry.id.split("/")
-                    if len(parts) >= 3:
-                        field = parts[-2]
-                        line_num = int(parts[-1])
-                        trans_map[(field, line_num)] = entry
-
             try:
+                # Create backup on first export
+                backup_path = os.path.join(backup_dir, sce_name)
+                if game_io.backup_file_once(sce_path, backup_path):
+                    log.info("Backed up %s to sce_original/", sce_name)
+
+                # Always read from backup for idempotent re-export
+                source = backup_path if os.path.exists(backup_path) else sce_path
+                with open(source, "rb") as f:
+                    enc_data = f.read()
+
+                dec_data = decrypt_sce(enc_data, self._key, self._mod)
+                # surrogateescape: undecodable bytes survive the round trip
+                # byte-for-byte instead of becoming '?' on re-encode.
+                text = dec_data.decode("cp932", errors="surrogateescape")
+
+                # Entries are addressed by (field, line number): re-parse the
+                # source like load did and only write entries whose original is
+                # still there; a changed line keeps the game's text (reported).
+                fresh = {e.id: e.original
+                         for e in self._parse_script(text, sce_name)}
+
+                # Build translation map: (field, line_number) -> entry
+                trans_map = {}
+                for entry in file_entries:
+                    if entry.translation and entry.status in ("translated", "reviewed"):
+                        now = fresh.get(entry.id)
+                        if now is None or not _same_text(now, entry.original):
+                            if entry.translation != entry.original:
+                                changed_lines[sce_name] = (
+                                    changed_lines.get(sce_name, 0) + 1)
+                            continue
+                        # Entry ID format: "filename/type/line_num"
+                        parts = entry.id.split("/")
+                        if len(parts) >= 3:
+                            field = parts[-2]
+                            line_num = int(parts[-1])
+                            trans_map[(field, line_num)] = entry
+
                 if not trans_map:
                     # Nothing translated (any more): put the original back
                     # so reverted lines don't keep stale English.
@@ -283,6 +283,8 @@ class CrowdParser:
                              len(trans_map), sce_name)
                 manifest.record(sce_name, sce_path)
             except (OSError, ValueError) as exc:
+                # One unreadable script is reported and skipped; the rest
+                # of the game is still exported.
                 problems.append(f"{sce_name} ({exc})")
         manifest.finish()
         game_io.raise_export_problems(problems, changed_lines,

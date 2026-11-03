@@ -419,35 +419,41 @@ class KirikiriParser:
                                 f"{len(file_entries)} translations)")
                 continue
 
-            encoding = self._detect_encoding(source)
-            # surrogateescape keeps any undecodable byte exactly as it was
-            # (errors="replace" turned it into '?' in the whole file).
-            raw_errors = "replace" if encoding == "utf-16" else "surrogateescape"
-            with open(source, "r", encoding=encoding, errors=raw_errors) as f:
-                content = f.read()
-            lines = content.split("\n")
+            try:
+                encoding = self._detect_encoding(source)
+                # surrogateescape keeps any undecodable byte exactly as it was
+                # (errors="replace" turned it into '?' in the whole file).
+                raw_errors = "replace" if encoding == "utf-16" else "surrogateescape"
+                with open(source, "r", encoding=encoding, errors=raw_errors) as f:
+                    content = f.read()
+                lines = content.split("\n")
 
-            # Re-parse the source exactly like load did to recover the real
-            # line indices of each entry (blocks may contain blank lines).
-            line_map: dict[str, list[int]] = {}
-            fresh = {e.id: e.original
-                     for e in self._parse_lines(lines, rel_path, line_map)}
-            # Entries are placed by position (ID): only write those whose
-            # original is still there.  A changed or removed line keeps the
-            # game's text and is reported (game update / hand edit).
-            still_there = []
-            for e in file_entries:
-                now = fresh.get(e.id)
-                if now is not None and _same_text(now, e.original):
-                    still_there.append(e)
-                elif e.translation != e.original:
-                    changed_lines[rel_path] = changed_lines.get(rel_path, 0) + 1
-            file_entries = still_there
+                # Re-parse the source exactly like load did to recover the real
+                # line indices of each entry (blocks may contain blank lines).
+                line_map: dict[str, list[int]] = {}
+                fresh = {e.id: e.original
+                         for e in self._parse_lines(lines, rel_path, line_map)}
+                # Entries are placed by position (ID): only write those whose
+                # original is still there.  A changed or removed line keeps the
+                # game's text and is reported (game update / hand edit).
+                still_there = []
+                for e in file_entries:
+                    now = fresh.get(e.id)
+                    if now is not None and _same_text(now, e.original):
+                        still_there.append(e)
+                    elif e.translation != e.original:
+                        changed_lines[rel_path] = changed_lines.get(rel_path, 0) + 1
+                file_entries = still_there
 
-            translated_lines = self._apply_translations(
-                lines, file_entries, line_map,
-                cp932=(encoding == "cp932"))
-            translated_content = "\n".join(translated_lines)
+                translated_lines = self._apply_translations(
+                    lines, file_entries, line_map,
+                    cp932=(encoding == "cp932"))
+                translated_content = "\n".join(translated_lines)
+            except (OSError, ValueError) as exc:
+                # One unreadable script is reported and skipped; the rest
+                # of the game is still exported.
+                problems.append(f"{rel_path} (could not read it: {exc})")
+                continue
 
             # Keep the source encoding — the engine decides how to read the
             # file from its bytes (BOM / none), so never switch it silently.

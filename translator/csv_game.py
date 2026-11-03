@@ -213,91 +213,97 @@ class CSVGameParser:
                     problems.append(f"{filename} (file not found)")
                 continue
 
-            # Backup on first export (atomic copy)
-            os.makedirs(backup_dir, exist_ok=True)
-            backup = os.path.join(backup_dir, filename)
-            if game_io.backup_file_once(fpath, backup):
-                log.info("Backed up %s to data_original/", filename)
-                if not manifest.exists:
-                    manifest.save()
+            try:
+                # Backup on first export (atomic copy)
+                os.makedirs(backup_dir, exist_ok=True)
+                backup = os.path.join(backup_dir, filename)
+                if game_io.backup_file_once(fpath, backup):
+                    log.info("Backed up %s to data_original/", filename)
+                    if not manifest.exists:
+                        manifest.save()
 
-            # Read from backup for idempotent re-export
-            source = backup if os.path.isfile(backup) else fpath
-            if not file_entries:
-                if source != fpath:
-                    game_io.atomic_copy(source, fpath)
-                manifest.record(filename, fpath)
-                continue
-            with open(source, "rb") as f:
-                has_bom = f.read(3) == codecs.BOM_UTF8
-            # newline="" keeps the source's line terminators intact
-            with open(source, "r", encoding="utf-8-sig", newline="") as f:
-                content = f.read()
-            line_term = "\r\n" if "\r\n" in content else "\n"
-
-            rows = list(csv.reader(io.StringIO(content, newline="")))
-            if len(rows) < 2:
-                continue
-
-            header = rows[0]
-            jp_col, en_col = self._detect_columns(header, rows[1:])
-            if jp_col < 0 or en_col < 0:
-                log.warning("%s: no safe English column found — not exported "
-                            "(adjacent column holds non-English data)", filename)
-                if source != fpath:
-                    game_io.atomic_copy(source, fpath)  # undo any older export
-                manifest.record(filename, fpath)
-                unsupported.append(
-                    f"{filename} (no empty English column next to the "
-                    f"Japanese text -- not written, to avoid overwriting game "
-                    f"data; {len(file_entries)} translations)")
-                continue
-
-            # Build translation lookup: row_idx -> (original, translation)
-            trans_map = {}
-            for entry in file_entries:
-                # Parse row index from entry ID
-                parts = entry.id.split("/")
-                for p in parts:
-                    if p.startswith("row_"):
-                        try:
-                            row_idx = int(p[4:])
-                            trans_map[row_idx] = (entry.original,
-                                                  entry.translation)
-                        except ValueError:
-                            pass
-
-            # Apply translations -- only to rows whose Japanese cell still
-            # holds the entry's original (rows are addressed by number; a
-            # game update can insert, remove or change rows).
-            applied = 0
-            for row_idx, (original, translation) in trans_map.items():
-                # row_N is the 1-based record number (header = row_1)
-                row = rows[row_idx - 1] if 2 <= row_idx <= len(rows) else None
-                now = (row[jp_col] if row is not None and jp_col < len(row)
-                       else None)
-                if now is None or _norm_cell(now) != _norm_cell(original):
-                    if translation != original:
-                        changed_lines[filename] = (
-                            changed_lines.get(filename, 0) + 1)
+                # Read from backup for idempotent re-export
+                source = backup if os.path.isfile(backup) else fpath
+                if not file_entries:
+                    if source != fpath:
+                        game_io.atomic_copy(source, fpath)
+                    manifest.record(filename, fpath)
                     continue
-                # Ensure row has enough columns
-                while len(row) <= en_col:
-                    row.append("")
-                row[en_col] = translation
-                applied += 1
+                with open(source, "rb") as f:
+                    has_bom = f.read(3) == codecs.BOM_UTF8
+                # newline="" keeps the source's line terminators intact
+                with open(source, "r", encoding="utf-8-sig", newline="") as f:
+                    content = f.read()
+                line_term = "\r\n" if "\r\n" in content else "\n"
 
-            # Write back, keeping the source's BOM and line terminator
-            buf = io.StringIO(newline="")
-            writer = csv.writer(buf, lineterminator=line_term)
-            for row in rows:
-                writer.writerow(row)
-            game_io.atomic_write_text(
-                fpath, buf.getvalue(),
-                encoding="utf-8-sig" if has_bom else "utf-8", newline="")
-            manifest.record(filename, fpath)
+                rows = list(csv.reader(io.StringIO(content, newline="")))
+                if len(rows) < 2:
+                    continue
 
-            log.info("Exported %d translations to %s", applied, filename)
+                header = rows[0]
+                jp_col, en_col = self._detect_columns(header, rows[1:])
+                if jp_col < 0 or en_col < 0:
+                    log.warning("%s: no safe English column found — not exported "
+                                "(adjacent column holds non-English data)", filename)
+                    if source != fpath:
+                        game_io.atomic_copy(source, fpath)  # undo any older export
+                    manifest.record(filename, fpath)
+                    unsupported.append(
+                        f"{filename} (no empty English column next to the "
+                        f"Japanese text -- not written, to avoid overwriting game "
+                        f"data; {len(file_entries)} translations)")
+                    continue
+
+                # Build translation lookup: row_idx -> (original, translation)
+                trans_map = {}
+                for entry in file_entries:
+                    # Parse row index from entry ID
+                    parts = entry.id.split("/")
+                    for p in parts:
+                        if p.startswith("row_"):
+                            try:
+                                row_idx = int(p[4:])
+                                trans_map[row_idx] = (entry.original,
+                                                      entry.translation)
+                            except ValueError:
+                                pass
+
+                # Apply translations -- only to rows whose Japanese cell still
+                # holds the entry's original (rows are addressed by number; a
+                # game update can insert, remove or change rows).
+                applied = 0
+                for row_idx, (original, translation) in trans_map.items():
+                    # row_N is the 1-based record number (header = row_1)
+                    row = rows[row_idx - 1] if 2 <= row_idx <= len(rows) else None
+                    now = (row[jp_col] if row is not None and jp_col < len(row)
+                           else None)
+                    if now is None or _norm_cell(now) != _norm_cell(original):
+                        if translation != original:
+                            changed_lines[filename] = (
+                                changed_lines.get(filename, 0) + 1)
+                        continue
+                    # Ensure row has enough columns
+                    while len(row) <= en_col:
+                        row.append("")
+                    row[en_col] = translation
+                    applied += 1
+
+                # Write back, keeping the source's BOM and line terminator
+                buf = io.StringIO(newline="")
+                writer = csv.writer(buf, lineterminator=line_term)
+                for row in rows:
+                    writer.writerow(row)
+                game_io.atomic_write_text(
+                    fpath, buf.getvalue(),
+                    encoding="utf-8-sig" if has_bom else "utf-8", newline="")
+                manifest.record(filename, fpath)
+
+                log.info("Exported %d translations to %s", applied, filename)
+            except (OSError, ValueError, csv.Error) as exc:
+                # One unreadable file is reported and skipped; the rest
+                # of the game is still exported.
+                problems.append(f"{filename} ({exc})")
+                continue
         manifest.finish()
         game_io.raise_export_problems(problems, changed_lines,
                                       unsupported=unsupported,
