@@ -584,6 +584,9 @@ class ExportManifest:
         self.path = os.fspath(path)
         self.journal = self.path + ".journal"
         self.root = _norm(os.path.dirname(self.path) or ".")
+        # other folders whose writes are journaled too (Tyrano's system
+        # files live beside, not under, the scenario folder)
+        self.extra_roots: list[str] = []
         self.files: dict[str, dict] = {}
         # content this app was about to write, by normalised live path
         self.intended: dict[str, dict] = {}
@@ -640,8 +643,10 @@ class ExportManifest:
 
     def _intend(self, dst: str, tmp: str) -> None:
         d = _norm(dst)
+        roots = [self.root] + [_norm(r) for r in self.extra_roots]
         if (d.endswith(".manifest.json") or d.endswith(".journal")
-                or not (d == self.root or d.startswith(self.root + os.sep))):
+                or not any(d == r or d.startswith(r + os.sep)
+                           for r in roots)):
             return
         rec = {"size": os.path.getsize(tmp), "sha256": sha256_file(tmp)}
         with open(self.journal, "a", encoding="utf-8") as f:

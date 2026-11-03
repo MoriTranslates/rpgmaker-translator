@@ -138,6 +138,7 @@ class TyranoScriptParser:
         original_dir = os.path.join(
             os.path.dirname(scenario_dir), "scenario_original")
         manifest = game_io.ExportManifest(original_dir + ".manifest.json")
+        manifest.extra_roots.append(project_dir)
         if game_io.backup_tree_once(scenario_dir, original_dir):
             manifest.start_with_backup()
         self.last_export_notes: list[str] = []
@@ -288,8 +289,6 @@ class TyranoScriptParser:
             except OSError as exc:
                 problems.append(f"{file_key} ({exc})")
 
-        manifest.finish()
-
         # Export system files
         n = (0 if "_system/lang.js" in outside
              else self._export_lang_js(project_dir, entries))
@@ -303,7 +302,9 @@ class TyranoScriptParser:
         for key, live, bak in self._system_files(project_dir):
             if os.path.isfile(bak) and key not in outside:
                 manifest.record(key, live)
-        manifest.save()
+        # finish() only after the system files are written and recorded:
+        # they stay in the write-ahead journal if the final save fails
+        manifest.finish()
         self._patch_game_fonts(project_dir)
         game_io.raise_export_problems(problems, changed_lines,
                                       outside=sorted(outside),

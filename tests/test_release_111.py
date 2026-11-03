@@ -1077,3 +1077,77 @@ def test_own_word_wrap_write_is_recognised_and_updated(mv_game, mv_parser):
                    for p in mv_parser._load_plugins_js(js))
     assert mv_parser.inject_wordwrap_plugin(mv_game, max_chars=30)
     mv_parser.save_project(mv_game, entries)          # still complete
+
+
+# ── Round-2 review M3: a manifest save that fails is never silent ────
+
+def _failing_saves(monkeypatch):
+    """Let ExportManifest.begin() work, make every later write raise."""
+    real = game_io.ExportManifest._write
+    state = {"fail": False}
+
+    def write(self):
+        if state["fail"] and not self.pending:
+            raise OSError("disk full")
+        return real(self)
+
+    orig_begin = game_io.ExportManifest.begin
+
+    def begin(self):
+        orig_begin(self)
+        state["fail"] = True
+
+    monkeypatch.setattr(game_io.ExportManifest, "_write", write)
+    monkeypatch.setattr(game_io.ExportManifest, "begin", begin)
+    return state
+
+
+def test_export_with_failed_manifest_save_is_not_complete(
+        mv_game, mv_parser, monkeypatch):
+    entries = _exported(mv_game, mv_parser)
+    _failing_saves(monkeypatch)
+    with pytest.raises(game_io.PartialExportError) as ei:
+        mv_parser.save_project(mv_game, entries)
+    assert ei.value.unrecorded
+    assert any("Couldn't record" in p for p in ei.value.problems)
+
+
+def test_export_with_normal_manifest_save_says_complete(mv_game, mv_parser):
+    entries = _exported(mv_game, mv_parser)
+    mv_parser.save_project(mv_game, entries)          # no PartialExportError
+
+
+def test_note_own_files_reports_a_failed_manifest_save(
+        mv_game, mv_parser, monkeypatch):
+    entries = _exported(mv_game, mv_parser)
+    assert mv_parser.inject_wordwrap_plugin(mv_game, max_chars=40)
+
+    def boom(self):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(game_io.ExportManifest, "_write", boom)
+    problems = mv_parser.note_own_files(mv_game)
+    assert problems and "Couldn't record" in problems[0]
+    monkeypatch.undo()
+    assert mv_parser.note_own_files(mv_game) == []    # control: normal save
+
+
+def test_tyrano_lang_js_survives_a_failed_manifest_save(tmp_path,
+                                                        monkeypatch):
+    from test_smoke_findings import _tyrano_game
+    from translator.tyranoscript import TyranoScriptParser
+    _ks, lang = _tyrano_game(tmp_path, "*start\n台詞です[p]\n")
+    p = TyranoScriptParser()
+    entries = p.load_project(str(tmp_path))
+    for e in entries:
+        e.translation, e.status = "EN", "translated"
+    p.save_project(str(tmp_path), entries)
+    for e in entries:
+        e.translation = "EN two"
+    with monkeypatch.context() as mp:
+        _failing_saves(mp)
+        with pytest.raises(game_io.PartialExportError) as ei:
+            p.save_project(str(tmp_path), entries)
+        assert ei.value.unrecorded
+    game_io._write_ahead.clear()
+    p.save_project(str(tmp_path), entries)    # own lang.js: not "outside"
