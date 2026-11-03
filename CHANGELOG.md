@@ -46,6 +46,10 @@ Game files and backups:
   the game was updated, start a new project on a clean copy of the updated game; if you edited
   it in RPG Maker, run Restore Originals first or re-export from a clean copy. A data file the
   backup has no copy of is only written when the app can prove it never wrote it before.
+  `plugins.js` and `gamefont.css` are covered too, and the steps after an export (plugin patches,
+  font and scaler changes) leave flagged files alone. The record is written before the export
+  starts, so a crash never turns the check off; if it can't be saved at the end, the export says
+  so, and TyranoScript system files stay journaled until it is saved.
   **Projects exported with 1.1.0** have no such record yet: their first export with this version
   works as in 1.1.0 (files are rewritten from the backup), and from then on changes are caught.
 
@@ -90,9 +94,11 @@ Install package (RPG Maker MV/MZ patch zip):
 - **`install.bat` never removes a game file.** It copies `data/` to `data_original/` and copies
   the translated files over `data/`; files the package doesn't have stay in the game. Before, it
   renamed or deleted `data/`, so the player's game could lose a map and crash. If copying fails
-  half-way, the previous files are put back and the package is kept so it can be run again.
-  Read-only game files no longer stop it. A `data_original/` left by an earlier install is not
-  reused without asking (uninstall would put those older files back).
+  half-way, the previous files are put back and the package is kept. Running `install.bat` again
+  finds the `data_original/` from the first try and asks you to type YES to keep it; this is
+  expected after a failed install. Read-only game files no longer stop it. A `data_original/` left
+  by an earlier install is never reused without asking (uninstall would put those older files
+  back), and the message tells you not to delete it yourself.
 - **`uninstall.bat`** removes the data files the package added, copies the originals back, and
   deletes `data_original/` only when that worked. Files a later game update added are kept.
 
@@ -142,6 +148,9 @@ Engines:
   is reported instead of restarting a local one.
 - EasyRPG Player is downloaded only with your consent, and checked against a pinned SHA-256 hash
   before it is used (the cached copy is re-checked too).
+- "Open in RPG Maker" now warns that saving in the RPG Maker editor rewrites the game's data
+  files, and that the next export will then report them as changed outside the translator and
+  write none of them until you run Restore Originals.
 - "Open in RPG Maker" no longer runs a shell command, so folder names containing `&` can't run
   other commands.
 - SECURITY.md now describes what is actually sent to cloud providers, that API keys are stored in

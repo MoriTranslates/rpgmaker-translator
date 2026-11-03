@@ -1137,8 +1137,9 @@ class RPGMakerMVParser:
             # the OLD version -- the player must decide, never silently.
             f'echo   Backup already exists ^({dr}_original\\^), from an earlier install.',
             "echo   uninstall.bat will put THOSE files back. If the game was updated",
-            "echo   since then, stop now: run the old uninstall.bat first, or delete",
-            f'echo   {dr}_original\\ yourself so a fresh backup is made.',
+            "echo   since then, stop now and run the old uninstall.bat first.",
+            f'echo   Do not delete {dr}_original\\ yourself: if an earlier install failed,',
+            f'echo   {dr}\\ may be only partly translated and it is the only good copy.',
             'set "RMT_OK="',
             "set /p RMT_OK=  Type YES to keep the existing backup and continue: ",
             'if /I not "%RMT_OK%"=="YES" (',

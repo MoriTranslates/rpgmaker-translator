@@ -3514,6 +3514,19 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Saving in the editor rewrites the game's data files (the workspace
+        # links to them), so the next export reports them as changed outside.
+        if QMessageBox.question(
+            self, "Open in RPG Maker",
+            "If you save the project in RPG Maker, it rewrites the game's data "
+            "files. The next export will then report them as changed outside "
+            "the translator and write none of them, until you run Restore "
+            "Originals.\n\nOpen in RPG Maker anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
         # Create workspace folder
         workspace = os.path.join(project_path, "_rpgmaker_workspace")
         os.makedirs(workspace, exist_ok=True)
