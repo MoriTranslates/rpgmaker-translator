@@ -181,13 +181,14 @@ Best JP→EN model available locally. 262K native context window, multimodal (al
 
 | GPU VRAM | Model | Command |
 |---|---|---|
-| **6GB** | Qwen 3.5:9b Q4_K_M | `ollama pull qwen3.5:9b` |
-| **10GB** | Qwen 3.5:9b Q8_0 | `ollama pull qwen3.5:9b-q8_0` |
-| **12GB** | Qwen 3.5:14b Q4_K_M | `ollama pull qwen3.5:14b` |
-| **16GB** | Qwen 3.5:14b Q8_0 | `ollama pull qwen3.5:14b-q8_0` |
-| **24GB** | Qwen 3.5:30b Q4_K_M | `ollama pull qwen3.5:30b` |
+| **6–10GB** | Qwen 3.5:9b Q4_K_M (6.6GB) | `ollama pull qwen3.5:9b` |
+| **12–16GB** | Qwen 3.5:9b Q8_0 (10GB) | `ollama pull qwen3.5:9b-q8_0` |
+| **24GB+** | Qwen 3.5:27b Q4_K_M (17GB) | `ollama pull qwen3.5:27b` |
 
-The 9b model is the sweet spot — fast, fits in 6GB VRAM, and produces excellent translations.
+Qwen 3.5 comes in 9b, 27b and 35b-a3b sizes (no 14b or 30b); see the
+[Ollama tag list](https://ollama.com/library/qwen3.5/tags). The 9b model is the sweet spot — fast,
+fits in 6GB VRAM (partly offloaded), and produces excellent translations. The 27b model is untested
+with this app; it should be more accurate but much slower.
 
 ### No GPU? Use Cloud APIs
 
