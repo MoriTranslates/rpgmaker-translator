@@ -15,6 +15,12 @@ The release workflow publishes the section whose heading matches the pushed tag
   Ollama for your system, start it yourself (`ollama serve`) and pull your model
   (`ollama pull qwen3.5:9b`) before you run `python main.py`. Open in RPG Maker and the
   EasyRPG Player download only work on Windows.
+- A game file the translator wrote that a game update (or you) later deleted is no longer brought
+  back from the backup on the next export. The export leaves it out and lists it as changed
+  outside the translator.
+- The English patch's uninstall.bat now also removes added data files whose names have spaces,
+  Japanese or symbols such as `&`, `%` or `!`. A name that could point outside the data folder is
+  never deleted; uninstall.bat lists it instead.
 
 ## [1.1.1] - 2026-11-03
 

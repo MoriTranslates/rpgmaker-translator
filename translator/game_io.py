@@ -762,13 +762,21 @@ class ExportManifest:
 #     or couldn't save its record) or has no record of the file: can't be
 #     verified -- not written either ("couldn't check" is never "fine");
 #   * no manifest or journal ever existed (a project exported with
-#     1.1.0): the 1.1.0 behaviour.
+#     1.1.0): the 1.1.0 behaviour;
+#   * missing from the game although this app wrote it (manifest record or
+#     journal): removed outside the translator (game update, hand delete)
+#     -- not brought back from the backup.  A missing file this app never
+#     wrote keeps the old behaviour.
 
 def check_live(key: str, live: str, bak: str,
                manifest: ExportManifest) -> str:
     """"ok", "outside" or "unverified" for one game file.  Hashes are
     streamed, so file size doesn't matter."""
-    if not os.path.isfile(live) or not os.path.isfile(bak):
+    if not os.path.isfile(bak):
+        return "ok"
+    if not os.path.isfile(live):
+        if key in manifest.files or _norm(live) in manifest.intended:
+            return "outside"
         return "ok"
     if _same_content(live, bak) or manifest.is_ours(key, live):
         return "ok"

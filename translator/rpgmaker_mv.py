@@ -87,6 +87,13 @@ def _cmd_escape(text: str) -> str:
     return text.replace("%", "%%")
 
 
+# A package file name that must never go into an uninstall.bat command:
+# empty, a path part (\ / : or ..), a character Windows forbids in names
+# (* ? " < > | and control characters), or a trailing dot or space
+# (Windows drops those, so the name would mean another file).
+_BAT_UNSAFE_NAME_RE = re.compile(r'^$|[\\/:*?"<>|\x00-\x1f]|\.\.|[. ]$')
+
+
 # Data files the parser extracts entries from (and export therefore rewrites)
 _PARSED_FIXED_FILES = {"System.json", "CommonEvents.json", "Troops.json"}
 _MAP_FILE_RE = re.compile(r'^Map\d+\.json$', re.IGNORECASE)
@@ -1261,11 +1268,18 @@ class RPGMakerMVParser:
         the original game did not have is deleted again.
         """
         dr = data_rel.replace("/", "\\")
-        # only plain names go into the script (no quoting / % surprises)
+        # Names go into the script inside double quotes, where cmd takes
+        # & ^ ( ) | < > literally; only % needs doubling, and ! is literal
+        # because delayed expansion is switched off below.  A name that
+        # could point outside data\ or change the command is never put in
+        # a del command (see _BAT_UNSAFE_NAME_RE); it is listed instead.
         added = sorted(n for n in package_files
-                       if re.fullmatch(r"[A-Za-z0-9_.-]+", n))
+                       if not _BAT_UNSAFE_NAME_RE.search(n))
+        unsafe = sorted(n for n in package_files
+                        if _BAT_UNSAFE_NAME_RE.search(n))
         lines = [
             "@echo off",
+            "setlocal DisableDelayedExpansion",
             "chcp 65001 >nul 2>&1",
             'pushd "%~dp0"',
             f"title Restore Japanese — {_cmd_escape(game_title or 'RPG Maker Game')}",
@@ -1291,8 +1305,18 @@ class RPGMakerMVParser:
         if added:
             lines.append("echo Removing files the translation added...")
         for n in added:
-            lines.append(f'if not exist "{dr}_original\\{n}" '
-                         f'if exist "{dr}\\{n}" del /F /Q "{dr}\\{n}"')
+            q = n.replace("%", "%%")
+            lines.append(f'if not exist "{dr}_original\\{q}" '
+                         f'if exist "{dr}\\{q}" del /F /Q "{dr}\\{q}"')
+            lines.append(f'if not exist "{dr}_original\\{q}" '
+                         f'if exist "{dr}\\{q}" '
+                         f'echo   Could not remove "{dr}\\{q}"')
+        if unsafe:
+            lines.append("echo The translation also added these files; they "
+                         "were not removed automatically:")
+        for n in unsafe:
+            shown = re.sub(r'["\x00-\x1f]', "?", n).replace("%", "%%")
+            lines.append(f'echo   "{dr}\\{shown}"')
         lines += [
             # Copy the originals back over data/ (never delete data/: a
             # file added after the install, e.g. by a game update, stays);
