@@ -190,6 +190,9 @@ Qwen 3.5 comes in 9b, 27b and 35b-a3b sizes (no 14b or 30b); see the
 fits in 6GB VRAM (partly offloaded), and produces excellent translations. The 27b model is untested
 with this app; it should be more accurate but much slower.
 
+**Also worth trying on 24GB+ cards (untested):** the newer Qwen 3.8, which only comes in 27b
+(`ollama pull qwen3.8:27b`, 18GB). If you try it or Qwen 3.5 27b, feedback on translation quality is welcome.
+
 ### No GPU? Use Cloud APIs
 
 In Settings, switch Provider to OpenAI/Gemini/DeepSeek/Anthropic, enter your API key, and go. Same workflow, same features, pay per token. Cheapest option: **Gemini 2.0 Flash** at $0.10/$0.40 per 1M tokens.
