@@ -15,6 +15,12 @@ The release workflow publishes the section whose heading matches the pushed tag
   Ollama for your system, start it yourself (`ollama serve`) and pull your model
   (`ollama pull qwen3.5:9b`) before you run `python main.py`. Open in RPG Maker and the
   EasyRPG Player download only work on Windows.
+- Cloud providers: Settings no longer suggests models that have been shut down or are about to
+  be (Gemini 2.0/2.5, GPT-4.1, GPT-5, deepseek-chat, Claude Sonnet 4.5). With an API key entered,
+  the model list now comes from the provider itself, with up-to-date suggestions as the fallback,
+  and your saved model stays selected even if it isn't listed. Newer OpenAI and Claude models are
+  no longer sent a temperature setting they reject, and Claude is no longer sent a JSON mode it
+  rejects. A model with no known price shows its cost as "unknown" instead of $0.
 
 ## [1.1.1] - 2026-11-03
 
