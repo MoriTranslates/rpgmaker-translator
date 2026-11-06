@@ -134,6 +134,11 @@ def _accepts_sampling_params(provider: str, model: str) -> bool:
     if provider == "Custom":
         # Unknown server: keep the old name-based rule.
         return not _is_reasoning_model(model)
+    if provider == "OpenRouter":
+        # Same name-based rule as Custom, on the part after the vendor
+        # ("openai/gpt-5.6-sol" -> "gpt-5.6-sol"). OpenRouter also drops
+        # parameters a model does not support instead of failing.
+        return not _is_reasoning_model((model or "").rsplit("/", 1)[-1])
     return False  # Anthropic, and any provider not listed above
 
 
@@ -516,7 +521,7 @@ TARGET_LANGUAGES = [
 
 # ── Cloud API provider configuration ────────────────────────────────
 
-PROVIDERS = ["Ollama (Local)", "OpenAI", "Google Gemini", "DeepSeek", "Anthropic", "Custom"]
+PROVIDERS = ["Ollama (Local)", "OpenAI", "Google Gemini", "DeepSeek", "Anthropic", "OpenRouter", "Custom"]
 
 PROVIDER_URLS = {
     "Ollama (Local)": None,            # uses self.base_url
@@ -524,6 +529,7 @@ PROVIDER_URLS = {
     "Google Gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
     "DeepSeek": "https://api.deepseek.com/v1",
     "Anthropic": "https://api.anthropic.com/v1",
+    "OpenRouter": "https://openrouter.ai/api/v1",
     "Custom": None,                    # uses self.base_url
 }
 
@@ -539,6 +545,12 @@ PROVIDER_MODELS = {
     ],
     "DeepSeek": ["deepseek-flash", "deepseek-v4-pro"],
     "Anthropic": ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"],
+    # Verified live 2026-11-06. The :free models have daily limits.
+    "OpenRouter": [
+        "deepseek/deepseek-chat",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "cohere/north-mini-code:free",
+    ],
     "Custom": [],
 }
 
@@ -667,6 +679,20 @@ def filter_chat_models(ids) -> list[str]:
     return out
 
 
+def _lists_text_output(model) -> bool:
+    """False only if the listing says the model cannot output text.
+
+    OpenRouter's list carries ``architecture.output_modalities`` (image-only
+    models have no "text"). Other providers have no such field, and a
+    missing or odd one counts as text: this only ever hides sure non-text models.
+    """
+    arch = getattr(model, "architecture", None)
+    mods = arch.get("output_modalities") if isinstance(arch, dict) else None
+    if isinstance(mods, list) and mods:
+        return "text" in mods
+    return True
+
+
 def fetch_cloud_models(provider: str, api_key: str,
                        base_url: str | None = None,
                        timeout: float = 10) -> tuple[list[str], bool]:
@@ -685,7 +711,8 @@ def fetch_cloud_models(provider: str, api_key: str,
         client = openai.OpenAI(api_key=api_key,
                                base_url=base_url or PROVIDER_URLS.get(provider),
                                timeout=timeout, max_retries=0)
-        ids = [getattr(m, "id", None) for m in client.models.list()]
+        ids = [getattr(m, "id", None) for m in client.models.list()
+               if _lists_text_output(m)]
     except Exception as e:
         # Any failure (network, bad key, missing SDK, odd reply) only means
         # "no live list": the caller shows the built-in list and says so.

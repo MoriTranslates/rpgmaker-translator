@@ -9,6 +9,9 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+### Added
+- OpenRouter is now a named provider (one key, many models, with a built-in address). Unlike "Custom", it never shares or overwrites your Ollama address.
+
 ### Fixed
 - Qwen 3.5 and other strict local models no longer reject batches with "System message must be at the beginning".
 - Lines blocked by an online model's content filter are now marked as blocked instead of crashing the batch.

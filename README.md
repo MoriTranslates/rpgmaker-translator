@@ -211,8 +211,11 @@ In Settings, switch Provider to OpenAI/Gemini/DeepSeek/Anthropic, enter your API
 | **OpenAI** | gpt-6-luna, gpt-5.6-luna, gpt-6-sol | $0.10–$2.00 in / $0.50–$10.00 out |
 | **DeepSeek** | deepseek-flash, deepseek-v4-pro | $0.30–$1.32 in / $1.20–$3.96 out (peak hours; off-peak is half) |
 | **Anthropic** | claude-haiku-5-5, claude-sonnet-5-5, claude-opus-5-5 | $0.10–$4.00 in / $0.50–$20.00 out |
+| **OpenRouter** | deepseek/deepseek-chat, plus free `:free` models (e.g. nvidia/nemotron-3-ultra-550b-a55b:free) | varies by model |
 
 All providers use the OpenAI SDK as a universal abstraction. Switch in Settings > Provider, enter your API key, and the rest is automatic — batch size, workers, and prompt presets auto-configure. With a key entered, the model list is read from the provider itself; the models above are the built-in suggestions used when that fails. Prices were checked in November 2026 and change often; a model with no price on file shows its cost as "unknown".
+
+**OpenRouter** gives one API key for hundreds of models from many makers. Pick "OpenRouter" as the provider (its address is built in, so your Ollama address is never touched), paste your key, and choose or type a model name exactly as OpenRouter lists it (for example `deepseek/deepseek-chat`). Models ending in `:free` cost nothing but have daily request limits, and the free providers may log your prompts. Set your privacy options in your OpenRouter account settings before sending game text. The cost line shows "unknown" for OpenRouter models.
 
 ---
 
