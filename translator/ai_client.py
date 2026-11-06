@@ -58,6 +58,10 @@ class InvalidApiKey(FatalProviderError):
     """The cloud provider rejected the API key."""
 
 
+class OutOfCredits(FatalProviderError):
+    """The provider wants payment (HTTP 402): no credit left on the account."""
+
+
 class ContentBlocked(ValueError):
     """The provider's content filter blocked this request (no usable reply).
 
@@ -1069,6 +1073,14 @@ class AIClient:
 
         client = self._get_openai_client(openai).with_options(timeout=timeout)
         model = model or self.model
+        if (self.provider == "OpenRouter" and model
+                and (model != model.strip() or not model[-1].isalnum())):
+            # OpenRouter quietly drops a suffix it doesn't recognise:
+            # "…:free." was served by the PAID model. Stop instead.
+            raise ModelNotFound(
+                f"Model name '{model}' looks mistyped (check the end of it). "
+                "OpenRouter would pick a different, possibly paid, model. "
+                "Fix it in Settings.")
 
         # Extract Ollama-style options and map to OpenAI params
         options = kwargs.get("options", {})
@@ -1136,7 +1148,20 @@ class AIClient:
                 "Wait a moment and try again."
             ) from e
         except openai.APIStatusError as e:
+            if e.status_code == 402:
+                raise OutOfCredits(
+                    f"{self.provider} says there is no credit left on the "
+                    "account. Add credit, or pick a free model.") from e
             raise ConnectionError(f"{self.provider} API error ({e.status_code}): {e.message}")
+
+        served = getattr(response, "model", None)
+        if (self.provider == "OpenRouter" and model.endswith(":free")
+                and isinstance(served, str) and served
+                and not served.endswith(":free")):
+            raise FatalProviderError(
+                f"OpenRouter answered '{model}' with the paid model "
+                f"'{served}'. Stopped so you aren't charged; try again "
+                "later or pick another free model.")
 
         content = ""
         if response.choices:

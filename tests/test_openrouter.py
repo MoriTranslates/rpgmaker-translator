@@ -227,3 +227,81 @@ def test_model_name_punctuation_is_not_stripped(dialog):
     dlg.model_combo.setCurrentText("deepseek/deepseek-chat.")
     dlg._save()
     assert c.model == "deepseek/deepseek-chat."
+
+
+# ── typos and empty balances must stop the run, never cost money ────
+
+class _Served:
+    """Fake client whose reply says which model actually served it."""
+    served = ""
+    sent: list = []
+
+    def __init__(self, **kwargs):
+        def create(**p):
+            _Served.sent.append(p["model"])
+            msg = SimpleNamespace(content="ok")
+            return SimpleNamespace(choices=[SimpleNamespace(message=msg)],
+                                   usage=None, model=_Served.served)
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
+
+    def with_options(self, **kw):
+        return self
+
+
+@pytest.mark.parametrize("model", [
+    "nvidia/nemotron-3-ultra-550b-a55b:free.",   # the real copy-paste typo
+    "deepseek/deepseek-chat,",
+    "deepseek/deepseek-chat ",
+])
+def test_mistyped_model_stops_before_any_request(monkeypatch, model):
+    _Served.sent = []
+    monkeypatch.setattr(openai, "OpenAI", _Served)
+    c = _client(model=model)
+    with pytest.raises(ai_client.FatalProviderError, match="mistyped"):
+        c._chat_openai(messages=[{"role": "user", "content": "hi"}])
+    assert _Served.sent == []
+
+
+def test_free_model_swapped_for_paid_stops_the_run(monkeypatch):
+    _Served.sent = []
+    _Served.served = "nvidia/nemotron-3-ultra-550b-a55b"   # :free dropped
+    monkeypatch.setattr(openai, "OpenAI", _Served)
+    c = _client(model="nvidia/nemotron-3-ultra-550b-a55b:free")
+    with pytest.raises(ai_client.FatalProviderError, match="paid"):
+        c._chat_openai(messages=[{"role": "user", "content": "hi"}])
+
+
+def test_free_model_served_free_is_fine(monkeypatch):
+    _Served.served = "nvidia/nemotron-3-ultra-550b-a55b:free"
+    monkeypatch.setattr(openai, "OpenAI", _Served)
+    c = _client(model="nvidia/nemotron-3-ultra-550b-a55b:free")
+    out = c._chat_openai(messages=[{"role": "user", "content": "hi"}])
+    assert out["message"]["content"] == "ok"
+
+
+def test_paid_model_with_unreported_served_name_is_fine(monkeypatch):
+    _Served.served = None
+    monkeypatch.setattr(openai, "OpenAI", _Served)
+    c = _client(model="deepseek/deepseek-chat")
+    assert c._chat_openai(messages=[{"role": "user", "content": "hi"}])
+
+
+def _status_error(code):
+    import httpx
+    req = httpx.Request("POST", OR_URL + "/chat/completions")
+    resp = httpx.Response(code, request=req, json={"error": {"message": "x"}})
+    return openai.APIStatusError("Insufficient credits", response=resp,
+                                 body=None)
+
+
+def test_out_of_credits_stops_the_run(monkeypatch):
+    class _NoCredit(_Served):
+        def __init__(self, **kwargs):
+            def create(**p):
+                raise _status_error(402)
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=create))
+    monkeypatch.setattr(openai, "OpenAI", _NoCredit)
+    c = _client()
+    with pytest.raises(ai_client.FatalProviderError, match="credit"):
+        c._chat_openai(messages=[{"role": "user", "content": "hi"}])
