@@ -75,6 +75,7 @@ datas = [
     # Read-only app resources, resolved at runtime via translator/resource_paths.py
     (os.path.join(ROOT, "assets"), "assets"),
     (os.path.join(ROOT, "translator", "resources"), os.path.join("translator", "resources")),
+    (os.path.join(ROOT, "models.json"), "."),
     (os.path.join(ROOT, "LICENSE"), "."),
     (os.path.join(ROOT, "THIRD_PARTY_NOTICES.md"), "."),
 ]
