@@ -193,6 +193,22 @@ with this app; it should be more accurate but much slower.
 **Also worth trying on 24GB+ cards (untested):** the newer Qwen 3.8, which only comes in 27b
 (`ollama pull qwen3.8:27b`, 18GB). If you try it or Qwen 3.5 27b, feedback on translation quality is welcome.
 
+### The model suggestions list (Settings > Suggest Model)
+
+The window highlights the pick for your GPU, marks models you already have installed with a check mark,
+and lets you type **any** Ollama tag (for example a `hf.co/...` GGUF) and pull it. Tags are checked before
+anything runs: only letters, digits and `. _ : / -` are allowed, and a tag cannot start with `-`.
+
+The list lives in [`models.json`](models.json). The app ships a copy and, when the window opens, tries to
+refresh it from this repository on GitHub (5 second limit, in the background). If the download fails or the
+file does not validate, the built-in list is used and nothing is shown. It has four parts:
+
+- `recommended`: the best general models. `tier_picks` says which one is highlighted for 8, 12 and 16+ GB of VRAM (each pick must be listed under `recommended`).
+- `specialist`: Japanese to English fine-tunes such as Sugoi. A new specialist goes here.
+- `experimental`: models that exist on Ollama but are not yet tested for translation. Newer models start here.
+- Each entry has `label`, `tag`, `vram_gb` (download size plus about 1.5 GB) and `notes`. Check that a tag exists
+  (`https://registry.ollama.ai/v2/library/<name>/manifests/<tag>`) before adding it.
+
 ### No GPU? Use Cloud APIs
 
 In Settings, switch Provider to OpenAI/Gemini/DeepSeek/Anthropic, enter your API key, and go. Same workflow, same features, pay per token. Cheapest options: **gpt-6-luna** or **Claude Haiku 5.5** at $0.10/$0.50 per 1M tokens (prices checked November 2026).

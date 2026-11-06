@@ -50,3 +50,10 @@ def qapp():
     from PyQt6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+@pytest.fixture(autouse=True)
+def _no_model_list_network(monkeypatch):
+    """The suggestions window must never fetch from GitHub during tests."""
+    from translator.widgets.model_suggestion_dialog import ModelSuggestionDialog
+    monkeypatch.setattr(ModelSuggestionDialog, "_AUTO_FETCH", False)
