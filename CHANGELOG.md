@@ -9,6 +9,11 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+### Fixed
+- Running from source on Linux or macOS no longer crashes when unloading models, starting
+  Ollama or using Open in RPG Maker. These systems still aren't officially supported: start
+  Ollama yourself before translating.
+
 ## [1.1.1] - 2026-11-03
 
 **VX Ace users: please update.** Earlier versions (1.0.0–1.1.0) could save broken data into exported

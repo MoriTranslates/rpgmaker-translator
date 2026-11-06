@@ -19,6 +19,17 @@ def create_junction(link: str, target: str) -> None:
         os.symlink(os.path.abspath(target), link, target_is_directory=True)
 
 
+def open_with_default_app(path: str) -> None:
+    """Open *path* with the program Windows associates with it.
+
+    Raises OSError when there is none -- including on other systems,
+    which have no ``os.startfile`` (they aren't supported).
+    """
+    if not hasattr(os, "startfile"):
+        raise OSError("opening files with their default app needs Windows")
+    os.startfile(path)
+
+
 def event_prefix(entry_id: str) -> str:
     """Extract event prefix from entry ID (everything before the last segment).
 

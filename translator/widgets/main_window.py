@@ -24,7 +24,7 @@ from ..version import __version__
 from ..resource_paths import app_dir
 from .. import game_io
 from ..game_io import PartialExportError
-from ..utils import create_junction
+from ..utils import create_junction, open_with_default_app
 from ..ai_client import AIClient, build_system_prompt
 from ..rpgmaker_mv import RPGMakerMVParser
 from ..tyranoscript import TyranoScriptParser
@@ -3581,7 +3581,7 @@ class MainWindow(QMainWindow):
         # Open in RPG Maker
         engine_label = "RPG Maker MV" if engine == "mv" else "RPG Maker MZ"
         try:
-            os.startfile(marker)
+            open_with_default_app(marker)
             self.statusbar.showMessage(
                 f"Opening in {engine_label}... Workspace: _rpgmaker_workspace/", 10000
             )

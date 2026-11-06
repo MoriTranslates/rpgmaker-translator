@@ -12,6 +12,10 @@ import requests
 from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
 from .renpy import RENPY_INTERP_RE, RENPY_TAG_RE
 
+# Hides the console window of child processes on Windows; the flag doesn't
+# exist elsewhere (0 = no flags).
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 log = logging.getLogger(__name__)
 
 
@@ -820,7 +824,7 @@ class AIClient:
                     subprocess.run(
                         ["ollama", "stop", name],
                         capture_output=True, timeout=15,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        creationflags=_NO_WINDOW,
                     )
                     count += 1
                     log.info("Stopped model: %s", name)
@@ -1067,7 +1071,7 @@ class AIClient:
             out = subprocess.run(
                 ["tasklist", "/FI", "IMAGENAME eq ollama.exe", "/NH"],
                 capture_output=True, text=True, timeout=5,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                creationflags=_NO_WINDOW,
             ).stdout
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             return False
@@ -1149,7 +1153,7 @@ class AIClient:
                 env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_NO_WINDOW,
             )
         except (FileNotFoundError, OSError) as e:
             log.error("Failed to start Ollama: %s", e)
@@ -1185,8 +1189,9 @@ class AIClient:
     def _find_ollama_exe() -> str | None:
         """Locate the ollama executable on the system."""
         # Check PATH first
+        name = "ollama.exe" if os.name == "nt" else "ollama"
         for path_dir in os.environ.get("PATH", "").split(os.pathsep):
-            candidate = os.path.join(path_dir, "ollama.exe")
+            candidate = os.path.join(path_dir, name)
             if os.path.isfile(candidate):
                 return candidate
         # Common install locations on Windows
