@@ -20,7 +20,10 @@ The release workflow publishes the section whose heading matches the pushed tag
   the model list now comes from the provider itself, with up-to-date suggestions as the fallback,
   and your saved model stays selected even if it isn't listed. Newer OpenAI and Claude models are
   no longer sent a temperature setting they reject, and Claude is no longer sent a JSON mode it
-  rejects. A model with no known price shows its cost as "unknown" instead of $0.
+  rejects. A model with no known price shows its cost as "unknown" instead of $0. Gemini 3.x
+  models now think less, so short replies such as names are no longer cut off. Only Gemini was
+  tested with a live key; if OpenAI, Claude or DeepSeek gives errors or empty or cut-off lines,
+  please open an issue.
 
 ## [1.1.1] - 2026-11-03
 
