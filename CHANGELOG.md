@@ -24,6 +24,12 @@ The release workflow publishes the section whose heading matches the pushed tag
   models now think less, so short replies such as names are no longer cut off. Only Gemini was
   tested with a live key; if OpenAI, Claude or DeepSeek gives errors or empty or cut-off lines,
   please open an issue.
+- A game file the translator wrote that a game update (or you) later deleted is no longer brought
+  back from the backup on the next export. The export leaves it out and lists it as changed
+  outside the translator.
+- The English patch's uninstall.bat now also removes added data files whose names have spaces,
+  Japanese or symbols such as `&`, `%` or `!`. A name that could point outside the data folder is
+  never deleted; uninstall.bat lists it instead.
 
 ## [1.1.1] - 2026-11-03
 
