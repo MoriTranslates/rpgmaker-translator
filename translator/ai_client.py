@@ -42,6 +42,30 @@ class RateLimited(ConnectionError):
     """The provider returned HTTP 429 — caller should back off and retry."""
 
 
+class FatalProviderError(ConnectionError):
+    """An error that can never succeed on retry (missing model, bad API key).
+
+    The engine stops the whole run once instead of grinding through every
+    remaining line.
+    """
+
+
+class ModelNotFound(FatalProviderError):
+    """The server does not have the requested model."""
+
+
+class InvalidApiKey(FatalProviderError):
+    """The cloud provider rejected the API key."""
+
+
+class ContentBlocked(ValueError):
+    """The provider's content filter blocked this request (no usable reply).
+
+    A per-request failure: the batch halves and falls back to single lines,
+    and a blocked single line is reported on that entry.
+    """
+
+
 # Regex to strip Qwen3 thinking blocks (<think>...</think>) that waste
 # tokens and slow down inference.  These appear when the model's internal
 # chain-of-thought mode is enabled (Qwen3 default).
@@ -863,7 +887,7 @@ class AIClient:
             # Friendly error messages for common failures
             body = r.text[:200]
             if r.status_code == 404:
-                raise ConnectionError(
+                raise ModelNotFound(
                     f"Model '{model}' not found. "
                     f"Run: ollama pull {model}"
                 )
@@ -1031,7 +1055,7 @@ class AIClient:
         try:
             response = client.chat.completions.create(**params)
         except openai.AuthenticationError:
-            raise ConnectionError(
+            raise InvalidApiKey(
                 f"Invalid API key for {self.provider}. "
                 "Check your key in Settings."
             )
@@ -1048,7 +1072,14 @@ class AIClient:
 
         content = ""
         if response.choices:
-            content = response.choices[0].message.content or ""
+            choice = response.choices[0]
+            message = getattr(choice, "message", None)
+            finish = getattr(choice, "finish_reason", None)
+            text = getattr(message, "content", None) if message is not None else None
+            if message is None or (not text and finish == "content_filter"):
+                # Safety filter: no message, or a filtered empty one.
+                raise ContentBlocked(f"Blocked by {self.provider}'s content filter")
+            content = text or ""
 
         # Track token usage for cost calculation (thread-safe for parallel workers)
         if hasattr(response, "usage") and response.usage:
@@ -1114,7 +1145,7 @@ class AIClient:
             if r.status_code != 200:
                 body = r.text[:200]
                 if r.status_code == 404:
-                    raise ConnectionError(
+                    raise ModelNotFound(
                         f"Model '{self.model}' not found. "
                         f"Run: ollama pull {self.model}"
                     )
@@ -2090,19 +2121,20 @@ class AIClient:
             "Do not add any text outside the JSON."
         )
 
-        messages = [{"role": "system", "content": batch_sys}]
-
-        # Translation history as context (DazedMTL passes previous translations)
+        # Translation history as context (DazedMTL passes previous translations).
+        # Folded into the ONE system message: strict chat templates (Qwen 3.5)
+        # reject a second system message.
         if history:
             history_lines = []
             for hist_jp, hist_en in self._placeholder_history(history[-10:]):
                 history_lines.append(f"JP: {hist_jp}")
                 history_lines.append(f"EN: {hist_en}")
-            messages.append({
-                "role": "system",
-                "content": "Translation History (for context — maintain consistent "
-                           "style and pronouns):\n" + "\n".join(history_lines),
-            })
+            batch_sys += (
+                "\n\nTranslation History (for context — maintain consistent "
+                "style and pronouns):\n" + "\n".join(history_lines)
+            )
+
+        messages = [{"role": "system", "content": batch_sys}]
 
         # Build user message (context/glossary/actors ONCE for entire batch)
         user_msg = ""

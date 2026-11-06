@@ -7,7 +7,8 @@ import requests
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
-from .ai_client import AIClient, RateLimited, ServerUnreachable
+from .ai_client import (AIClient, ContentBlocked, FatalProviderError,
+                        RateLimited, ServerUnreachable)
 from .project_model import TranslationEntry
 
 log = logging.getLogger(__name__)
@@ -137,6 +138,7 @@ class TranslationWorker(QObject):
     finished = pyqtSignal()
     error = pyqtSignal(str, str)            # entry_id, error_message
     connection_error = pyqtSignal(str)      # error message — fired on each server-down event
+    fatal_error = pyqtSignal(str)           # unrecoverable (bad model/key) — stop the run
 
     def __init__(self, client: AIClient, entries: list,
                  mode: str = "translate", max_history: int = 10,
@@ -207,6 +209,9 @@ class TranslationWorker(QObject):
                 self._history.append((entry.original, result))
                 if len(self._history) > self.max_history:
                     self._history = self._history[-self.max_history:]
+        except FatalProviderError as e:
+            self._cancelled = True
+            self.fatal_error.emit(str(e))
         except (ConnectionError, requests.RequestException, ValueError, OSError) as e:
             if _is_server_down_error(e):
                 self.connection_error.emit(str(e))
@@ -230,6 +235,7 @@ class BatchTranslationWorker(QObject):
     finished = pyqtSignal()
     error = pyqtSignal(str, str)            # entry_id, error_message
     connection_error = pyqtSignal(str)      # error message — fired on each server-down event
+    fatal_error = pyqtSignal(str)           # unrecoverable (bad model/key) — stop the run
 
     MAX_RETRIES = 2
 
@@ -361,7 +367,22 @@ class BatchTranslationWorker(QObject):
                              self.batch_size, self.RECOVER_AFTER)
                 return  # Done with this batch
 
+            except FatalProviderError as e:
+                # Can never succeed on retry — stop this worker; the engine
+                # cancels the rest and tells the user once. Untouched lines
+                # stay untranslated (not errored).
+                log.error("Unrecoverable provider error, stopping run: %s", e)
+                self._cancelled = True
+                self.fatal_error.emit(str(e))
+                return
             except (ConnectionError, ValueError, OSError) as e:
+                if isinstance(e, ContentBlocked):
+                    log.warning("Batch of %d blocked (%s) — falling back to single lines",
+                                len(batch), e)
+                    self.batch_size = max(1, self.batch_size // 2)
+                    self._successes_since_fail = 0
+                    self._fallback_single(batch)
+                    return
                 log.warning("Batch attempt %d failed: %s", attempt + 1, e)
                 if _is_server_down_error(e):
                     self.connection_error.emit(str(e))
@@ -415,6 +436,10 @@ class BatchTranslationWorker(QObject):
                     self._history.append((entry.original, result))
                     if len(self._history) > self.max_history:
                         self._history = self._history[-self.max_history:]
+            except FatalProviderError as e:
+                self._cancelled = True
+                self.fatal_error.emit(str(e))
+                return
             except (ConnectionError, requests.RequestException, ValueError, OSError) as e:
                 if _is_server_down_error(e):
                     self.connection_error.emit(str(e))
@@ -569,6 +594,7 @@ class TranslationEngine(QObject):
             worker.entry_done.connect(self._on_entry_done)
             worker.error.connect(self.error.emit)
             worker.connection_error.connect(self._on_connection_error)
+            worker.fatal_error.connect(self._on_fatal_error)
             worker.finished.connect(self._on_worker_finished)
 
             self._threads.append(thread)
@@ -632,6 +658,7 @@ class TranslationEngine(QObject):
             worker.entry_done.connect(self._on_entry_done)
             worker.error.connect(self.error.emit)
             worker.connection_error.connect(self._on_connection_error)
+            worker.fatal_error.connect(self._on_fatal_error)
             worker.finished.connect(self._on_worker_finished)
 
             self._threads.append(thread)
@@ -694,6 +721,21 @@ class TranslationEngine(QObject):
         self._translate_count += 1
         if self._translate_count % self.CHECKPOINT_INTERVAL == 0:
             self.checkpoint.emit()
+
+    def _on_fatal_error(self, msg: str):
+        """Unrecoverable provider error (missing model, bad key): stop the run
+        once. Reuses the server-down pause path so the UI shows the message.
+        """
+        if self._server_down_emitted or self._cancelled:
+            return
+        self._server_down_emitted = True
+        log.error("Run stopped by unrecoverable error: %s", msg)
+        self._cancelled = True
+        self.client.cancel_event.set()
+        for w in self._workers:
+            if hasattr(w, "cancel"):
+                w.cancel()
+        self.server_down.emit(msg)
 
     def _on_connection_error(self, msg: str):
         """Track connection errors; trigger server_down if rate threshold hit.
