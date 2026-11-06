@@ -13,6 +13,7 @@ The release workflow publishes the section whose heading matches the pushed tag
 - Qwen 3.5 and other strict local models no longer reject batches with "System message must be at the beginning".
 - Lines blocked by an online model's content filter are now marked as blocked instead of crashing the batch.
 - A missing model or a bad API key now stops the run once with a clear message instead of retrying every line.
+- Online AI models now keep their own batch size and worker count per engine, so switching to Gemini (or any cloud model) no longer uses your local 5-line batches. Your existing local values are unchanged; Settings shows which set the Engines tab is editing.
 - Running from source on Linux or macOS no longer crashes when unloading models, starting
   Ollama or using Open in RPG Maker. These systems still aren't officially supported. Install
   Ollama for your system, start it yourself (`ollama serve`) and pull your model
