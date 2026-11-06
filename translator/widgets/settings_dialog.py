@@ -14,6 +14,7 @@ from ..ai_client import (
     TARGET_LANGUAGES, build_system_prompt, is_sugoi_model,
     PROVIDERS, PROVIDER_MODELS, PROMPT_PRESETS, DAZEDMTL_FULL_PROMPT,
     get_model_pricing, CLOUD_DEFAULT_WORKERS, LOCAL_DEFAULT_WORKERS,
+    fetch_cloud_models,
 )
 from ..rpgmaker_mv import RPGMakerMVParser
 from .model_suggestion_dialog import (
@@ -137,6 +138,7 @@ class SettingsDialog(QDialog):
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_edit.setPlaceholderText("Enter API key...")
+        self.api_key_edit.editingFinished.connect(self._on_api_key_edited)
         self._api_key_label = QLabel("API Key:")
         form.addRow(self._api_key_label, self.api_key_edit)
 
@@ -734,17 +736,12 @@ class SettingsDialog(QDialog):
         # Populate model combo with provider presets (cloud) or fetch (Ollama)
         if is_cloud and not is_custom:
             models = PROVIDER_MODELS.get(provider, [])
-            current = self.model_combo.currentText()
-            self.model_combo.blockSignals(True)
-            self.model_combo.clear()
-            for m in models:
-                self.model_combo.addItem(m)
-            # Keep current if it's in the new list, else pick first
-            if current in models:
-                self.model_combo.setCurrentText(current)
-            self.model_combo.blockSignals(False)
-            self.status_label.setText(f"{provider}: {len(models)} model(s) available")
+            self._fill_cloud_models(provider, models)
+            self.status_label.setText(f"{provider}: {len(models)} suggested model(s)")
             self.status_label.setStyleSheet(f"color: {theme.c('accent')};")
+            if self.api_key_edit.text().strip():
+                # Replace the suggestions with the provider's own list
+                self._start_cloud_model_fetch()
         elif is_ollama:
             # Fetch models from Ollama in background
             self.status_label.setStyleSheet("")
@@ -920,6 +917,100 @@ class SettingsDialog(QDialog):
         """Fetch available models from Ollama (used by Refresh button)."""
         self._start_model_fetch()
 
+    # ── Cloud model list ─────────────────────────────────────────────
+
+    def _fill_cloud_models(self, provider: str, models: list,
+                           prefer: str = ""):
+        """Fill the model combo for a cloud provider.
+
+        Keeps ``prefer`` (a model the user picked or typed), even if the
+        provider doesn't list it. Otherwise keeps the current model if
+        listed; otherwise keeps the saved model when this is the saved
+        provider (even if the provider doesn't list it), else selects the
+        first entry.
+        """
+        current = self.model_combo.currentText().strip()
+        if prefer:
+            keep = prefer
+        elif current in models:
+            keep = current
+        elif provider == self.client.provider and self.client.model:
+            keep = self.client.model
+        else:
+            keep = ""
+        items = list(models)
+        if keep and keep not in items:
+            items.insert(0, keep)
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        self.model_combo.addItems(items)
+        if keep:
+            self.model_combo.setCurrentText(keep)
+        self.model_combo.blockSignals(False)
+
+    def _start_cloud_model_fetch(self, again: bool = False):
+        """Read the provider's model list on a worker thread.
+
+        ``again`` is the queued re-fetch: it keeps the combo text recorded
+        when the fetch was first asked for.
+        """
+        if not again:
+            # What the combo showed when the fetch was asked for: if the
+            # user changes it while the list loads, their choice wins.
+            self._cloud_fetch_shown = self.model_combo.currentText()
+        worker = getattr(self, "_cloud_model_worker", None)
+        if worker is not None and worker.isRunning():
+            # Never overwrite a running QThread; fetch again when it ends
+            self._cloud_fetch_again = True
+            return
+        self._cloud_fetch_again = False
+        provider = self.provider_combo.currentText()
+        api_key = self.api_key_edit.text().strip()
+        self._cloud_fetch_key = api_key
+        self._cloud_model_worker = _CallWorker(
+            lambda: fetch_cloud_models(provider, api_key), parent=self)
+        self._cloud_model_worker.done.connect(
+            lambda result: self._on_cloud_models_fetched(provider, result))
+        self.status_label.setText(f"Reading {provider} model list...")
+        self._cloud_model_worker.start()
+
+    def _on_api_key_edited(self):
+        """Read the model list again once a new API key is entered."""
+        provider = self.provider_combo.currentText()
+        key = self.api_key_edit.text().strip()
+        if (provider in ("Ollama (Local)", "Custom") or not key
+                or key == getattr(self, "_cloud_fetch_key", None)):
+            return
+        self._start_cloud_model_fetch()
+
+    def _on_cloud_models_fetched(self, provider: str, result):
+        """Show the fetched list. ``result`` is ``(models, live)``, or None
+        if the worker raised."""
+        if getattr(self, "_cloud_fetch_again", False):
+            # Provider or key changed while this ran: fetch for the new one
+            self._cloud_fetch_again = False
+            self._cloud_model_worker.wait()  # emitting done was its last step
+            if self.provider_combo.currentText() not in ("Ollama (Local)", "Custom"):
+                self._start_cloud_model_fetch(again=True)
+            return
+        if provider != self.provider_combo.currentText():
+            return  # user switched provider while this was running
+        models, live = result if result else ([], False)
+        if live and models:
+            before = self.model_combo.currentText()
+            changed = before != getattr(self, "_cloud_fetch_shown", before)
+            self._fill_cloud_models(provider, models,
+                                    prefer=before.strip() if changed else "")
+            if self.model_combo.currentText() != before and not self._loading:
+                self._on_model_changed(self.model_combo.currentText())
+            self.status_label.setText(f"{provider}: {len(models)} model(s) available")
+            self.status_label.setStyleSheet(f"color: {theme.c('ok')};")
+        else:
+            # Keep the suggestions already shown
+            self.status_label.setText(
+                f"Could not read {provider}'s model list; showing suggestions")
+            self.status_label.setStyleSheet(f"color: {theme.c('caution')};")
+
     def _test_connection(self):
         """Test if the translation backend is reachable without mutating shared client.
 
@@ -1066,7 +1157,7 @@ class SettingsDialog(QDialog):
 
     def done(self, result):
         """Wait for background threads before the dialog goes away."""
-        for name in ("_model_fetcher", "_test_worker"):
+        for name in ("_model_fetcher", "_test_worker", "_cloud_model_worker"):
             worker = getattr(self, name, None)
             if worker is not None and worker.isRunning():
                 try:

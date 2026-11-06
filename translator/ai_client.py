@@ -95,6 +95,24 @@ def _is_reasoning_model(model: str) -> bool:
     return m.startswith("gpt-5") or bool(re.match(r'o\d', m))
 
 
+def _accepts_sampling_params(provider: str, model: str) -> bool:
+    """True if this provider/model is known to accept temperature, max_tokens
+    and frequency_penalty.
+
+    An allow-list: models not known to accept them get max_completion_tokens
+    and no temperature. Newer OpenAI models (gpt-5*, gpt-6*, o*) and Claude
+    4.7+ return a 400 error for temperature.
+    """
+    if provider in ("Ollama (Local)", "DeepSeek", "Google Gemini"):
+        return True
+    if provider == "OpenAI":
+        return (model or "").lower().startswith(("gpt-4", "gpt-3.5"))
+    if provider == "Custom":
+        # Unknown server: keep the old name-based rule.
+        return not _is_reasoning_model(model)
+    return False  # Anthropic, and any provider not listed above
+
+
 def _estimate_num_ctx(messages: list, num_predict: int, floor: int = 4096) -> int:
     """Context window sized to the prompt: ~2 chars/token (JP-heavy), capped 16K."""
     chars = sum(len(m.get("content", "")) for m in messages
@@ -485,38 +503,44 @@ PROVIDER_URLS = {
     "Custom": None,                    # uses self.base_url
 }
 
+# Built-in suggestions, cheapest first. With an API key the settings dialog
+# reads the provider's own list instead (fetch_cloud_models); these are the
+# fallback when that call fails. Checked against each provider's deprecation
+# page on 2026-11-05: none has a shutdown date.
 PROVIDER_MODELS = {
     "Ollama (Local)": [],              # fetched dynamically from Ollama
-    "OpenAI": ["gpt-4.1-mini", "gpt-4.1", "gpt-4.1-nano", "gpt-5"],
+    "OpenAI": ["gpt-6-luna", "gpt-5.6-luna", "gpt-6-sol"],
     "Google Gemini": [
-        "gemini-2.0-flash-lite", "gemini-2.0-flash",
-        "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro",
+        "gemini-3.5-flash-lite", "gemini-3.8-flash",
     ],
-    "DeepSeek": ["deepseek-chat"],
-    "Anthropic": ["claude-sonnet-4-5-20250929"],
+    "DeepSeek": ["deepseek-flash", "deepseek-v4-pro"],
+    "Anthropic": ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"],
     "Custom": [],
 }
 
 # ── Model pricing & config (ported from DazedMTL's getPricingConfig) ──
 # Each entry: input/output = $ per 1M tokens, batch_size = lines per API
 # request, frequency_penalty = repetition penalty (0 for Gemini).
+# Prices are standard (non-batch) rates from each provider's pricing page,
+# 2026-11-05. Models without a verified price are left out: the cost line
+# then says "unknown" instead of guessing.
 
 MODEL_PRICING = {
-    # OpenAI
-    "gpt-4.1-mini":              {"input": 0.40,  "output": 1.60,  "batch_size": 30, "frequency_penalty": 0.05},
-    "gpt-4.1":                   {"input": 2.00,  "output": 8.00,  "batch_size": 30, "frequency_penalty": 0.05},
-    "gpt-4.1-nano":              {"input": 0.10,  "output": 0.40,  "batch_size": 30, "frequency_penalty": 0.05},
-    "gpt-5":                     {"input": 1.25,  "output": 10.00, "batch_size": 30, "frequency_penalty": 0.05},
-    # DeepSeek
-    "deepseek-chat":             {"input": 0.27,  "output": 1.10,  "batch_size": 30, "frequency_penalty": 0.05},
-    # Anthropic
-    "claude-sonnet-4-5-20250929": {"input": 3.00,  "output": 15.00, "batch_size": 30, "frequency_penalty": 0.05},
+    # OpenAI (frequency_penalty only goes to gpt-4*/gpt-3.5 models)
+    "gpt-6-luna":                {"input": 0.10,  "output": 0.50,  "batch_size": 30, "frequency_penalty": 0.05},
+    "gpt-5.6-luna":              {"input": 0.20,  "output": 1.20,  "batch_size": 30, "frequency_penalty": 0.05},
+    "gpt-6-sol":                 {"input": 2.00,  "output": 10.00, "batch_size": 30, "frequency_penalty": 0.05},
+    # DeepSeek: peak-hour cache-miss rates (off-peak is half)
+    "deepseek-flash":            {"input": 0.30,  "output": 1.20,  "batch_size": 30, "frequency_penalty": 0.05},
+    "deepseek-v4-pro":           {"input": 1.32,  "output": 3.96,  "batch_size": 30, "frequency_penalty": 0.05},
+    # Anthropic (Haiku 5.5: prompts up to 100K tokens)
+    "claude-haiku-5-5":          {"input": 0.10,  "output": 0.50,  "batch_size": 30, "frequency_penalty": 0.0},
+    "claude-sonnet-5-5":         {"input": 2.00,  "output": 10.00, "batch_size": 30, "frequency_penalty": 0.0},
+    "claude-opus-5-5":           {"input": 4.00,  "output": 20.00, "batch_size": 30, "frequency_penalty": 0.0},
     # Google Gemini (no frequency_penalty support)
-    "gemini-2.0-flash-lite":     {"input": 0.075, "output": 0.30,  "batch_size": 30, "frequency_penalty": 0.0},
-    "gemini-2.0-flash":          {"input": 0.10,  "output": 0.40,  "batch_size": 30, "frequency_penalty": 0.0},
-    "gemini-2.5-flash-lite":     {"input": 0.10,  "output": 0.40,  "batch_size": 30, "frequency_penalty": 0.0},
-    "gemini-2.5-flash":          {"input": 0.30,  "output": 2.50,  "batch_size": 30, "frequency_penalty": 0.0},
-    "gemini-2.5-pro":            {"input": 1.25,  "output": 10.00, "batch_size": 30, "frequency_penalty": 0.0},
+    "gemini-3.5-flash-lite":     {"input": 0.30,  "output": 2.50,  "batch_size": 30, "frequency_penalty": 0.0},
+    # gemini-3.8-flash: $0.75/$3.75 until 2026-12-31; this is the 2027 rate
+    "gemini-3.8-flash":          {"input": 1.50,  "output": 7.50,  "batch_size": 30, "frequency_penalty": 0.0},
 }
 
 # Default workers for cloud vs local
@@ -534,7 +558,7 @@ def get_model_pricing(model: str) -> dict:
     # Exact match first
     if model in MODEL_PRICING:
         return {**_defaults, **MODEL_PRICING[model]}
-    # Substring match (e.g. "gpt-4.1-mini-2025-04-14" matches "gpt-4.1-mini")
+    # Substring match (e.g. "gpt-6-luna-2026-10-14" matches "gpt-6-luna")
     for key, pricing in MODEL_PRICING.items():
         if key in model:
             return {**_defaults, **pricing}
@@ -546,6 +570,70 @@ def calculate_cost(input_tokens: int, output_tokens: int, model: str) -> float:
     pricing = get_model_pricing(model)
     return (input_tokens / 1_000_000) * pricing["input"] + \
            (output_tokens / 1_000_000) * pricing["output"]
+
+
+# Model ids containing any of these are not text chat models
+# (embeddings, speech, images, video, moderation, realtime, search agents...).
+_NON_CHAT_MODEL_MARKERS = (
+    "embed", "tts", "whisper", "transcribe", "audio", "realtime", "live",
+    "dall-e", "image", "imagen", "veo", "lyria", "nano-banana", "omni",
+    "moderation", "search", "computer-use", "robotics", "antigravity",
+    "codex", "babbage", "davinci", "sora", "aqa",
+)
+
+
+def filter_chat_models(ids) -> list[str]:
+    """Keep text chat model ids from a provider's model list, in order.
+
+    Strips the ``models/`` prefix the Gemini endpoint uses, and drops
+    blanks, duplicates and non-chat models.
+    """
+    out: list[str] = []
+    for raw in ids:
+        if not isinstance(raw, str):
+            continue
+        mid = raw.strip()
+        if mid.startswith("models/"):
+            mid = mid[len("models/"):]
+        low = mid.lower()
+        if not mid or mid in out or any(m in low for m in _NON_CHAT_MODEL_MARKERS):
+            continue
+        out.append(mid)
+    return out
+
+
+def fetch_cloud_models(provider: str, api_key: str,
+                       base_url: str | None = None,
+                       timeout: float = 10) -> tuple[list[str], bool]:
+    """Read the provider's model list. Blocking: call it off the UI thread.
+
+    Returns ``(models, live)``. ``live`` is False when the built-in
+    PROVIDER_MODELS list is returned instead: no key, the call failed, or
+    the provider listed no chat models. Never returns an empty list for a
+    provider that has built-in suggestions.
+    """
+    fallback = list(PROVIDER_MODELS.get(provider, []))
+    if not api_key:
+        return fallback, False
+    try:
+        import openai
+        client = openai.OpenAI(api_key=api_key,
+                               base_url=base_url or PROVIDER_URLS.get(provider),
+                               timeout=timeout, max_retries=0)
+        ids = [getattr(m, "id", None) for m in client.models.list()]
+    except Exception as e:
+        # Any failure (network, bad key, missing SDK, odd reply) only means
+        # "no live list": the caller shows the built-in list and says so.
+        # Only the error type is logged: some SDK messages echo part of the key.
+        log.warning("Could not read %s's model list (%s)", provider,
+                    type(e).__name__)
+        return fallback, False
+    models = filter_chat_models(ids)
+    if not models:
+        return fallback, False
+    # Built-in suggestions (cheapest first) lead, then the rest A-Z
+    first = [m for m in fallback if m in models]
+    return first + sorted(m for m in models if m not in first), True
 
 # ── Prompt presets ──────────────────────────────────────────────────
 
@@ -711,6 +799,14 @@ class AIClient:
         cost = self.session_cost
         if cost <= 0 and not self.is_cloud:
             return ""
+        pricing = get_model_pricing(self.model)
+        if self.is_cloud and pricing["input"] == 0 and pricing["output"] == 0:
+            # No known price (e.g. a model read from the provider's list)
+            return (
+                f"Tokens: {self.session_input_tokens:,} in / "
+                f"{self.session_output_tokens:,} out | "
+                "Cost: unknown (no price on file for this model)"
+            )
         return (
             f"Tokens: {self.session_input_tokens:,} in / "
             f"{self.session_output_tokens:,} out | "
@@ -884,17 +980,18 @@ class AIClient:
 
         # Extract Ollama-style options and map to OpenAI params
         options = kwargs.get("options", {})
-        reasoning = _is_reasoning_model(model)
+        sampling = _accepts_sampling_params(self.provider, model)
         params: dict = {
             "model": model,
             "messages": messages,
         }
-        if reasoning:
-            # gpt-5* / o*: no temperature, max_completion_tokens instead of max_tokens
-            params["max_completion_tokens"] = options.get("num_predict", 1024)
-        else:
+        if sampling:
             params["temperature"] = options.get("temperature", 0)
             params["max_tokens"] = options.get("num_predict", 1024)
+        else:
+            # Newer OpenAI models and Claude: no temperature,
+            # max_completion_tokens instead of max_tokens
+            params["max_completion_tokens"] = options.get("num_predict", 1024)
 
         # JSON mode: enforce structured output for batch translation
         fmt = kwargs.get("format")
@@ -905,8 +1002,10 @@ class AIClient:
                 "type": "json_schema",
                 "json_schema": json_schema,
             }
-        elif fmt == "json":
-            # Generic JSON mode — ensures valid JSON output
+        elif fmt == "json" and self.provider != "Anthropic":
+            # Generic JSON mode — ensures valid JSON output.
+            # Claude's OpenAI layer returns 400 for json_object; the prompt
+            # already asks for JSON only.
             params["response_format"] = {"type": "json_object"}
 
         # Provider-specific adjustments (ported from DazedMTL)
@@ -914,13 +1013,19 @@ class AIClient:
         freq_penalty = model_config.get("frequency_penalty", 0.0)
 
         if self.provider == "Google Gemini":
-            # Gemini doesn't support seed or frequency_penalty via compat layer
-            pass
+            # Gemini doesn't support seed or frequency_penalty via compat layer.
+            # Gemini 3.x thinks by default and the thinking counts against
+            # max_tokens: a 256-token name call came back cut off. "low"
+            # keeps replies whole (and cheaper) on every 3.x model, and on
+            # the -latest aliases, which point at 3.x.
+            if (model.startswith("gemini-")
+                    and not model.startswith(("gemini-1", "gemini-2"))):
+                params["reasoning_effort"] = "low"
         else:
             seed = options.get("seed")
             if seed is not None:
                 params["seed"] = seed
-            if freq_penalty > 0 and not reasoning:
+            if freq_penalty > 0 and sampling:
                 params["frequency_penalty"] = freq_penalty
 
         try:

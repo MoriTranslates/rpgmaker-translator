@@ -195,7 +195,7 @@ with this app; it should be more accurate but much slower.
 
 ### No GPU? Use Cloud APIs
 
-In Settings, switch Provider to OpenAI/Gemini/DeepSeek/Anthropic, enter your API key, and go. Same workflow, same features, pay per token. Cheapest option: **Gemini 2.0 Flash** at $0.10/$0.40 per 1M tokens.
+In Settings, switch Provider to OpenAI/Gemini/DeepSeek/Anthropic, enter your API key, and go. Same workflow, same features, pay per token. Cheapest options: **gpt-6-luna** or **Claude Haiku 5.5** at $0.10/$0.50 per 1M tokens (prices checked November 2026).
 
 > **Note:** Cloud APIs may refuse or filter adult content and can ban accounts for repeated NSFW requests. For unrestricted translation of all content types, use Local LLM — everything runs on your GPU, nothing is sent to the cloud.
 
@@ -207,12 +207,12 @@ In Settings, switch Provider to OpenAI/Gemini/DeepSeek/Anthropic, enter your API
 
 | Provider | Models | Pricing (per 1M tokens) |
 |---|---|---|
-| **Google Gemini** | gemini-2.0-flash, 2.5-flash, 2.5-pro | $0.10–$1.25 in / $0.40–$10.00 out |
-| **OpenAI** | gpt-4.1-mini, gpt-4.1, gpt-5 | $0.40–$2.00 in / $1.60–$10.00 out |
-| **DeepSeek** | deepseek-chat | $0.27 in / $1.10 out |
-| **Anthropic** | claude-sonnet-4.5 | $3.00 in / $15.00 out |
+| **Google Gemini** | gemini-3.5-flash-lite, gemini-3.8-flash | $0.30–$1.50 in / $2.50–$7.50 out |
+| **OpenAI** | gpt-6-luna, gpt-5.6-luna, gpt-6-sol | $0.10–$2.00 in / $0.50–$10.00 out |
+| **DeepSeek** | deepseek-flash, deepseek-v4-pro | $0.30–$1.32 in / $1.20–$3.96 out (peak hours; off-peak is half) |
+| **Anthropic** | claude-haiku-5-5, claude-sonnet-5-5, claude-opus-5-5 | $0.10–$4.00 in / $0.50–$20.00 out |
 
-All providers use the OpenAI SDK as a universal abstraction. Switch in Settings > Provider, enter your API key, and the rest is automatic — batch size, workers, and prompt presets auto-configure.
+All providers use the OpenAI SDK as a universal abstraction. Switch in Settings > Provider, enter your API key, and the rest is automatic — batch size, workers, and prompt presets auto-configure. With a key entered, the model list is read from the provider itself; the models above are the built-in suggestions used when that fails. Prices were checked in November 2026 and change often; a model with no price on file shows its cost as "unknown".
 
 ---
 

@@ -5721,7 +5721,7 @@ class MainWindow(QMainWindow):
             return
         from datetime import datetime
 
-        # Build filename: Review_DeepSeek_deepseek-chat_2026-02-15.txt
+        # Build filename: Review_DeepSeek_deepseek-flash_2026-02-15.txt
         provider = self.client.provider.replace(" ", "").replace("(", "").replace(")", "")
         model = self.client.model.replace("/", "-").replace(":", "-")
         date_str = datetime.now().strftime("%Y-%m-%d")
