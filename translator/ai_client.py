@@ -565,6 +565,47 @@ def get_model_pricing(model: str) -> dict:
     return _defaults
 
 
+def cloud_default_batch(model: str) -> int:
+    """Batch size an online model should start with.
+
+    The model's pricing-table value, or 30 (the DazedMTL default) for a
+    model that isn't listed.
+    """
+    if model and (model in MODEL_PRICING
+                  or any(key in model for key in MODEL_PRICING)):
+        return get_model_pricing(model)["batch_size"]
+    return 30
+
+
+def _pos_int(value) -> int | None:
+    """A saved setting as a positive int, or None if it is missing/odd."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def engine_batch_workers(overrides, is_cloud: bool, model: str,
+                         default_batch: int) -> tuple[int, int | None]:
+    """Pick the saved batch size / workers set that matches the provider.
+
+    ``batch_size``/``workers`` are the local (Ollama) set, kept under the
+    old key names so older files and app versions keep working;
+    ``cloud_batch_size``/``cloud_workers`` are the online set.  Returns
+    ``(batch, workers)``; workers is None for a local set with no saved
+    value (leave the engine's worker count alone).
+    """
+    if not isinstance(overrides, dict):
+        overrides = {}
+    if is_cloud:
+        batch = _pos_int(overrides.get("cloud_batch_size"))
+        workers = _pos_int(overrides.get("cloud_workers"))
+        return (batch if batch is not None else cloud_default_batch(model),
+                workers if workers is not None else CLOUD_DEFAULT_WORKERS)
+    batch = _pos_int(overrides.get("batch_size"))
+    return (batch if batch is not None else default_batch,
+            _pos_int(overrides.get("workers")))
+
+
 def calculate_cost(input_tokens: int, output_tokens: int, model: str) -> float:
     """Calculate cost in USD from token counts and model name."""
     pricing = get_model_pricing(model)

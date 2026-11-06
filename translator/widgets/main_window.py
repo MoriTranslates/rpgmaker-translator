@@ -25,7 +25,7 @@ from ..resource_paths import app_dir
 from .. import game_io
 from ..game_io import PartialExportError
 from ..utils import create_junction, open_with_default_app
-from ..ai_client import AIClient, build_system_prompt
+from ..ai_client import AIClient, build_system_prompt, engine_batch_workers
 from ..rpgmaker_mv import RPGMakerMVParser
 from ..tyranoscript import TyranoScriptParser
 from ..srpgstudio import SRPGStudioParser
@@ -2287,6 +2287,8 @@ class MainWindow(QMainWindow):
         handler = self.handler
         # Load saved per-engine overrides
         overrides = self._engine_overrides.get(engine_key, {})
+        if not isinstance(overrides, dict):
+            overrides = {}
 
         # Context size
         ctx = overrides.get("context_size", handler.default_context_size)
@@ -2298,14 +2300,21 @@ class MainWindow(QMainWindow):
                 if hasattr(h.parser, 'context_size'):
                     h.parser.context_size = ctx
 
-        # Batch size
-        batch = overrides.get("batch_size", handler.default_batch_size)
+        # Model (falls back to the global model so an override from a
+        # previous engine never sticks); chosen first because the online
+        # batch default depends on it
+        model = overrides.get("model", "")
+        self.client.model = model or self._global_model
+
+        # Batch size / workers: the set that matches the provider, so local
+        # Ollama values never leak into an online run (or the reverse)
+        batch, workers = engine_batch_workers(
+            overrides, self.client.is_cloud, self.client.model,
+            handler.default_batch_size)
         if self.engine:
             self.engine.batch_size = batch
-
-        # Workers
-        if "workers" in overrides and self.engine:
-            self.engine.num_workers = overrides["workers"]
+            if workers is not None:
+                self.engine.num_workers = workers
 
         # Word wrap chars/line
         ww = overrides.get("wordwrap_chars", handler.default_wordwrap_chars)
@@ -2314,25 +2323,26 @@ class MainWindow(QMainWindow):
             if ww > 0:
                 self.plugin_analyzer.chars_per_line = ww
 
-        # Per-engine model override (falls back to the global model so an
-        # override from a previous engine never sticks)
-        model = overrides.get("model", "")
-        self.client.model = model or self._global_model
-
     def _save_engine_settings(self):
         """Save current settings as per-engine overrides for the active engine."""
         engine_key = self._project_type
-        overrides = {}
+        existing = self._engine_overrides.get(engine_key, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        # Keep the other provider kind's batch/workers set untouched
+        overrides = {k: existing[k] for k in
+                     ("batch_size", "workers",
+                      "cloud_batch_size", "cloud_workers") if k in existing}
         if self.handler.parser:
             overrides["context_size"] = self.handler.parser.context_size
         if self.engine:
-            overrides["batch_size"] = self.engine.batch_size
-            overrides["workers"] = self.engine.num_workers
+            prefix = "cloud_" if self.client.is_cloud else ""
+            overrides[prefix + "batch_size"] = self.engine.batch_size
+            overrides[prefix + "workers"] = self.engine.num_workers
         if self.plugin_analyzer:
             overrides["wordwrap_chars"] = getattr(
                 self.plugin_analyzer, '_manual_chars_per_line', 0)
         # Preserve model override if one was set
-        existing = self._engine_overrides.get(engine_key, {})
         if "model" in existing:
             overrides["model"] = existing["model"]
         self._engine_overrides[engine_key] = overrides
@@ -4240,6 +4250,17 @@ class MainWindow(QMainWindow):
             self.parser.extract_comments = cfg["extract_comments"]
         if "engine_settings" in cfg and isinstance(cfg["engine_settings"], dict):
             self._engine_overrides = cfg["engine_settings"]
+            # The global batch/workers keys come from whichever provider was
+            # active when saved (or from an older app version); before a
+            # project loads, use the saved set that matches this provider
+            saved = self._engine_overrides.get(self._project_type)
+            if isinstance(saved, dict):
+                batch, workers = engine_batch_workers(
+                    saved, self.client.is_cloud, self.client.model,
+                    self.handler.default_batch_size)
+                self.engine.batch_size = batch
+                if workers is not None:
+                    self.engine.num_workers = workers
         if isinstance(cfg.get("ui_state"), dict):
             self._ui_state = cfg["ui_state"]
         if isinstance(cfg.get("recent_projects"), list):

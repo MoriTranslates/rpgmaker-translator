@@ -13,8 +13,8 @@ from ..ai_client import (
     AIClient, SYSTEM_PROMPT, SUGOI_SYSTEM_PROMPT, TYRANO_SYSTEM_PROMPT,
     TARGET_LANGUAGES, build_system_prompt, is_sugoi_model,
     PROVIDERS, PROVIDER_MODELS, PROMPT_PRESETS, DAZEDMTL_FULL_PROMPT,
-    get_model_pricing, CLOUD_DEFAULT_WORKERS, LOCAL_DEFAULT_WORKERS,
-    fetch_cloud_models,
+    CLOUD_DEFAULT_WORKERS, LOCAL_DEFAULT_WORKERS,
+    cloud_default_batch, engine_batch_workers, fetch_cloud_models,
 )
 from ..rpgmaker_mv import RPGMakerMVParser
 from .model_suggestion_dialog import (
@@ -84,6 +84,10 @@ class SettingsDialog(QDialog):
         self.engine = engine
         self.engine_overrides = engine_overrides or {}
         self.engine_handlers = engine_handlers or {}
+        # Which batch/workers set (local or online) the spinners show, and
+        # edits to the other kind that haven't been saved yet
+        self._cloud_view = client.is_cloud
+        self._pending_sets: dict = {}   # (engine key, is_cloud) -> (batch, workers)
         self.setWindowTitle("Settings")
         self.setMinimumSize(620, 520)
         # Tall enough for the Options page on a 1080p screen; it scrolls on
@@ -463,6 +467,9 @@ class SettingsDialog(QDialog):
 
         # Columns: Engine | Context | Batch | Workers | Model
         headers = ["Engine", "Context", "Batch", "Workers", "Model"]
+        kind = " (Online)" if self._cloud_view else " (Local)"
+        headers[2] += kind
+        headers[3] += kind
         engines = list(self.engine_handlers.values())
         # +1 row for the "Default" row at top
         num_rows = 1 + len(engines)
@@ -534,6 +541,8 @@ class SettingsDialog(QDialog):
             row = i + 1  # offset by 1 for default row
             key = handler.key
             overrides = self.engine_overrides.get(key, {})
+            if not isinstance(overrides, dict):
+                overrides = {}
 
             # Engine name (read-only)
             name_item = QTableWidgetItem(handler.display_name)
@@ -550,14 +559,18 @@ class SettingsDialog(QDialog):
             # Batch size spinner
             batch_spin = QSpinBox()
             batch_spin.setRange(1, 50)
-            batch_spin.setValue(overrides.get("batch_size", global_batch))
+            row_batch, row_workers = engine_batch_workers(
+                overrides, self._cloud_view,
+                overrides.get("model") or self.client.model, global_batch)
+            batch_spin.setValue(row_batch)
             batch_spin.setToolTip("Entries per LLM request")
             self.engine_table.setCellWidget(row, 2, batch_spin)
 
             # Workers spinner
             workers_spin = QSpinBox()
             workers_spin.setRange(1, 16)
-            workers_spin.setValue(overrides.get("workers", global_workers))
+            workers_spin.setValue(
+                row_workers if row_workers is not None else global_workers)
             workers_spin.setToolTip("Parallel translation threads")
             self.engine_table.setCellWidget(row, 3, workers_spin)
 
@@ -601,6 +614,49 @@ class SettingsDialog(QDialog):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(page)
         self.tabs.addTab(scroll, title)
+
+    def _engine_set_for(self, key: str, cloud: bool) -> tuple[int, int]:
+        """Batch/workers for an engine and provider kind: unsaved edits,
+        else the saved set, else that kind's defaults."""
+        if (key, cloud) in self._pending_sets:
+            return self._pending_sets[(key, cloud)]
+        ov = self.engine_overrides.get(key, {})
+        if not isinstance(ov, dict):
+            ov = {}
+        model = ov.get("model") or self.model_combo.currentText()
+        batch, workers = engine_batch_workers(ov, cloud, model, 5)
+        return batch, (workers if workers is not None
+                       else LOCAL_DEFAULT_WORKERS)
+
+    def _switch_engine_sets(self, to_cloud: bool):
+        """The provider changed between local and online: park the values
+        on screen for the old kind and show the new kind's set."""
+        old = self._cloud_view
+        active = getattr(self.client, "project_type", None)
+        for key, _ctx, batch, workers, _m in self._engine_spins:
+            if key == active:
+                shown = (self.batch_spin.value(), self.workers_spin.value())
+            else:
+                shown = (batch.value(), workers.value())
+            if shown != self._engine_set_for(key, old):
+                self._pending_sets[(key, old)] = shown
+        self._cloud_view = to_cloud
+        for key, _ctx, batch, workers, _m in self._engine_spins:
+            b, w = self._engine_set_for(key, to_cloud)
+            batch.setValue(b)
+            workers.setValue(w)
+            if key == active:
+                self.batch_spin.setValue(b)
+                self.workers_spin.setValue(w)
+        if active not in {k for k, *_ in self._engine_spins}:
+            self.batch_spin.setValue(
+                cloud_default_batch(self.model_combo.currentText())
+                if to_cloud else 5)
+            self.workers_spin.setValue(
+                CLOUD_DEFAULT_WORKERS if to_cloud else LOCAL_DEFAULT_WORKERS)
+        kind = " (Online)" if to_cloud else " (Local)"
+        self.engine_table.setHorizontalHeaderLabels(
+            ["Engine", "Context", "Batch" + kind, "Workers" + kind, "Model"])
 
     def _on_default_changed(self):
         """Push Default row values to all engine rows."""
@@ -750,14 +806,14 @@ class SettingsDialog(QDialog):
         # Auto-set batch size and workers based on provider/model (DazedMTL defaults)
         # Skip during initial load — saved values should be preserved
         if not self._loading:
-            if is_cloud:
-                model = self.model_combo.currentText()
-                config = get_model_pricing(model)
-                self.batch_spin.setValue(config.get("batch_size", 10))
+            if is_cloud != self._cloud_view:
+                # Local <-> online: show that kind's saved set (or defaults)
+                self._switch_engine_sets(is_cloud)
+            elif is_cloud:
+                # Online -> another online provider: start from the model's
+                self.batch_spin.setValue(
+                    cloud_default_batch(self.model_combo.currentText()))
                 self.workers_spin.setValue(CLOUD_DEFAULT_WORKERS)
-            elif is_ollama:
-                self.batch_spin.setValue(5)
-                self.workers_spin.setValue(LOCAL_DEFAULT_WORKERS)
 
     def _on_preset_changed(self, preset_name: str):
         """Load the selected prompt preset into the editor."""
@@ -844,9 +900,8 @@ class SettingsDialog(QDialog):
                 self.batch_spin.setValue(5)
                 self.workers_spin.setValue(LOCAL_DEFAULT_WORKERS)
             else:
-                model = self.model_combo.currentText()
-                config = get_model_pricing(model)
-                self.batch_spin.setValue(config.get("batch_size", 10))
+                self.batch_spin.setValue(
+                    cloud_default_batch(self.model_combo.currentText()))
                 self.workers_spin.setValue(CLOUD_DEFAULT_WORKERS)
             # Reset prompt to model default
             self._reset_prompt_default()
@@ -1135,8 +1190,7 @@ class SettingsDialog(QDialog):
         if not self._loading:
             provider = self.provider_combo.currentText()
             if provider != "Ollama (Local)":
-                config = get_model_pricing(model_name)
-                batch = config.get("batch_size", 10)
+                batch = cloud_default_batch(model_name)
                 if batch != self.batch_spin.value():
                     self.batch_spin.setValue(batch)
 
@@ -1251,10 +1305,25 @@ class SettingsDialog(QDialog):
                 workers_val = workers.value()
             override = {
                 "context_size": ctx_val,
-                "batch_size": batch_val,
-                "workers": workers_val,
                 "wordwrap_chars": ww_val,
             }
+            # Only the set for the provider kind on screen is overwritten;
+            # the other kind keeps what was saved (plus any edits made
+            # while it was on screen)
+            old = self.engine_overrides.get(key, {})
+            if not isinstance(old, dict):
+                old = {}
+            sets = dict(self._pending_sets)
+            sets[(key, self._cloud_view)] = (batch_val, workers_val)
+            for cloud, prefix in ((False, ""), (True, "cloud_")):
+                if (key, cloud) in sets:
+                    b, w = sets[(key, cloud)]
+                    override[prefix + "batch_size"] = b
+                    override[prefix + "workers"] = w
+                else:
+                    for name in ("batch_size", "workers"):
+                        if prefix + name in old:
+                            override[prefix + name] = old[prefix + name]
             if model and model != "(Use global)":
                 override["model"] = model
             self.engine_overrides[key] = override

@@ -10,6 +10,7 @@ The release workflow publishes the section whose heading matches the pushed tag
 ## [Unreleased]
 
 ### Fixed
+- Online AI models now keep their own batch size and worker count per engine, so switching to Gemini (or any cloud model) no longer uses your local 5-line batches. Your existing local values are unchanged; Settings shows which set the Engines tab is editing.
 - Running from source on Linux or macOS no longer crashes when unloading models, starting
   Ollama or using Open in RPG Maker. These systems still aren't officially supported. Install
   Ollama for your system, start it yourself (`ollama serve`) and pull your model
