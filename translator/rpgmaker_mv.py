@@ -1310,7 +1310,7 @@ class RPGMakerMVParser:
                          f'if exist "{dr}\\{q}" del /F /Q "{dr}\\{q}"')
             lines.append(f'if not exist "{dr}_original\\{q}" '
                          f'if exist "{dr}\\{q}" '
-                         f'echo   Could not remove "{dr}\\{q}"')
+                         f'(echo   Could not remove "{dr}\\{q}" & set FAIL=1)')
         if unsafe:
             lines.append("echo The translation also added these files; they "
                          "were not removed automatically:")

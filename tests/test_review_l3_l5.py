@@ -329,6 +329,14 @@ def test_uninstall_bat_keeps_the_existing_guards():
                            'if exist "data\\sp ace.json" del /F /Q ')
 
 
+def test_uninstall_bat_counts_a_file_it_could_not_remove_as_failed():
+    # Blind review 2026-11-05: "Could not remove" was only echoed, so the
+    # script still ended with "Done! Original Japanese files restored."
+    bat = _uninstall(["sp ace.json"])
+    line = next(ln for ln in bat.splitlines() if "Could not remove" in ln)
+    assert "set FAIL=1" in line
+
+
 @pytest.mark.skipif(os.name != "nt", reason="needs cmd.exe")
 def test_uninstall_bat_removes_odd_names_and_nothing_else(tmp_path):
     """The real cmd.exe, in a temp folder with harmless files only."""
