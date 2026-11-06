@@ -919,15 +919,20 @@ class SettingsDialog(QDialog):
 
     # ── Cloud model list ─────────────────────────────────────────────
 
-    def _fill_cloud_models(self, provider: str, models: list):
+    def _fill_cloud_models(self, provider: str, models: list,
+                           prefer: str = ""):
         """Fill the model combo for a cloud provider.
 
-        Keeps the current model if listed; otherwise keeps the saved model
-        when this is the saved provider (even if the provider doesn't list
-        it), else selects the first entry.
+        Keeps ``prefer`` (a model the user picked or typed), even if the
+        provider doesn't list it. Otherwise keeps the current model if
+        listed; otherwise keeps the saved model when this is the saved
+        provider (even if the provider doesn't list it), else selects the
+        first entry.
         """
         current = self.model_combo.currentText().strip()
-        if current in models:
+        if prefer:
+            keep = prefer
+        elif current in models:
             keep = current
         elif provider == self.client.provider and self.client.model:
             keep = self.client.model
@@ -943,8 +948,16 @@ class SettingsDialog(QDialog):
             self.model_combo.setCurrentText(keep)
         self.model_combo.blockSignals(False)
 
-    def _start_cloud_model_fetch(self):
-        """Read the provider's model list on a worker thread."""
+    def _start_cloud_model_fetch(self, again: bool = False):
+        """Read the provider's model list on a worker thread.
+
+        ``again`` is the queued re-fetch: it keeps the combo text recorded
+        when the fetch was first asked for.
+        """
+        if not again:
+            # What the combo showed when the fetch was asked for: if the
+            # user changes it while the list loads, their choice wins.
+            self._cloud_fetch_shown = self.model_combo.currentText()
         worker = getattr(self, "_cloud_model_worker", None)
         if worker is not None and worker.isRunning():
             # Never overwrite a running QThread; fetch again when it ends
@@ -978,14 +991,16 @@ class SettingsDialog(QDialog):
             self._cloud_fetch_again = False
             self._cloud_model_worker.wait()  # emitting done was its last step
             if self.provider_combo.currentText() not in ("Ollama (Local)", "Custom"):
-                self._start_cloud_model_fetch()
+                self._start_cloud_model_fetch(again=True)
             return
         if provider != self.provider_combo.currentText():
             return  # user switched provider while this was running
         models, live = result if result else ([], False)
         if live and models:
             before = self.model_combo.currentText()
-            self._fill_cloud_models(provider, models)
+            changed = before != getattr(self, "_cloud_fetch_shown", before)
+            self._fill_cloud_models(provider, models,
+                                    prefer=before.strip() if changed else "")
             if self.model_combo.currentText() != before and not self._loading:
                 self._on_model_changed(self.model_combo.currentText())
             self.status_label.setText(f"{provider}: {len(models)} model(s) available")

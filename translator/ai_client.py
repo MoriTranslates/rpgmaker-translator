@@ -621,9 +621,12 @@ def fetch_cloud_models(provider: str, api_key: str,
                                base_url=base_url or PROVIDER_URLS.get(provider),
                                timeout=timeout, max_retries=0)
         ids = [getattr(m, "id", None) for m in client.models.list()]
-    except Exception:
+    except Exception as e:
         # Any failure (network, bad key, missing SDK, odd reply) only means
         # "no live list": the caller shows the built-in list and says so.
+        # Only the error type is logged: some SDK messages echo part of the key.
+        log.warning("Could not read %s's model list (%s)", provider,
+                    type(e).__name__)
         return fallback, False
     models = filter_chat_models(ids)
     if not models:
@@ -1013,8 +1016,10 @@ class AIClient:
             # Gemini doesn't support seed or frequency_penalty via compat layer.
             # Gemini 3.x thinks by default and the thinking counts against
             # max_tokens: a 256-token name call came back cut off. "low"
-            # keeps replies whole (and cheaper) on every 3.x model.
-            if model.startswith("gemini-3"):
+            # keeps replies whole (and cheaper) on every 3.x model, and on
+            # the -latest aliases, which point at 3.x.
+            if (model.startswith("gemini-")
+                    and not model.startswith(("gemini-1", "gemini-2"))):
                 params["reasoning_effort"] = "low"
         else:
             seed = options.get("seed")

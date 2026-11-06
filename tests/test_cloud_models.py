@@ -194,6 +194,8 @@ def test_temperature_only_where_accepted(provider, model, takes_temperature):
     ("Google Gemini", "gemini-3.8-flash", "low"),
     ("Google Gemini", "gemini-3.5-flash-lite", "low"),
     ("Google Gemini", "gemini-2.5-pro", None),
+    ("Google Gemini", "gemini-flash-latest", "low"),   # aliases point at 3.x
+    ("Google Gemini", "gemma-4-27b-it", None),
     ("OpenAI", "gpt-6-luna", None),
     ("DeepSeek", "deepseek-flash", None),
     ("Anthropic", "claude-haiku-5-5", None),
@@ -314,3 +316,22 @@ def test_worker_thread_fills_live_list(qapp, monkeypatch):
         assert dlg.model_combo.currentText() == "gpt-6-luna"
     finally:
         dlg.deleteLater()
+
+
+# Blind review 2026-11-05 (M1): a model picked or typed while the live list
+# loaded was replaced when the list arrived, so Save stored the wrong one.
+@pytest.mark.parametrize("picked", ["gpt-6-sol", "gpt-6-luna-2026-10-14"])
+def test_model_changed_during_fetch_is_kept(dialog_for, picked):
+    dlg = dialog_for("OpenAI", "gpt-6-luna", api_key="k")
+    dlg._cloud_fetch_shown = dlg.model_combo.currentText()   # fetch starts
+    dlg.model_combo.setCurrentText(picked)                     # user changes it
+    dlg._on_cloud_models_fetched("OpenAI", (["gpt-6-luna", "gpt-5.6-luna"], True))
+    assert dlg.model_combo.currentText() == picked
+
+
+def test_untouched_model_still_follows_the_live_list(dialog_for):
+    dlg = dialog_for("OpenAI", "gpt-6-luna", api_key="k")
+    dlg._cloud_fetch_shown = dlg.model_combo.currentText()
+    dlg._on_cloud_models_fetched("OpenAI", (["gpt-6-luna", "gpt-5.6-luna"], True))
+    assert dlg.model_combo.currentText() == "gpt-6-luna"
+    assert "gpt-5.6-luna" in _items(dlg.model_combo)
