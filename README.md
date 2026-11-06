@@ -195,7 +195,7 @@ with this app; it should be more accurate but much slower.
 
 ### No GPU? Use Cloud APIs
 
-In Settings, switch Provider to OpenAI/Gemini/DeepSeek/Anthropic, enter your API key, and go. Same workflow, same features, pay per token. Cheapest options: **gpt-6-luna** or **Claude Haiku 5.5** at $0.10/$0.50 per 1M tokens, or **gemini-2.5-flash-lite** at $0.10/$0.40 (prices checked November 2026).
+In Settings, switch Provider to OpenAI/Gemini/DeepSeek/Anthropic, enter your API key, and go. Same workflow, same features, pay per token. Cheapest options: **gpt-6-luna** or **Claude Haiku 5.5** at $0.10/$0.50 per 1M tokens (prices checked November 2026).
 
 > **Note:** Cloud APIs may refuse or filter adult content and can ban accounts for repeated NSFW requests. For unrestricted translation of all content types, use Local LLM — everything runs on your GPU, nothing is sent to the cloud.
 
@@ -207,7 +207,7 @@ In Settings, switch Provider to OpenAI/Gemini/DeepSeek/Anthropic, enter your API
 
 | Provider | Models | Pricing (per 1M tokens) |
 |---|---|---|
-| **Google Gemini** | gemini-2.5-flash-lite, gemini-3.5-flash-lite, gemini-3.8-flash | $0.10–$1.50 in / $0.40–$7.50 out |
+| **Google Gemini** | gemini-3.5-flash-lite, gemini-3.8-flash | $0.30–$1.50 in / $2.50–$7.50 out |
 | **OpenAI** | gpt-6-luna, gpt-5.6-luna, gpt-6-sol | $0.10–$2.00 in / $0.50–$10.00 out |
 | **DeepSeek** | deepseek-flash, deepseek-v4-pro | $0.30–$1.32 in / $1.20–$3.96 out (peak hours; off-peak is half) |
 | **Anthropic** | claude-haiku-5-5, claude-sonnet-5-5, claude-opus-5-5 | $0.10–$4.00 in / $0.50–$20.00 out |

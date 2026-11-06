@@ -28,6 +28,8 @@ DEAD_OR_DYING = {
     "gpt-4.1-nano", "gpt-4.1", "gpt-4.1-mini", "gpt-5",
     "deepseek-chat", "deepseek-reasoner",
     "claude-sonnet-4-5-20250929",
+    # Listed with no shutdown date, but returned 404 to a live key on 2026-11-05
+    "gemini-2.5-flash-lite",
 }
 
 
@@ -63,7 +65,7 @@ def test_filter_drops_non_chat_models_and_strips_prefix():
         "gpt-4o-audio-preview", "gpt-realtime", "gpt-4o-search-preview",
         "gpt-4o-mini-transcribe", "gemini-3.8-live", "veo-3.0-generate-001",
         "deep-research-preview-04-2026", "deepseek-flash",
-        "claude-haiku-5-5",
+        "claude-haiku-5-5", "models/aqa",
     ]
     assert ai_client.filter_chat_models(ids) == [
         "gemini-3.8-flash", "gpt-6-luna", "deepseek-flash", "claude-haiku-5-5",
@@ -184,6 +186,21 @@ def test_temperature_only_where_accepted(provider, model, takes_temperature):
         assert "max_tokens" not in params
         assert "frequency_penalty" not in params
         assert params["max_completion_tokens"] == 77
+
+
+@pytest.mark.parametrize("provider,model,effort", [
+    # Gemini 3.x thinks by default; on a 256-token name call the thinking
+    # used ~250 tokens and the reply came back cut off (live test 2026-11-05).
+    ("Google Gemini", "gemini-3.8-flash", "low"),
+    ("Google Gemini", "gemini-3.5-flash-lite", "low"),
+    ("Google Gemini", "gemini-2.5-pro", None),
+    ("OpenAI", "gpt-6-luna", None),
+    ("DeepSeek", "deepseek-flash", None),
+    ("Anthropic", "claude-haiku-5-5", None),
+])
+def test_gemini_3_thinks_low(provider, model, effort):
+    params = _sent_params(provider, model)
+    assert params.get("reasoning_effort") == effort
 
 
 def test_ollama_model_accepts_temperature():

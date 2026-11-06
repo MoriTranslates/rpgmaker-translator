@@ -511,7 +511,7 @@ PROVIDER_MODELS = {
     "Ollama (Local)": [],              # fetched dynamically from Ollama
     "OpenAI": ["gpt-6-luna", "gpt-5.6-luna", "gpt-6-sol"],
     "Google Gemini": [
-        "gemini-2.5-flash-lite", "gemini-3.5-flash-lite", "gemini-3.8-flash",
+        "gemini-3.5-flash-lite", "gemini-3.8-flash",
     ],
     "DeepSeek": ["deepseek-flash", "deepseek-v4-pro"],
     "Anthropic": ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"],
@@ -538,7 +538,6 @@ MODEL_PRICING = {
     "claude-sonnet-5-5":         {"input": 2.00,  "output": 10.00, "batch_size": 30, "frequency_penalty": 0.0},
     "claude-opus-5-5":           {"input": 4.00,  "output": 20.00, "batch_size": 30, "frequency_penalty": 0.0},
     # Google Gemini (no frequency_penalty support)
-    "gemini-2.5-flash-lite":     {"input": 0.10,  "output": 0.40,  "batch_size": 30, "frequency_penalty": 0.0},
     "gemini-3.5-flash-lite":     {"input": 0.30,  "output": 2.50,  "batch_size": 30, "frequency_penalty": 0.0},
     # gemini-3.8-flash: $0.75/$3.75 until 2026-12-31; this is the 2027 rate
     "gemini-3.8-flash":          {"input": 1.50,  "output": 7.50,  "batch_size": 30, "frequency_penalty": 0.0},
@@ -579,7 +578,7 @@ _NON_CHAT_MODEL_MARKERS = (
     "embed", "tts", "whisper", "transcribe", "audio", "realtime", "live",
     "dall-e", "image", "imagen", "veo", "lyria", "nano-banana", "omni",
     "moderation", "search", "computer-use", "robotics", "antigravity",
-    "codex", "babbage", "davinci", "sora",
+    "codex", "babbage", "davinci", "sora", "aqa",
 )
 
 
@@ -1011,8 +1010,12 @@ class AIClient:
         freq_penalty = model_config.get("frequency_penalty", 0.0)
 
         if self.provider == "Google Gemini":
-            # Gemini doesn't support seed or frequency_penalty via compat layer
-            pass
+            # Gemini doesn't support seed or frequency_penalty via compat layer.
+            # Gemini 3.x thinks by default and the thinking counts against
+            # max_tokens: a 256-token name call came back cut off. "low"
+            # keeps replies whole (and cheaper) on every 3.x model.
+            if model.startswith("gemini-3"):
+                params["reasoning_effort"] = "low"
         else:
             seed = options.get("seed")
             if seed is not None:
