@@ -119,6 +119,11 @@ Your settings are saved next to the exe, so the folder is portable.
 
 Prefer running from source (any OS, latest code)? Follow the Quick Start below.
 
+> **Linux / macOS:** not officially supported, but the app runs from source. Install Ollama for
+> your system, start it yourself (`ollama serve`) and pull your model before launching
+> `python main.py` — the app can't start or restart Ollama for you there. Open in RPG Maker and
+> the EasyRPG Player download are Windows-only.
+
 ---
 
 ## Quick Start

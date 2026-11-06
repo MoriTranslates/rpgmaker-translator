@@ -11,8 +11,10 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ### Fixed
 - Running from source on Linux or macOS no longer crashes when unloading models, starting
-  Ollama or using Open in RPG Maker. These systems still aren't officially supported: start
-  Ollama yourself before translating.
+  Ollama or using Open in RPG Maker. These systems still aren't officially supported. Install
+  Ollama for your system, start it yourself (`ollama serve`) and pull your model
+  (`ollama pull qwen3.5:9b`) before you run `python main.py`. Open in RPG Maker and the
+  EasyRPG Player download only work on Windows.
 
 ## [1.1.1] - 2026-11-03
 
