@@ -456,3 +456,42 @@ def test_test_connection_never_uses_other_providers_key(qapp, dialog_for,
     QCoreApplication.processEvents()
     assert "gem-key" not in used
     assert used == []  # empty box: asks for a key instead of connecting
+
+
+# The user saves Settings on Ollama but keeps a cloud key: the key must stay
+# attached to its own provider across saves and reopen.
+def test_cloud_key_survives_save_on_ollama_and_reopen(dialog_for):
+    dlg = dialog_for("Google Gemini", "gemini-3.8-flash", api_key="gem-key")
+    dlg._save()
+    assert dlg.client.api_key_provider == "Google Gemini"
+    dlg2 = dialog_for("Ollama (Local)", "qwen3.5:9b")
+    dlg2.client.api_key = dlg.client.api_key          # as loaded from disk
+    dlg2.client.api_key_provider = dlg.client.api_key_provider
+    dlg2._load_current()
+    dlg2.provider_combo.setCurrentText("Google Gemini")
+    assert dlg2.api_key_edit.text() == "gem-key"
+
+
+def test_old_settings_on_ollama_do_not_guess_key_owner(dialog_for):
+    dlg = dialog_for("Ollama (Local)", "qwen3.5:9b", api_key="mystery-key")
+    dlg.provider_combo.setCurrentText("Google Gemini")
+    assert dlg.api_key_edit.text() == ""
+    dlg.provider_combo.setCurrentText("OpenAI")
+    assert dlg.api_key_edit.text() == ""
+
+
+def test_save_on_ollama_changes_neither_key_nor_owner(dialog_for):
+    dlg = dialog_for("Ollama (Local)", "qwen3.5:9b", api_key="k")
+    dlg.client.api_key_provider = "Anthropic"
+    dlg._load_current()
+    dlg._save()
+    assert (dlg.client.api_key, dlg.client.api_key_provider) == ("k", "Anthropic")
+
+
+def test_cloud_save_records_key_owner(dialog_for):
+    dlg = dialog_for("Ollama (Local)", "qwen3.5:9b")
+    dlg.provider_combo.setCurrentText("OpenAI")
+    dlg.api_key_edit.setText("oa-key")
+    dlg._save()
+    assert (dlg.client.provider, dlg.client.api_key,
+            dlg.client.api_key_provider) == ("OpenAI", "oa-key", "OpenAI")

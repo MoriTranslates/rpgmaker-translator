@@ -716,8 +716,13 @@ class SettingsDialog(QDialog):
         self.api_key_edit.setText(self.client.api_key)
         # One saved key, and it belongs to the saved provider only. The box
         # always shows the key of the provider shown (see _on_provider_changed).
-        self._keys = ({} if self.client.provider == "Ollama (Local)"
-                      else {self.client.provider: self.client.api_key.strip()})
+        # The key's owner is stored with it. Without one (old settings) it is
+        # the saved provider if that is a cloud one; never guessed for Ollama.
+        owner = getattr(self.client, "api_key_provider", None)
+        if owner is None:
+            owner = "" if self.client.provider == "Ollama (Local)" else self.client.provider
+        key = self.client.api_key.strip()
+        self._keys = {owner: key} if owner and key else {}
         self._shown_provider = self.client.provider
         self.url_edit.setText(self.client.base_url)
 
@@ -1252,6 +1257,7 @@ class SettingsDialog(QDialog):
         # key: leave the stored one as it was.
         if self.client.provider != "Ollama (Local)":
             self.client.api_key = self.api_key_edit.text().strip()
+            self.client.api_key_provider = self.client.provider
         self.client.base_url = self.url_edit.text().strip() or "http://localhost:11434"
         self.client.model = self.model_combo.currentText().strip()
         self.client.system_prompt = self.prompt_edit.toPlainText().strip() or SYSTEM_PROMPT
