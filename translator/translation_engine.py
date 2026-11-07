@@ -8,7 +8,7 @@ import requests
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from .ai_client import (AIClient, ContentBlocked, FatalProviderError,
-                        RateLimited, ServerUnreachable)
+                        RateLimited, RequestCancelled, ServerUnreachable)
 from .project_model import TranslationEntry
 
 log = logging.getLogger(__name__)
@@ -42,21 +42,26 @@ def _call_with_backoff(client, fn):
 
     Rate limits are not server-down signals — back off instead of counting
     them. Waits are interruptible via client.cancel_event. Re-raises the
-    RateLimited error after RATE_LIMIT_MAX_WAITS attempts or on cancel.
+    RateLimited error after RATE_LIMIT_MAX_WAITS attempts; raises
+    RequestCancelled when Stop interrupts a wait (the line stays untranslated,
+    not errored).
     """
     cancel_event = getattr(client, "cancel_event", None)
     for attempt in range(RATE_LIMIT_MAX_WAITS + 1):
         try:
             return fn()
-        except RateLimited:
+        except RateLimited as exc:
             if attempt >= RATE_LIMIT_MAX_WAITS:
                 raise
+            if cancel_event is not None and cancel_event.is_set():
+                raise RequestCancelled("Stopped during rate-limit back-off") from exc
             delay = min(60.0, RATE_LIMIT_BASE_DELAY_S * (2 ** attempt))
             log.warning("Rate limited — backing off %.0fs (attempt %d/%d)",
                         delay, attempt + 1, RATE_LIMIT_MAX_WAITS)
             if cancel_event is not None:
                 if cancel_event.wait(delay):
-                    raise
+                    raise RequestCancelled(
+                        "Stopped during rate-limit back-off") from exc
             else:
                 time.sleep(delay)
 
@@ -209,6 +214,8 @@ class TranslationWorker(QObject):
                 self._history.append((entry.original, result))
                 if len(self._history) > self.max_history:
                     self._history = self._history[-self.max_history:]
+        except RequestCancelled:
+            self._cancelled = True  # Stop: line stays untranslated, no error
         except FatalProviderError as e:
             self._cancelled = True
             self.fatal_error.emit(str(e))
@@ -367,6 +374,10 @@ class BatchTranslationWorker(QObject):
                              self.batch_size, self.RECOVER_AFTER)
                 return  # Done with this batch
 
+            except RequestCancelled:
+                # Stop pressed: no retry, no halving, no error on the lines.
+                self._cancelled = True
+                return
             except FatalProviderError as e:
                 # Can never succeed on retry — stop this worker; the engine
                 # cancels the rest and tells the user once. Untouched lines
@@ -436,6 +447,9 @@ class BatchTranslationWorker(QObject):
                     self._history.append((entry.original, result))
                     if len(self._history) > self.max_history:
                         self._history = self._history[-self.max_history:]
+            except RequestCancelled:
+                self._cancelled = True
+                return
             except FatalProviderError as e:
                 self._cancelled = True
                 self.fatal_error.emit(str(e))
@@ -486,10 +500,18 @@ class TranslationEngine(QObject):
         self.last_job: tuple | None = None
         self._done_ids: set[str] = set()   # entries completed in the current job
         self._resume_pending = False
+        # Why the last server_down fired: "fatal" (bad key, no credit, daily
+        # quota...) or "server_down" (repeated connection failures).
+        self.last_stop_kind = "server_down"
 
     @property
     def is_running(self) -> bool:
         return any(t.isRunning() for t in self._threads)
+
+    @property
+    def is_stopping(self) -> bool:
+        """Stop (or a fatal/server-down stop) is already under way."""
+        return self._cancelled and self.is_running
 
     def translate_batch(self, entries: list, memory_source: list | None = None):
         """Start batch translation with parallel workers.
@@ -683,6 +705,10 @@ class TranslationEngine(QObject):
         """
         self._cancelled = True
         self._resume_pending = False
+        if not self._workers:
+            # Nothing running: a set event would stay set (only a finishing
+            # run clears it) and refuse later right-click requests.
+            return
         self.client.cancel_event.set()
         for worker in self._workers:
             worker.cancel()
@@ -729,6 +755,7 @@ class TranslationEngine(QObject):
         if self._server_down_emitted or self._cancelled:
             return
         self._server_down_emitted = True
+        self.last_stop_kind = "fatal"
         log.error("Run stopped by unrecoverable error: %s", msg)
         self._cancelled = True
         self.client.cancel_event.set()
@@ -753,6 +780,7 @@ class TranslationEngine(QObject):
 
         if len(self._connection_failures) >= self.SERVER_DOWN_THRESHOLD:
             self._server_down_emitted = True
+            self.last_stop_kind = "server_down"
             log.error("Server down detected (%d connection errors in %ds): %s",
                       len(self._connection_failures), self.SERVER_DOWN_WINDOW_S, msg)
             # Cancel all running workers — checkpoint already saved completed work

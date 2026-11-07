@@ -66,6 +66,38 @@ from .welcome_page import WelcomePage
 _MAX_RECENT_PROJECTS = 10
 
 
+def server_down_message(kind: str, reason: str, provider: str,
+                        is_cloud: bool, can_resume: bool) -> tuple[str, str]:
+    """(title, text) for the run-paused dialog, worded for the real cause.
+
+    ``kind`` is "fatal" (bad key, no credit, daily quota, paid-model swap)
+    or "server_down" (repeated connection failures). Only a local server
+    gets the "restart Ollama" advice.
+    """
+    resume_hint = (" and click Resume to continue from where we left off."
+                   if can_resume else ", then start the run again.")
+    if kind == "fatal":
+        return ("Translation Stopped",
+                f"Translation stopped: {reason[:300]}\n\n"
+                "Progress has been auto-saved. Fix the problem above"
+                + resume_hint)
+    if is_cloud:
+        return (f"{provider} Not Responding",
+                f"Translation paused — {provider} isn't answering.\n\n"
+                "Several requests failed in a short window, so we stopped "
+                "to avoid grinding through failed batches.\n\n"
+                f"Last error: {reason[:200]}\n\n"
+                "Progress has been auto-saved. Check your internet "
+                f"connection and {provider}'s status" + resume_hint)
+    return ("LLM Server Unavailable",
+            "Translation paused — the LLM server appears to be down.\n\n"
+            "Multiple connection errors fired in a short window so we "
+            "stopped to avoid grinding through failed batches.\n\n"
+            f"Last error: {reason[:200]}\n\n"
+            "Progress has been auto-saved. Restart Ollama (or check the "
+            "server address in Settings)" + resume_hint)
+
+
 def _undoable(label: str):
     """Make a no-argument bulk-edit method undoable (Undo Last Bulk Change).
 
@@ -1402,15 +1434,17 @@ class MainWindow(QMainWindow):
             return False
         if not self.engine.is_running:
             return True
-        reply = QMessageBox.question(
-            self, "Translation Running",
-            "A translation run is in progress.\n\n"
-            "Stop it now? Completed entries are kept.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return False
-        self._stop_translation()
+        if not getattr(self.engine, "is_stopping", False):
+            # Ask only once: after Stop, just wait for the workers.
+            reply = QMessageBox.question(
+                self, "Translation Running",
+                "A translation run is in progress.\n\n"
+                "Stop it now? Completed entries are kept.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return False
+            self._stop_translation()
         self.statusbar.showMessage("Stopping translation...")
         if not self._wait_for_engine_stop(15):
             QMessageBox.information(
@@ -3698,17 +3732,12 @@ class MainWindow(QMainWindow):
         try:
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Icon.Warning)
-            box.setWindowTitle("LLM Server Unavailable")
-            box.setText(
-                "Translation paused — the LLM server appears to be down.\n\n"
-                "Multiple connection errors fired in a short window so we "
-                "stopped to avoid grinding through failed batches.\n\n"
-                f"Last error: {reason[:200]}\n\n"
-                "Progress has been auto-saved. Restart Ollama (or check your "
-                "API key/connection)"
-                + (" and click Resume to continue from where we left off."
-                   if can_resume else ", then start the run again.")
-            )
+            title, text = server_down_message(
+                kind=getattr(self.engine, "last_stop_kind", "server_down"),
+                reason=reason, provider=self.client.provider,
+                is_cloud=self.client.is_cloud, can_resume=can_resume)
+            box.setWindowTitle(title)
+            box.setText(text)
             resume_btn = None
             if can_resume:
                 resume_btn = box.addButton("Resume Translation", QMessageBox.ButtonRole.AcceptRole)
@@ -6330,7 +6359,7 @@ class MainWindow(QMainWindow):
         if self._closing:
             event.accept()
             return
-        if self.engine.is_running:
+        if self.engine.is_running and not self.engine.is_stopping:
             reply = QMessageBox.question(
                 self, "Translation Running",
                 "A translation run is in progress.\n\n"
