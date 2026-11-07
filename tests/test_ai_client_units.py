@@ -233,8 +233,8 @@ def test_batch_code_hints_labelled_per_line(client, monkeypatch):
     ])
     assert out == {"Line1": "\\N[1] smiled.", "Line2": "\\N[2] waved."}
     user = sent["messages"][-1]["content"]
-    assert "Line1 «CODE1» = name of Yuu (he/him)" in user
-    assert "Line2 «CODE1» = name of Sakura (she/her)" in user
+    assert "Line1 «CODE1» = name code for Yuu (he/him)" in user
+    assert "Line2 «CODE1» = name code for Sakura (she/her)" in user
     # local batch now sets explicit budgets
     assert sent["options"]["num_predict"] >= 2048
     assert 4096 <= sent["options"]["num_ctx"] <= 16384

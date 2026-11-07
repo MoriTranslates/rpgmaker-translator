@@ -25,7 +25,8 @@ from ..resource_paths import app_dir
 from .. import game_io
 from ..game_io import PartialExportError
 from ..utils import create_junction, open_with_default_app
-from ..ai_client import AIClient, build_system_prompt, engine_batch_workers
+from ..ai_client import (
+    AIClient, build_system_prompt, engine_batch_workers, migrate_saved_prompt)
 from ..rpgmaker_mv import RPGMakerMVParser
 from ..tyranoscript import TyranoScriptParser
 from ..srpgstudio import SRPGStudioParser
@@ -4268,6 +4269,16 @@ class MainWindow(QMainWindow):
             self.client._prompt_preset = cfg["prompt_preset"]
         if "dazed_mode" in cfg:
             self.client.dazed_mode = cfg["dazed_mode"]
+        # A prompt saved by an older version that the user never edited is
+        # that version's default: switch it to the current default (an
+        # edited prompt is kept as it is). Saved back on the next save.
+        if isinstance(self.client.system_prompt, str):
+            new_prompt, migrated = migrate_saved_prompt(
+                self.client.system_prompt, self.client.target_language,
+                self.client.model, self.client.project_type)
+            if migrated:
+                log.info("Saved system prompt was an old default: updated to prompt v2")
+                self.client.system_prompt = new_prompt
         # auto_tune setting removed; ignore legacy values silently
         if "export_review_file" in cfg:
             self._export_review_file = cfg["export_review_file"]
