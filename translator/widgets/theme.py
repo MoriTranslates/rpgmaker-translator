@@ -671,6 +671,11 @@ QComboBox[chip="true"][active="true"], QToolButton[chip="true"]:checked {{
     color: {accent_alt};
     font-weight: 600;
 }}
+QComboBox::drop-down {{
+    border: none;
+    width: 22px;
+    subcontrol-position: center right;
+}}
 QComboBox[chip="true"] {{
     padding-right: 26px;
 }}
@@ -868,7 +873,7 @@ def stylesheet() -> str:
     suffix = "dark" if is_dark() else "light"
     chevron = icon_path(f"chevron-down-{suffix}.svg")
     if chevron:
-        css += ('QComboBox[chip="true"]::down-arrow '
+        css += ('QComboBox::down-arrow '
                 '{ image: url("%s"); width: 10px; height: 10px; }\n' % chevron)
     for arrow in ("up", "down"):
         path = icon_path(f"chevron-{arrow}-{suffix}.svg")

@@ -335,3 +335,66 @@ def test_untouched_model_still_follows_the_live_list(dialog_for):
     dlg._on_cloud_models_fetched("OpenAI", (["gpt-6-luna", "gpt-5.6-luna"], True))
     assert dlg.model_combo.currentText() == "gpt-6-luna"
     assert "gpt-5.6-luna" in _items(dlg.model_combo)
+
+
+# Blind review 2026-11-06 (M2): the one shared key box meant switching
+# provider sent the saved key to the new provider's model-list endpoint.
+def test_switching_provider_never_sends_key_to_new_provider(qapp, monkeypatch):
+    from PyQt6.QtCore import QCoreApplication
+    from translator.widgets import settings_dialog as sd
+    calls = []
+    monkeypatch.setattr(sd, "fetch_cloud_models",
+                        lambda provider, key: calls.append((provider, key)) or ([], False))
+    c = AIClient()
+    c.provider, c.model, c.api_key = "Google Gemini", "gemini-3.8-flash", "gem-key"
+    dlg = sd.SettingsDialog(c)
+    try:
+        dlg._cloud_model_worker.wait(5000)
+        QCoreApplication.processEvents()
+        assert calls == [("Google Gemini", "gem-key")]
+        dlg.provider_combo.setCurrentText("OpenAI")
+        worker = getattr(dlg, "_cloud_model_worker", None)
+        if worker is not None:
+            worker.wait(5000)
+        QCoreApplication.processEvents()
+        assert [p for p, _ in calls] == ["Google Gemini"]  # nothing for OpenAI
+        assert set(PROVIDER_MODELS["OpenAI"]) <= set(_items(dlg.model_combo))
+        # Entering a key for OpenAI does fetch, with that key
+        dlg.api_key_edit.setText("oa-key")
+        dlg.api_key_edit.textEdited.emit("oa-key")
+        dlg._on_api_key_edited()
+        dlg._cloud_model_worker.wait(5000)
+        QCoreApplication.processEvents()
+        assert calls[-1] == ("OpenAI", "oa-key")
+        # Switching back to Gemini must not send the OpenAI key there
+        n = len(calls)
+        dlg.provider_combo.setCurrentText("Google Gemini")
+        dlg._cloud_model_worker.wait(5000)
+        QCoreApplication.processEvents()
+        assert len(calls) == n
+    finally:
+        dlg.deleteLater()
+
+
+# The Refresh button covered the model box's dropdown arrow.
+def test_model_combo_arrow_not_covered_by_refresh(qapp, dialog_for):
+    from PyQt6.QtWidgets import QStyle, QStyleOptionComboBox
+    from translator.widgets import theme
+    qapp.setStyleSheet(theme.stylesheet())
+    try:
+        dlg = dialog_for("Ollama (Local)", "qwen3.5:9b")
+        dlg.resize(dlg.minimumSize())  # narrowest allowed
+        dlg.show()
+        qapp.processEvents()
+        combo, btn = dlg.model_combo, dlg.refresh_btn
+        assert combo.geometry().bottom() < btn.geometry().top()  # never side by side
+        opt = QStyleOptionComboBox()
+        combo.initStyleOption(opt)
+        arrow = combo.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, opt,
+            QStyle.SubControl.SC_ComboBoxArrow, combo)
+        assert arrow.width() >= 8 and arrow.height() >= 8
+        assert combo.rect().contains(arrow)
+        assert combo.lineEdit().geometry().right() <= arrow.left()
+    finally:
+        qapp.setStyleSheet("")
