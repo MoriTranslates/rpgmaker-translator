@@ -45,7 +45,7 @@ def _detect_gpu() -> tuple:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total",
              "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if result.returncode != 0:
@@ -110,7 +110,7 @@ class _PullWorker(QThread):
             proc = subprocess.Popen(
                 ["ollama", "pull", "--", self.tag],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",  # ollama prints UTF-8 spinners
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             self._proc = proc

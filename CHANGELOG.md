@@ -13,6 +13,9 @@ The release workflow publishes the section whose heading matches the pushed tag
 - OpenRouter is now a named provider (one key, many models, with a built-in address). Unlike "Custom", it never shares or overwrites your Ollama address.
 
 ### Fixed
+- Switching provider in Settings no longer sends your API key to the new provider. The key is only used for the provider it was saved or typed for; enter the new provider's key to load its model list.
+- Downloading a model with `ollama pull` no longer fails when Ollama prints its spinner characters.
+- The model box in Settings now shows its dropdown arrow; the Refresh button no longer covers it.
 - Model suggestions are no longer stuck on old models: the list updates from GitHub, shows which models you've installed, and lets you pull any Ollama tag.
 - Qwen 3.5 and other strict local models no longer reject batches with "System message must be at the beginning".
 - Lines blocked by an online model's content filter are now marked as blocked instead of crashing the batch.

@@ -292,3 +292,43 @@ def test_dialog_selects_tier_pick_and_experimental_label(make_dialog):
              for i in range(dlg._qwen_table.rowCount())]
     assert any("Qwen3.8 27B (experimental)" in t for t in texts)
     assert "(Recommended)" in texts[0]
+
+
+# Blind review 2026-11-06 (M5): `ollama pull` output was read with the locale
+# code page (cp1252); UTF-8 spinner characters raised UnicodeDecodeError.
+def test_pull_worker_survives_utf8_spinner_and_bad_bytes(qapp, monkeypatch):
+    import io
+    spinner = chr(0x280F).encode("utf-8")
+    data = (b"pulling manifest " + spinner + b"\n"
+            + b"pulling abc " + chr(0x2819).encode("utf-8") + b" 50%\n"
+            + b"bad byte \xff\xfe here\n"
+            + b"success\n")
+
+    class _Proc:
+        returncode = 0
+
+        def __init__(self, **kw):
+            # Decode like subprocess does: the encoding/errors it was given,
+            # else the locale code page.
+            self.stdout = io.TextIOWrapper(
+                io.BytesIO(data), encoding=kw.get("encoding") or "cp1252",
+                errors=kw.get("errors") or "strict")
+
+        def wait(self):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(msd.subprocess, "Popen",
+                        lambda args, **kw: _Proc(**kw))
+    w = msd._PullWorker("qwen3.5:9b")
+    lines, done, errors = [], [], []
+    w.progress.connect(lines.append)
+    w.finished_ok.connect(lambda: done.append(1))
+    w.error.connect(errors.append)
+    w.run()
+    assert errors == []
+    assert done == [1]
+    assert any(chr(0x280F) in ln for ln in lines)
+    assert lines[-1] == "success"

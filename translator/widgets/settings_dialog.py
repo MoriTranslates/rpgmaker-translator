@@ -143,6 +143,7 @@ class SettingsDialog(QDialog):
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_edit.setPlaceholderText("Enter API key...")
         self.api_key_edit.editingFinished.connect(self._on_api_key_edited)
+        self.api_key_edit.textEdited.connect(self._note_key_owner)
         self._api_key_label = QLabel("API Key:")
         form.addRow(self._api_key_label, self.api_key_edit)
 
@@ -153,11 +154,12 @@ class SettingsDialog(QDialog):
         form.addRow(self._url_label, self.url_edit)
 
         # Model
+        model_col = QVBoxLayout()  # combo on its own line so buttons can't cover its arrow
         model_row = QHBoxLayout()
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
-        self.model_combo.setMinimumWidth(250)
-        model_row.addWidget(self.model_combo)
+        self.model_combo.setMinimumWidth(140)
+        model_col.addWidget(self.model_combo)
 
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self._refresh_models)
@@ -171,8 +173,10 @@ class SettingsDialog(QDialog):
         self.suggest_btn.setToolTip("Detect your GPU and recommend the best model")
         self.suggest_btn.clicked.connect(self._suggest_model)
         model_row.addWidget(self.suggest_btn)
+        model_row.addStretch(1)
+        model_col.addLayout(model_row)
 
-        form.addRow("Model:", model_row)
+        form.addRow("Model:", model_col)
 
         self.model_hint_label = QLabel("")
         self.model_hint_label.setWordWrap(True)
@@ -711,6 +715,9 @@ class SettingsDialog(QDialog):
         if idx >= 0:
             self.provider_combo.setCurrentIndex(idx)
         self.api_key_edit.setText(self.client.api_key)
+        # The saved key belongs to the saved provider
+        self._key_owner = self.client.provider
+        self._key_owner_text = self.client.api_key.strip()
         self.url_edit.setText(self.client.base_url)
 
         # Prompt preset — match current prompt to a known preset
@@ -795,7 +802,7 @@ class SettingsDialog(QDialog):
             self._fill_cloud_models(provider, models)
             self.status_label.setText(f"{provider}: {len(models)} suggested model(s)")
             self.status_label.setStyleSheet(f"color: {theme.c('accent')};")
-            if self.api_key_edit.text().strip():
+            if self.api_key_edit.text().strip() and self._key_is_for(provider):
                 # Replace the suggestions with the provider's own list
                 self._start_cloud_model_fetch()
         elif is_ollama:
@@ -1020,6 +1027,8 @@ class SettingsDialog(QDialog):
             return
         self._cloud_fetch_again = False
         provider = self.provider_combo.currentText()
+        if not self._key_is_for(provider):
+            return  # never send one provider's key to another
         api_key = self.api_key_edit.text().strip()
         self._cloud_fetch_key = api_key
         self._cloud_model_worker = _CallWorker(
@@ -1029,10 +1038,21 @@ class SettingsDialog(QDialog):
         self.status_label.setText(f"Reading {provider} model list...")
         self._cloud_model_worker.start()
 
+    def _key_is_for(self, provider: str) -> bool:
+        """True if the text in the key box was saved or typed for ``provider``."""
+        return getattr(self, "_key_owner", None) == provider
+
+    def _note_key_owner(self, _text: str = ""):
+        """The key box was edited: its text now belongs to the shown provider."""
+        self._key_owner = self.provider_combo.currentText()
+        self._key_owner_text = self.api_key_edit.text().strip()
+
     def _on_api_key_edited(self):
         """Read the model list again once a new API key is entered."""
         provider = self.provider_combo.currentText()
         key = self.api_key_edit.text().strip()
+        if key != getattr(self, "_key_owner_text", None):
+            self._note_key_owner()  # changed without typing; still this provider's
         if (provider in ("Ollama (Local)", "Custom") or not key
                 or key == getattr(self, "_cloud_fetch_key", None)):
             return
@@ -1077,6 +1097,9 @@ class SettingsDialog(QDialog):
         provider = self.provider_combo.currentText()
         url = self.url_edit.text().strip() or "http://localhost:11434"
         api_key = self.api_key_edit.text().strip()
+        if provider != "Ollama (Local)" and api_key and not self._key_is_for(provider):
+            self.status_label.setText(f"Enter your {provider} API key first")
+            return
 
         def check() -> bool:
             if provider == "Ollama (Local)":
