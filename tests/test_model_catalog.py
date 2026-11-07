@@ -7,6 +7,7 @@ import os
 import sys
 
 import pytest
+from qt_helpers import dispose
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -234,7 +235,7 @@ def make_dialog(qapp, monkeypatch):
         return d
     yield _make
     for d in made:
-        d.deleteLater()
+        dispose(d)
 
 
 def _status(dlg, tag):

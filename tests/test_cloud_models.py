@@ -16,6 +16,7 @@ from types import SimpleNamespace  # noqa: E402
 
 import openai  # noqa: E402
 import pytest  # noqa: E402
+from qt_helpers import dispose  # noqa: E402
 
 from translator import ai_client  # noqa: E402
 from translator.ai_client import AIClient, PROVIDER_MODELS  # noqa: E402
@@ -246,7 +247,7 @@ def dialog_for(qapp, monkeypatch):
     make.started = started
     yield make
     for dlg in made:
-        dlg.deleteLater()
+        dispose(dlg)
 
 
 def _items(combo):
@@ -315,7 +316,7 @@ def test_worker_thread_fills_live_list(qapp, monkeypatch):
         assert "gpt-zz-new" in _items(dlg.model_combo)
         assert dlg.model_combo.currentText() == "gpt-6-luna"
     finally:
-        dlg.deleteLater()
+        dispose(dlg)
 
 
 # Blind review 2026-11-05 (M1): a model picked or typed while the live list
@@ -374,7 +375,7 @@ def test_switching_provider_never_sends_key_to_new_provider(qapp, monkeypatch):
         # Gemini gets its own key back, never the OpenAI one
         assert [c for c in calls[n:]] == [("Google Gemini", "gem-key")]
     finally:
-        dlg.deleteLater()
+        dispose(dlg)
 
 
 # The Refresh button covered the model box's dropdown arrow.

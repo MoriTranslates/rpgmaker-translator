@@ -4,6 +4,7 @@ import os
 import subprocess
 
 import pytest
+from qt_helpers import dispose_main_window
 
 from translator.ai_client import AIClient
 
@@ -70,12 +71,7 @@ def window(qapp, monkeypatch, tmp_path):
     win = mw.MainWindow()
     win._closing = True
     yield win
-    win._autosave_timer.stop()
-    win.hide()
-    _KEEP.append(win)
-
-
-_KEEP: list = []
+    dispose_main_window(win)
 
 
 def test_remote_ollama_down_never_restarts_local(window, monkeypatch):

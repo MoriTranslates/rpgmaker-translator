@@ -12,6 +12,7 @@ import json
 import os
 
 import pytest
+from qt_helpers import dispose_main_window
 
 from translator import game_io
 from translator.project_model import TranslationEntry, TranslationProject
@@ -56,9 +57,7 @@ def _window(qapp, monkeypatch, tmp_path):
 
 
 def _close(win):
-    win._closing = True
-    win._autosave_timer.stop()
-    win.hide()
+    dispose_main_window(win)
 
 
 def _update_items(mv_game, rename_first=True, add=True):
