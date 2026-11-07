@@ -13,6 +13,15 @@ The release workflow publishes the section whose heading matches the pushed tag
 - OpenRouter is now a named provider (one key, many models, with a built-in address). Unlike "Custom", it never shares or overwrites your Ollama address.
 
 ### Fixed
+- Stop now stops within about a second, even while an online model is slow to answer. Lines
+  that were in flight stay untranslated (not marked as errors), and opening, loading or closing
+  a project no longer asks you to stop the run again after you already pressed Stop. Online
+  requests now give up after 5 minutes instead of up to 17.
+- A free tier's daily limit (OpenRouter free models, Gemini free tier) now stops the run once with
+  "Daily free limit reached … try again tomorrow" instead of backing off and retrying for hours.
+  A bad key, no credit or a paid-model swap found during a retry now also stops the run.
+- The run-paused message now names the real cause. Online providers are no longer told to restart
+  Ollama.
 - Model suggestions are no longer stuck on old models: the list updates from GitHub, shows which models you've installed, and lets you pull any Ollama tag.
 - Qwen 3.5 and other strict local models no longer reject batches with "System message must be at the beginning".
 - Lines blocked by an online model's content filter are now marked as blocked instead of crashing the batch.

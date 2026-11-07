@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 
 import requests
@@ -60,6 +61,41 @@ class InvalidApiKey(FatalProviderError):
 
 class OutOfCredits(FatalProviderError):
     """The provider wants payment (HTTP 402): no credit left on the account."""
+
+
+class DailyQuotaExceeded(FatalProviderError):
+    """HTTP 429 whose body says a per-day quota is used up (free tiers).
+
+    Backing off for a minute can't help; the run stops once instead of
+    halving and retrying for hours.
+    """
+
+
+class RequestCancelled(ConnectionError):
+    """The user pressed Stop: the request was not sent, or its reply was
+    abandoned. Not a failure: the line stays untranslated, is not reported
+    as an error and does not count toward server-down detection.
+    """
+
+
+# Cloud providers answer or fail well inside this; a 30-line batch used to
+# wait 17 minutes. Local Ollama keeps the long timeouts (slow CPUs).
+CLOUD_MAX_TIMEOUT_S = 300
+
+# "free-models-per-day" (OpenRouter), "...PerDayPerProject..." (Gemini quotaId)
+_DAILY_QUOTA_RE = re.compile(r"per[\s_-]?day", re.IGNORECASE)
+
+
+def _is_daily_quota(exc) -> bool:
+    """True only when a 429's text or body clearly names a per-day quota."""
+    parts = [str(exc), str(getattr(exc, "message", "") or "")]
+    body = getattr(exc, "body", None)
+    if body is not None:
+        try:
+            parts.append(json.dumps(body, default=str))
+        except (TypeError, ValueError):
+            parts.append(str(body))
+    return any(_DAILY_QUOTA_RE.search(p) for p in parts)
 
 
 class ContentBlocked(ValueError):
@@ -930,11 +966,52 @@ class AIClient:
             RateLimited: HTTP 429.
             ConnectionError: other HTTP errors (bad model, 5xx, ...).
             ValueError: response body is not valid JSON.
+            RequestCancelled: cancel_event was set before sending or while
+                waiting (the request is abandoned; its reply is discarded).
         """
         if self.is_cloud:
-            return self._chat_openai(messages=messages, timeout=timeout,
-                                     model=model, **kwargs)
+            timeout = min(timeout, CLOUD_MAX_TIMEOUT_S)
+            return self._run_cancellable(lambda: self._chat_openai(
+                messages=messages, timeout=timeout, model=model, **kwargs))
+        return self._run_cancellable(lambda: self._chat_ollama(
+            messages=messages, stream=stream, timeout=timeout, model=model,
+            **kwargs))
 
+    def _run_cancellable(self, fn):
+        """Run one blocking request so that Stop returns control at once.
+
+        Every chat request passes through here. The request runs in a daemon
+        helper thread; this thread waits for its result or for cancel_event,
+        whichever comes first. An abandoned request finishes on its own and
+        its reply is dropped (never applied to an entry).
+        """
+        cancel = self.cancel_event
+        if cancel.is_set():
+            raise RequestCancelled("Stopped before sending the request")
+        box: dict = {}
+        done = threading.Event()
+
+        def target():
+            try:
+                box["result"] = fn()
+            except BaseException as e:  # noqa: BLE001 — re-raised in the caller below
+                box["error"] = e
+            finally:
+                done.set()
+
+        threading.Thread(target=target, name="llm-request", daemon=True).start()
+        while not done.wait(0.2):
+            if cancel.is_set():
+                log.info("Stop pressed — abandoning the in-flight request")
+                raise RequestCancelled("Stopped while waiting for the reply")
+        if "error" in box:
+            raise box["error"]
+        return box["result"]
+
+    def _chat_ollama(self, *, messages: list, stream: bool = False,
+                     timeout: int = 120, model: str | None = None,
+                     **kwargs) -> dict:
+        """Blocking Ollama /api/chat request (see _chat)."""
         kwargs.pop("json_schema", None)  # cloud-only — Ollama rejects/ignores it
         model = model or self.model
         payload = {
@@ -1143,6 +1220,11 @@ class AIClient:
             # Also covers APITimeoutError (subclass)
             raise ServerUnreachable(f"Cannot reach {self.provider} API: {e}") from e
         except openai.RateLimitError as e:
+            if _is_daily_quota(e):
+                # Free-tier daily cap: waiting a minute can't help.
+                raise DailyQuotaExceeded(
+                    f"Daily free limit reached for {self.provider} — try "
+                    "again tomorrow or use a paid/other model.") from e
             raise RateLimited(
                 f"Rate limit exceeded for {self.provider}. "
                 "Wait a moment and try again."
@@ -2036,7 +2118,11 @@ class AIClient:
                     retry_result = data2.get("message", {}).get("content", "").strip()
                     if self._strip_thinking(retry_result):
                         result = self._postprocess_result(retry_result, code_map, clean_text)
+                except FatalProviderError:
+                    raise  # bad key / no credit / paid swap: stop the run
                 except (requests.RequestException, ConnectionError, ValueError) as exc:
+                    # Includes RequestCancelled: keep the first reply, as when
+                    # the retry is skipped after Stop.
                     log.debug("Japanese-retry failed, keeping original: %s", exc)
 
             # A placeholder the model invented or mangled beyond
@@ -2373,6 +2459,10 @@ class AIClient:
                 fld = next((f for k, _o, _c, f in entries if k == key), "")
                 result = self.translate(text=original, context=ctx, field=fld)
                 results[key] = result
+            except FatalProviderError:
+                raise  # never keep sending after a fatal error
+            except RequestCancelled:
+                break  # Stop: keep the lines the batch already returned
             except (ConnectionError, ValueError) as exc:
                 log.debug("Batch entry %s single retry failed: %s", key, exc)
 
@@ -2489,8 +2579,10 @@ class AIClient:
         try:
             v = self.translate(text=text, context=context, field=field)
             variants.append(v)
+        except FatalProviderError:
+            raise  # shown by the caller's on_error; more requests can't help
         except (ConnectionError, ValueError):
-            pass
+            pass  # the creative variants below may still succeed
 
         # Pre-process once for all creative variants
         clean_text, code_map = self._extract_codes(text)
@@ -2530,6 +2622,8 @@ class AIClient:
                         clean_text)
                     if result2 and result2 not in variants:
                         variants.append(result2)
+            except FatalProviderError:
+                raise
             except (requests.RequestException, ConnectionError, ValueError) as exc:
                 log.debug("Variant %d/%d failed: %s", len(variants) + 1, 3, exc)
 
