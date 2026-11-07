@@ -5,6 +5,7 @@ local 5-line / 1-worker values."""
 import json
 
 import pytest
+from qt_helpers import dispose_main_window
 
 from translator.ai_client import (
     CLOUD_DEFAULT_WORKERS, LOCAL_DEFAULT_WORKERS, AIClient, get_model_pricing)
@@ -31,12 +32,7 @@ def window(qapp, monkeypatch, settings_file):
     win = mw.MainWindow()
     win._closing = True
     yield win
-    win._autosave_timer.stop()
-    win.hide()
-    _KEEP.append(win)
-
-
-_KEEP: list = []
+    dispose_main_window(win)
 
 
 def _use(win, provider, model=""):

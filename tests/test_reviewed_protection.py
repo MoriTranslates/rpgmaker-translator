@@ -3,6 +3,7 @@ and late LLM results never overwrite edits made while they were in flight.
 """
 
 import pytest
+from qt_helpers import dispose_main_window
 
 from translator.project_model import TranslationEntry, TranslationProject
 
@@ -58,13 +59,7 @@ def window(qapp, monkeypatch, tmp_path):
     win = mw.MainWindow()
     win._closing = False
     yield win
-    win._closing = True
-    win._autosave_timer.stop()
-    win.hide()
-    _KEEP.append(win)
-
-
-_KEEP: list = []
+    dispose_main_window(win)
 
 
 def _load(win, entries):

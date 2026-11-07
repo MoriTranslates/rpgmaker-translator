@@ -26,7 +26,7 @@ dynamic = ["version", "dependencies"]
 
 [project.optional-dependencies]
 # Keep in sync with requirements-dev.txt
-dev = ["pytest>=9.1,<10", "ruff==0.17.3", "pyinstaller>=6.18,<7"]
+dev = ["pytest>=9.1,<10", "pytest-timeout>=2.4,<3", "ruff==0.17.3", "pyinstaller>=6.18,<7"]
 
 [project.urls]
 Homepage = "https://github.com/MoriTranslates/rpgmaker-translator"
@@ -43,8 +43,17 @@ include = ["translator*"]
 # ---------------------------------------------------------------- pytest ---
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# --durations: the slowest tests stay visible in every run.
+addopts = "-ra --durations=10"
 xfail_strict = true
+# Hard per-test limit (pytest-timeout).  The whole suite runs in well under a
+# minute and no test needs more than ~2 s; a test that hangs (a real network
+# wait, a stuck QThread) must fail fast instead of stalling the run.  Only the
+# "thread" method works on Windows: on a hit it dumps every thread's stack
+# and ends the whole pytest process (no summary), so treat a timeout as a
+# hard failure and read the dump.
+timeout = 10
+timeout_method = "thread"
 
 # ------------------------------------------------------------------ ruff ---
 [tool.ruff]

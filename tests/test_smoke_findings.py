@@ -10,6 +10,7 @@ import os
 import zlib
 
 import pytest
+from qt_helpers import dispose_main_window
 
 import ruby_marshal_check as rmc
 from translator.project_model import TranslationEntry
@@ -716,9 +717,7 @@ def test_open_project_shows_load_warnings(qapp, monkeypatch, tmp_path):
     try:
         win._open_project_path(str(_wolf_game(tmp_path)))
     finally:
-        win._closing = True
-        win._autosave_timer.stop()
-        win.hide()
+        dispose_main_window(win)
     titles = [t for t, _ in shown]
     assert "Some Game Files Could Not Be Read" in titles
     text = dict(shown)["Some Game Files Could Not Be Read"]

@@ -17,6 +17,7 @@ from types import SimpleNamespace  # noqa: E402
 
 import openai  # noqa: E402
 import pytest  # noqa: E402
+from qt_helpers import dispose  # noqa: E402
 
 from translator import ai_client  # noqa: E402
 from translator.ai_client import (  # noqa: E402
@@ -183,7 +184,7 @@ def dialog(qapp, monkeypatch):
 
     yield make
     for dlg in made:
-        dlg.deleteLater()
+        dispose(dlg)
 
 
 def test_dialog_shows_key_hides_url_and_fills_models(dialog):

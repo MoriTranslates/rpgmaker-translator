@@ -5,6 +5,7 @@ import json
 import os
 
 import pytest
+from qt_helpers import dispose, dispose_main_window
 from PyQt6.QtCore import QByteArray, QProcess, Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QMessageBox, QWidget, QVBoxLayout
@@ -43,15 +44,11 @@ def make_window(qapp, monkeypatch, settings_file):
         return win
 
     yield make
-    # Deleting MainWindows mid-session (deleteLater outside a running event
-    # loop) can crash at interpreter exit — keep them alive, just idle.
+    # Deleted now (after their threads stop): kept-alive windows made every
+    # later stylesheet change slower and were deleted at a random later
+    # point (see qt_helpers.py).
     for win in windows:
-        win._autosave_timer.stop()
-        win.hide()
-    _KEEP_ALIVE.extend(windows)
-
-
-_KEEP_ALIVE: list = []
+        dispose_main_window(win)
 
 
 def _load_entries(win, entries):
@@ -323,7 +320,7 @@ def test_gpu_monitor_hidden_when_nvidia_smi_missing(qapp, monkeypatch):
     host.hide()
     host.show()          # re-showing the parent must not bring it back
     assert panel.isHidden()
-    host.deleteLater()
+    dispose(host)
 
 
 def test_gpu_monitor_nonzero_exit_without_gpu_hides(qapp):
@@ -333,7 +330,7 @@ def test_gpu_monitor_nonzero_exit_without_gpu_hides(qapp):
     panel._on_proc_finished(9, QProcess.ExitStatus.NormalExit)
     assert panel.isHidden()
     assert not panel._timer.isActive()
-    panel.deleteLater()
+    dispose(panel)
 
 
 def test_gpu_monitor_stays_visible_on_nvidia(qapp, monkeypatch):
@@ -350,7 +347,7 @@ def test_gpu_monitor_stays_visible_on_nvidia(qapp, monkeypatch):
     panel._on_proc_finished(1, QProcess.ExitStatus.NormalExit)
     assert panel.isVisible()
     panel.hide()
-    panel.deleteLater()
+    dispose(panel)
 
 
 # ── 5. Model recommendation order ─────────────────────────────────
@@ -369,7 +366,7 @@ def test_model_suggestion_recommends_qwen35_first(qapp, monkeypatch):
     titles = [g.title() for g in groups if hasattr(g, "title")]
     assert titles[0].startswith("Qwen3.5")
     assert "Sugoi" in titles[1]
-    dlg.deleteLater()
+    dispose(dlg)
 
 
 def test_images_tab_renamed(make_window):

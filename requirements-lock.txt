@@ -30,6 +30,7 @@ PyQt6-Qt6==6.12.0
 PyQt6_sip==13.13.0
 pyspellchecker==0.9.1
 pytest==9.2.0
+pytest-timeout==2.4.0
 pywin32-ctypes==0.2.3
 requests==2.34.2
 rubymarshal==1.2.10
