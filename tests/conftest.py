@@ -53,6 +53,14 @@ def qapp():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_process_listing(monkeypatch):
+    """Stopping Ollama sweeps orphaned runners; tests must never see (or
+    kill) the real machine's processes. Tests that need a listing set one."""
+    from translator import ollama_procs
+    monkeypatch.setattr(ollama_procs, "list_processes", lambda: [])
+
+
+@pytest.fixture(autouse=True)
 def _no_model_list_network(monkeypatch):
     """The suggestions window must never fetch from GitHub during tests."""
     from translator.widgets.model_suggestion_dialog import ModelSuggestionDialog

@@ -13,6 +13,29 @@ The release workflow publishes the section whose heading matches the pushed tag
 - OpenRouter is now a named provider (one key, many models, with a built-in address). Unlike "Custom", it never shares or overwrites your Ollama address.
 
 ### Fixed
+- Restarting or closing Ollama from the app no longer leaves its model runners (`llama-server.exe`)
+  running in the background. These leftovers could hold many GB of RAM and nearly all VRAM. The
+  app now ends Ollama together with its runners and cleans up runners left behind by earlier
+  restarts. It only ends runners from Ollama's own install folder whose Ollama has already
+  exited, so a separate llama.cpp, or an Ollama that is still running, is never touched. If the
+  Ollama the app started already uses the requested worker count, it is no longer restarted.
+- A control-code marker that a small model rewrote (for example `"CODE1"`, `CODE1` or `{CODE1}`)
+  is no longer written into the game as text. When it's clear which code was meant, the code is
+  put back. Otherwise the line is retried on its own or left untranslated.
+- Local runs no longer reload the model before every batch. The context size sent to Ollama is
+  rounded up to a few fixed sizes and doesn't shrink during a session, so the loaded model is
+  reused instead of being restarted for each slightly different batch.
+- An online model that doesn't exist or that your account can't use now stops the run once with a
+  clear message instead of failing every line. This includes OpenRouter's "No endpoints found
+  matching your data policy" (common with :free models), which now points you to
+  openrouter.ai/settings/privacy.
+- A reply that was cut off at the length limit, or that the content filter cut partway, is no
+  longer saved as a translation. The batch falls back to single lines and a failed line is reported.
+- OpenRouter model names with a mistyped variant (`:fre`, `:Free`, `:FREE`) now stop before
+  sending anything. Before, OpenRouter could quietly serve the paid model instead.
+- Blocked lines now say why the content filter blocked them when the provider gives a reason
+  (for example "Blocked by Google Gemini's content filter: PROHIBITED_CONTENT"), or "reason not
+  given".
 - Stop now stops within about a second, even while an online model is slow to answer. Lines
   that were in flight stay untranslated (not marked as errors), and opening, loading or closing
   a project no longer asks you to stop the run again after you already pressed Stop. Online

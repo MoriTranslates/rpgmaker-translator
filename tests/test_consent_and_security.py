@@ -36,7 +36,7 @@ def test_stop_server_never_kills_other_ollama_by_default(monkeypatch):
 def test_stop_server_kills_only_with_consent_flag(monkeypatch):
     calls = _record_subprocess(monkeypatch)
     AIClient().stop_server(kill_external=True)
-    assert ["taskkill", "/F", "/IM", "ollama.exe"] in calls
+    assert ["taskkill", "/F", "/T", "/IM", "ollama.exe"] in calls
 
 
 @pytest.mark.skipif(os.name != "nt", reason="tasklist is Windows-only")

@@ -11,6 +11,7 @@ import time
 import requests
 
 from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
+from . import ollama_procs
 from .renpy import RENPY_INTERP_RE, RENPY_TAG_RE
 
 # Hides the console window of child processes on Windows; the flag doesn't
@@ -86,8 +87,8 @@ CLOUD_MAX_TIMEOUT_S = 300
 _DAILY_QUOTA_RE = re.compile(r"per[\s_-]?day", re.IGNORECASE)
 
 
-def _is_daily_quota(exc) -> bool:
-    """True only when a 429's text or body clearly names a per-day quota."""
+def _error_text(exc) -> str:
+    """An API error's text, message and JSON body as one string."""
     parts = [str(exc), str(getattr(exc, "message", "") or "")]
     body = getattr(exc, "body", None)
     if body is not None:
@@ -95,7 +96,146 @@ def _is_daily_quota(exc) -> bool:
             parts.append(json.dumps(body, default=str))
         except (TypeError, ValueError):
             parts.append(str(body))
-    return any(_DAILY_QUOTA_RE.search(p) for p in parts)
+    return "\n".join(parts)
+
+
+def _is_daily_quota(exc) -> bool:
+    """True only when a 429's text or body clearly names a per-day quota."""
+    return bool(_DAILY_QUOTA_RE.search(_error_text(exc)))
+
+
+# OpenRouter :free models are refused when the account's privacy settings
+# exclude every provider that serves them.
+_DATA_POLICY_RE = re.compile(r"no endpoints found matching your data policy",
+                             re.IGNORECASE)
+# Wording that clearly says "this model doesn't exist / you can't use it".
+# Deliberately narrow: anything else stays a per-request error.
+_MODEL_ERROR_RE = re.compile(
+    r"no endpoints found for\b"
+    r"|model_not_found"
+    r"|\bnot_found_error\b[^\n]{0,40}?\bmodel\b"   # Anthropic: "model: <id>"
+    r"|not a valid model"
+    r"|\b(?:invalid|unknown) model\b"
+    r"|\bno such model\b"
+    r"|\bmodels?\b[^\n]{0,120}?\b(?:not found|does not exist)"
+    r"|\b(?:do|does)(?:n't| not) have access to (?:the |this )?model\b",
+    re.IGNORECASE)
+# A 400 about the request itself (too long, bad JSON, unsupported option)
+# can succeed with a smaller batch: never treat it as a missing model.
+_PER_REQUEST_RE = re.compile(r"context|token|length|payload|parameter",
+                             re.IGNORECASE)
+
+
+def _model_error_message(status, text: str, provider: str, model: str) -> str | None:
+    """Message for a fatal model/access error, or None if it isn't one."""
+    if status not in (400, 403, 404):
+        return None
+    if _DATA_POLICY_RE.search(text):
+        return (f"{provider} has no provider for '{model}' that your privacy "
+                "settings allow (common with :free models). Check "
+                "openrouter.ai/settings/privacy, or pick another model.")
+    if _PER_REQUEST_RE.search(text) or not _MODEL_ERROR_RE.search(text):
+        return None
+    detail = text.splitlines()[0][:200] if text else ""
+    return (f"{provider} can't use model '{model}' (not found, or no access): "
+            f"{detail}. Pick another model in Settings.")
+
+
+# OpenRouter model variants, from openrouter.ai/docs/guides/routing/model-variants
+# (checked 2026-11-06). Any other ":suffix" is dropped silently by OpenRouter,
+# which can serve the paid model instead of the free one.
+_OPENROUTER_VARIANTS = frozenset({
+    "free", "batch", "thinking", "extended",
+    "nitro", "floor", "exacto", "online",
+})
+
+
+def _openrouter_model_typo(model: str) -> bool:
+    """True if an OpenRouter model id has stray characters or an unknown
+    ``:variant`` (variants are case-sensitive: ":Free" is not ":free")."""
+    if model != model.strip() or not model[-1].isalnum():
+        return True
+    tail = model.rsplit("/", 1)[-1]
+    if ":" in tail:
+        return tail.rsplit(":", 1)[1] not in _OPENROUTER_VARIANTS
+    return False
+
+
+# Gemini block reasons / finish reasons (also passed through by OpenRouter).
+_BLOCK_TOKEN_RE = re.compile(
+    r"\b(PROHIBITED_CONTENT|BLOCKLIST|SPII|IMAGE_SAFETY|SAFETY|RECITATION)\b")
+_BLOCKED_WORD_RE = re.compile(r"\bblock(?:ed|_?reason)?\b", re.IGNORECASE)
+# native_finish_reason values that are normal endings, not a filter reason
+_NORMAL_FINISH = frozenset({"stop", "length", "content_filter", "end_turn",
+                            "max_tokens", "tool_calls", "eos",
+                            "finish_reason_unspecified"})
+
+
+def _as_data(obj, depth: int = 0):
+    """SDK object / namespace -> plain dicts and lists (extra fields kept)."""
+    if depth > 8:
+        return None
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _as_data(v, depth + 1) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_as_data(v, depth + 1) for v in obj]
+    dump = getattr(obj, "model_dump", None)
+    if callable(dump):
+        try:
+            return _as_data(dump(), depth + 1)
+        except Exception:  # noqa: BLE001 -- only used to word a message
+            pass  # fall through to vars(); a reason we can't read is "not given"
+    try:
+        return _as_data(vars(obj), depth + 1)
+    except TypeError:
+        return None
+
+
+def _block_reasons(obj) -> list[str]:
+    """Why a provider's filter blocked a reply, from any known field.
+
+    Looks for block_reason / blockReason (Gemini prompt feedback),
+    native_finish_reason (OpenRouter) and safety ratings marked blocked.
+    """
+    found: list[str] = []
+
+    def add(val):
+        val = str(val).strip()
+        if val.upper().startswith("HARM_CATEGORY_"):
+            val = val[len("HARM_CATEGORY_"):]
+        if val and val not in found:
+            found.append(val)
+
+    def walk(node):
+        if isinstance(node, list):
+            for v in node:
+                walk(v)
+            return
+        if not isinstance(node, dict):
+            return
+        for k, v in node.items():
+            kl = k.lower()
+            if kl in ("block_reason", "blockreason") and isinstance(v, str):
+                add(v)
+            elif kl == "native_finish_reason" and isinstance(v, str):
+                if v.lower() not in _NORMAL_FINISH:
+                    add(v)
+            elif kl in ("safety_ratings", "safetyratings") and isinstance(v, list):
+                for r in v:
+                    if isinstance(r, dict) and r.get("blocked") and r.get("category"):
+                        add(r["category"])
+            else:
+                walk(v)
+
+    walk(_as_data(obj))
+    return found
+
+
+def _blocked_message(provider: str, reasons: list[str]) -> str:
+    why = ", ".join(reasons) if reasons else "reason not given"
+    return f"Blocked by {provider}'s content filter: {why}"
 
 
 class ContentBlocked(ValueError):
@@ -103,6 +243,14 @@ class ContentBlocked(ValueError):
 
     A per-request failure: the batch halves and falls back to single lines,
     and a blocked single line is reported on that entry.
+    """
+
+
+class ReplyTruncated(ValueError):
+    """The reply stopped at the length limit, so it is cut off mid-text.
+
+    Never saved as a translation: a batch halves and falls back to single
+    lines, a single line is reported as failed.
     """
 
 
@@ -151,6 +299,29 @@ _PLACEHOLDER_NORMALIZE_RE = re.compile(
     r'(?:«|<<|\[)\s*CODE\s*(\d+)\s*(?:»|>>|\])')
 _PLACEHOLDER_RE = re.compile(r'«CODE\d+»')
 
+# Looser rewrites small models produce: "CODE1", 'Code1', {CODE1}, bare
+# CODE1, curly quotes. "CODE" must be glued to its digits, so "the CODE is"
+# or "code 1234" in real text never counts.
+_CODE_CORE = r'(?<![A-Za-z0-9_])[Cc][Oo][Dd][Ee](\d+)(?!\d)'
+_Q_OPEN = '"\'{(<[«' + chr(0x201C) + chr(0x2018)
+_Q_CLOSE = '"\'})>]»' + chr(0x201D) + chr(0x2019)
+_PLACEHOLDER_LOOSE_RE = re.compile(
+    '[' + re.escape(_Q_OPEN) + r']\s*' + _CODE_CORE
+    + r'\s*[' + re.escape(_Q_CLOSE) + ']'
+    + '|' + _CODE_CORE)   # wrapped form first; else the bare word
+# Any marker-like token left in a finished translation
+_PLACEHOLDER_LEAK_RE = re.compile(r'(?<![A-Za-z0-9_])[Cc][Oo][Dd][Ee]\d+(?!\d)')
+
+
+def _leaked_placeholder(result: str, original: str) -> bool:
+    """True if the translation still holds a «CODEn» marker or a rewrite
+    of one ("CODE1", code1, ...) that the source text itself doesn't have."""
+    if _PLACEHOLDER_RE.search(result):
+        return True
+    in_source = {t.upper() for t in _PLACEHOLDER_LEAK_RE.findall(original or "")}
+    return any(t.upper() not in in_source
+               for t in _PLACEHOLDER_LEAK_RE.findall(result))
+
 
 def _is_reasoning_model(model: str) -> bool:
     """OpenAI reasoning models (gpt-5*, o1/o3/o4...) reject temperature and
@@ -186,7 +357,19 @@ def _estimate_num_ctx(messages: list, num_predict: int, floor: int = 4096) -> in
     """Context window sized to the prompt: ~2 chars/token (JP-heavy), capped 16K."""
     chars = sum(len(m.get("content", "")) for m in messages
                 if isinstance(m.get("content", ""), str))
-    return min(16384, max(floor, chars // 2 + num_predict))
+    return min(NUM_CTX_CAP, max(floor, chars // 2 + num_predict))
+
+
+# Ollama restarts the model runner whenever num_ctx changes, so the sizes
+# sent are rounded up to a few fixed steps (see AIClient._stable_num_ctx).
+NUM_CTX_CAP = 16384
+_NUM_CTX_STEP = 4096
+
+
+def _ctx_bucket(n: int) -> int:
+    """Round a context size up to a multiple of 4096, between 4096 and the cap."""
+    steps = max(1, -(-int(n) // _NUM_CTX_STEP))  # ceiling division
+    return min(NUM_CTX_CAP, steps * _NUM_CTX_STEP)
 
 
 def _to_pig_latin(text: str) -> str:
@@ -866,8 +1049,12 @@ class AIClient:
         self.dazed_mode = False  # DazedMTL mode toggle (batch 30, DazedMTL prompt)
         self.project_type = "rpgmaker_mv"  # "rpgmaker_mv" | "rpgmaker_mz" | "tyranoscript" | "srpgstudio"
         self._managed_proc = None  # subprocess.Popen if we started Ollama
+        self._managed_parallel = None  # its OLLAMA_NUM_PARALLEL
+        # Largest num_ctx sent per model this session (never shrinks, so
+        # Ollama keeps the loaded runner instead of reloading per request)
+        self._num_ctx_high: dict[str, int] = {}
+        self._num_ctx_lock = threading.Lock()
         # Cost tracking (cloud APIs only) — lock protects parallel worker updates
-        import threading
         self._token_lock = threading.Lock()
         self.session_input_tokens = 0
         self.session_output_tokens = 0
@@ -1014,6 +1201,10 @@ class AIClient:
         """Blocking Ollama /api/chat request (see _chat)."""
         kwargs.pop("json_schema", None)  # cloud-only — Ollama rejects/ignores it
         model = model or self.model
+        options = kwargs.get("options")
+        if isinstance(options, dict) and options.get("num_ctx"):
+            kwargs["options"] = {**options, "num_ctx": self._stable_num_ctx(
+                model, options["num_ctx"])}
         payload = {
             "model": model,
             "messages": messages,
@@ -1045,7 +1236,22 @@ class AIClient:
             raise ConnectionError(
                 f"Ollama error {r.status_code}: {body}"
             )
-        return r.json()
+        data = r.json()
+        if isinstance(data, dict) and data.get("done_reason") == "length":
+            # Hit num_predict: the reply is cut off mid-text.
+            raise ReplyTruncated(
+                "Ollama reply was cut off at the length limit; not saved")
+        return data
+
+    def _stable_num_ctx(self, model: str, wanted: int) -> int:
+        """num_ctx to send for this model: the request's need rounded up to
+        a fixed step, and never below what this model already got this
+        session (a change of num_ctx makes Ollama reload the model)."""
+        size = _ctx_bucket(wanted)
+        with self._num_ctx_lock:
+            size = max(size, self._num_ctx_high.get(model, 0))
+            self._num_ctx_high[model] = size
+        return size
 
     def preload_model(self) -> bool:
         """Load the model into VRAM without generating anything.
@@ -1150,12 +1356,12 @@ class AIClient:
 
         client = self._get_openai_client(openai).with_options(timeout=timeout)
         model = model or self.model
-        if (self.provider == "OpenRouter" and model
-                and (model != model.strip() or not model[-1].isalnum())):
+        if self.provider == "OpenRouter" and model and _openrouter_model_typo(model):
             # OpenRouter quietly drops a suffix it doesn't recognise:
-            # "…:free." was served by the PAID model. Stop instead.
+            # "…:free." / ":fre" was served by the PAID model. Stop instead.
             raise ModelNotFound(
-                f"Model name '{model}' looks mistyped (check the end of it). "
+                f"Model name '{model}' looks mistyped (check the end of it; "
+                "variants such as :free are lower-case). "
                 "OpenRouter would pick a different, possibly paid, model. "
                 "Fix it in Settings.")
 
@@ -1234,6 +1440,19 @@ class AIClient:
                 raise OutOfCredits(
                     f"{self.provider} says there is no credit left on the "
                     "account. Add credit, or pick a free model.") from e
+            text = _error_text(e)
+            if e.status_code in (400, 403):
+                # A prompt the provider's filter refused (Gemini can answer
+                # this way instead of with finish_reason=content_filter).
+                reasons = _block_reasons(getattr(e, "body", None))
+                if not reasons and _BLOCKED_WORD_RE.search(text):
+                    reasons = list(dict.fromkeys(_BLOCK_TOKEN_RE.findall(text)))
+                if reasons:
+                    raise ContentBlocked(
+                        _blocked_message(self.provider, reasons)) from e
+            fatal = _model_error_message(e.status_code, text, self.provider, model)
+            if fatal:
+                raise ModelNotFound(fatal) from e
             raise ConnectionError(f"{self.provider} API error ({e.status_code}): {e.message}")
 
         served = getattr(response, "model", None)
@@ -1251,9 +1470,17 @@ class AIClient:
             message = getattr(choice, "message", None)
             finish = getattr(choice, "finish_reason", None)
             text = getattr(message, "content", None) if message is not None else None
-            if message is None or (not text and finish == "content_filter"):
-                # Safety filter: no message, or a filtered empty one.
-                raise ContentBlocked(f"Blocked by {self.provider}'s content filter")
+            if message is None or finish == "content_filter":
+                # Safety filter: no message, or a filtered (possibly partial)
+                # one. Partial text is never saved as a translation.
+                raise ContentBlocked(_blocked_message(
+                    self.provider, _block_reasons(response)))
+            if finish == "length":
+                # Cut off at the token limit: the text ends mid-sentence
+                # (or mid-JSON for a batch).
+                raise ReplyTruncated(
+                    f"{self.provider} reply was cut off at the length limit; "
+                    "not saved")
             content = text or ""
 
         # Track token usage for cost calculation (thread-safe for parallel workers)
@@ -1395,41 +1622,56 @@ class AIClient:
         user confirmed it) is the OllamaService stopped and every other
         ollama.exe killed -- that also stops Ollama for any other app.
         """
-        # 1. Kill our own managed subprocess if we started one
-        if self._managed_proc and self._managed_proc.poll() is None:
-            log.info("Stopping managed Ollama subprocess (PID %d)", self._managed_proc.pid)
-            self._managed_proc.terminate()
+        # 1. Kill our own managed subprocess (and its model runners)
+        self._end_managed_proc("Stopping", wait_s=5)
+
+        if kill_external:
+            # 2. Stop the Windows service (if running)
             try:
-                self._managed_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._managed_proc.kill()
-                self._managed_proc.wait(timeout=3)
-            self._managed_proc = None
+                subprocess.run(
+                    ["net", "stop", "OllamaService"],
+                    capture_output=True, timeout=10,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+                # Usually "no such service"; the taskkill below still runs.
+                log.debug("net stop OllamaService failed: %s", e)
 
-        if not kill_external:
-            time.sleep(0.5)
-            return
+            # 3. Kill any remaining ollama.exe processes with their runners
+            # (/T: without it every runner is orphaned, holding RAM/VRAM).
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/IM", "ollama.exe"],
+                    capture_output=True, timeout=10,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+                log.warning("taskkill ollama.exe failed: %s", e)
 
-        # 2. Stop the Windows service (if running)
-        try:
-            subprocess.run(
-                ["net", "stop", "OllamaService"],
-                capture_output=True, timeout=10,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
-
-        # 3. Kill any remaining ollama.exe processes
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "ollama.exe"],
-                capture_output=True, timeout=5,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
-
-        # Brief pause to let ports release
+        # Brief pause to let ports release (and dying runners exit)
         time.sleep(0.5)
+        # 4. Runners orphaned by this or an earlier stop (or a crash)
+        ollama_procs.kill_orphan_runners()
+
+    def _end_managed_proc(self, verb: str, wait_s: float):
+        """End the Ollama we started, with its whole process tree."""
+        proc = self._managed_proc
+        self._managed_parallel = None
+        if not (proc and proc.poll() is None):
+            self._managed_proc = None
+            return
+        log.info("%s managed Ollama subprocess (PID %d)", verb, proc.pid)
+        if not ollama_procs.kill_tree(proc.pid):
+            # Not Windows, or taskkill failed: end at least the server.
+            proc.terminate()
+        try:
+            proc.wait(timeout=wait_s)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                log.warning("Managed Ollama (PID %d) did not exit after kill",
+                            proc.pid)
+        self._managed_proc = None
 
     def restart_server(self, num_parallel: int = 2,
                        kill_external: bool = False) -> bool:
@@ -1441,6 +1683,13 @@ class AIClient:
         Without ``kill_external`` an Ollama started by someone else is
         never touched -- if one is still running, nothing is started.
         """
+        if (self.owns_server() and self._managed_parallel == num_parallel
+                and self.is_available()):
+            # Our Ollama already runs with this many slots: a restart would
+            # only unload the model (and used to orphan its runner).
+            log.info("Ollama already running with OLLAMA_NUM_PARALLEL=%d; "
+                     "not restarting", num_parallel)
+            return True
         self.stop_server(kill_external=kill_external)
         if not kill_external and self.external_ollama_running():
             log.warning("Another Ollama is running; not killing it without "
@@ -1469,6 +1718,7 @@ class AIClient:
         except (FileNotFoundError, OSError) as e:
             log.error("Failed to start Ollama: %s", e)
             return False
+        self._managed_parallel = num_parallel
 
         # Wait for server to become reachable (up to 15s)
         for _ in range(30):
@@ -1486,15 +1736,13 @@ class AIClient:
         return False
 
     def cleanup(self):
-        """Kill managed Ollama subprocess. Call on app exit."""
-        if self._managed_proc and self._managed_proc.poll() is None:
-            log.info("Cleaning up managed Ollama subprocess (PID %d)", self._managed_proc.pid)
-            self._managed_proc.terminate()
-            try:
-                self._managed_proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self._managed_proc.kill()
-            self._managed_proc = None
+        """Kill managed Ollama subprocess and its runners. Call on app exit.
+
+        Also ends Ollama runners whose server is already gone (see
+        ollama_procs); an Ollama someone else runs is never touched.
+        """
+        self._end_managed_proc("Cleaning up", wait_s=3)
+        ollama_procs.kill_orphan_runners()
 
     @staticmethod
     def _find_ollama_exe() -> str | None:
@@ -1750,6 +1998,23 @@ class AIClient:
         back to «CODE1» so they restore instead of leaking into the game.
         """
         text = _PLACEHOLDER_NORMALIZE_RE.sub('«CODE\\1»', text)
+        # Looser rewrites ("CODE1", code1, {CODE1}) are put back only when
+        # it's unambiguous: the number is one of this line's codes, it
+        # appears once, and neither the marker nor the code itself is
+        # already in the reply. Anything else stays and the leak guard
+        # rejects the line.
+        loose = [m.group(1) or m.group(2)
+                 for m in _PLACEHOLDER_LOOSE_RE.finditer(text)]
+        if loose:
+            def _fix(m):
+                n = m.group(1) or m.group(2)
+                key = f"«CODE{n}»"
+                code = mapping.get(key)
+                if (code is None or loose.count(n) != 1 or key in text
+                        or (code.strip() and code.strip() in text)):
+                    return m.group(0)
+                return key
+            text = _PLACEHOLDER_LOOSE_RE.sub(_fix, text)
         for key, code in mapping.items():
             text = text.replace(key, code)
         return text
@@ -2128,7 +2393,8 @@ class AIClient:
             # A placeholder the model invented or mangled beyond
             # normalisation would be written into the game as "«CODE7»".
             # Same rule as translate_batch(): reject, never ship it.
-            if _PLACEHOLDER_RE.search(result):
+            # Also catches rewrites like "CODE1" that couldn't be restored.
+            if _leaked_placeholder(result, text):
                 raise ValueError(
                     "LLM output contains an unknown «CODE» placeholder")
             return result
@@ -2442,7 +2708,7 @@ class AIClient:
                 translation, code_maps.get(key, {}), source)
             # Placeholder the model invented or mangled beyond normalization —
             # would leak «CODEn» into the game; retry this line on its own.
-            if _PLACEHOLDER_RE.search(translation):
+            if _leaked_placeholder(translation, orig):
                 retry_entries.append((key, orig))
                 continue
             results[key] = translation
