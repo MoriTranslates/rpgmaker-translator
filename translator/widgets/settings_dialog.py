@@ -143,7 +143,6 @@ class SettingsDialog(QDialog):
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_edit.setPlaceholderText("Enter API key...")
         self.api_key_edit.editingFinished.connect(self._on_api_key_edited)
-        self.api_key_edit.textEdited.connect(self._note_key_owner)
         self._api_key_label = QLabel("API Key:")
         form.addRow(self._api_key_label, self.api_key_edit)
 
@@ -715,9 +714,11 @@ class SettingsDialog(QDialog):
         if idx >= 0:
             self.provider_combo.setCurrentIndex(idx)
         self.api_key_edit.setText(self.client.api_key)
-        # The saved key belongs to the saved provider
-        self._key_owner = self.client.provider
-        self._key_owner_text = self.client.api_key.strip()
+        # One saved key, and it belongs to the saved provider only. The box
+        # always shows the key of the provider shown (see _on_provider_changed).
+        self._keys = ({} if self.client.provider == "Ollama (Local)"
+                      else {self.client.provider: self.client.api_key.strip()})
+        self._shown_provider = self.client.provider
         self.url_edit.setText(self.client.base_url)
 
         # Prompt preset — match current prompt to a known preset
@@ -782,6 +783,19 @@ class SettingsDialog(QDialog):
         is_custom = provider == "Custom"
         is_cloud = not is_ollama
 
+        # Keep each provider's key apart: stash the box under the provider it
+        # was showing, then show the new provider's key (or nothing). Ollama
+        # has no key, so passing through it leaves the stash alone.
+        prev = getattr(self, "_shown_provider", None)
+        if not hasattr(self, "_keys"):
+            self._keys = {}
+        if prev and prev != provider and prev != "Ollama (Local)":
+            self._keys[prev] = self.api_key_edit.text().strip()
+        self._shown_provider = provider
+        if is_cloud:
+            self.api_key_edit.setText(self._keys.get(provider, ""))
+            self.api_key_edit.setPlaceholderText(f"Enter your {provider} API key")
+
         # API key: visible for cloud providers
         self._api_key_label.setVisible(is_cloud)
         self.api_key_edit.setVisible(is_cloud)
@@ -802,7 +816,7 @@ class SettingsDialog(QDialog):
             self._fill_cloud_models(provider, models)
             self.status_label.setText(f"{provider}: {len(models)} suggested model(s)")
             self.status_label.setStyleSheet(f"color: {theme.c('accent')};")
-            if self.api_key_edit.text().strip() and self._key_is_for(provider):
+            if self.api_key_edit.text().strip():
                 # Replace the suggestions with the provider's own list
                 self._start_cloud_model_fetch()
         elif is_ollama:
@@ -1027,8 +1041,6 @@ class SettingsDialog(QDialog):
             return
         self._cloud_fetch_again = False
         provider = self.provider_combo.currentText()
-        if not self._key_is_for(provider):
-            return  # never send one provider's key to another
         api_key = self.api_key_edit.text().strip()
         self._cloud_fetch_key = api_key
         self._cloud_model_worker = _CallWorker(
@@ -1038,21 +1050,10 @@ class SettingsDialog(QDialog):
         self.status_label.setText(f"Reading {provider} model list...")
         self._cloud_model_worker.start()
 
-    def _key_is_for(self, provider: str) -> bool:
-        """True if the text in the key box was saved or typed for ``provider``."""
-        return getattr(self, "_key_owner", None) == provider
-
-    def _note_key_owner(self, _text: str = ""):
-        """The key box was edited: its text now belongs to the shown provider."""
-        self._key_owner = self.provider_combo.currentText()
-        self._key_owner_text = self.api_key_edit.text().strip()
-
     def _on_api_key_edited(self):
         """Read the model list again once a new API key is entered."""
         provider = self.provider_combo.currentText()
         key = self.api_key_edit.text().strip()
-        if key != getattr(self, "_key_owner_text", None):
-            self._note_key_owner()  # changed without typing; still this provider's
         if (provider in ("Ollama (Local)", "Custom") or not key
                 or key == getattr(self, "_cloud_fetch_key", None)):
             return
@@ -1097,7 +1098,7 @@ class SettingsDialog(QDialog):
         provider = self.provider_combo.currentText()
         url = self.url_edit.text().strip() or "http://localhost:11434"
         api_key = self.api_key_edit.text().strip()
-        if provider != "Ollama (Local)" and api_key and not self._key_is_for(provider):
+        if provider not in ("Ollama (Local)", "Custom") and not api_key:
             self.status_label.setText(f"Enter your {provider} API key first")
             return
 
@@ -1247,7 +1248,10 @@ class SettingsDialog(QDialog):
     def _save(self):
         """Apply settings and close."""
         self.client.provider = self.provider_combo.currentText()
-        self.client.api_key = self.api_key_edit.text().strip()
+        # Only the key typed for the selected provider is saved. Ollama has no
+        # key: leave the stored one as it was.
+        if self.client.provider != "Ollama (Local)":
+            self.client.api_key = self.api_key_edit.text().strip()
         self.client.base_url = self.url_edit.text().strip() or "http://localhost:11434"
         self.client.model = self.model_combo.currentText().strip()
         self.client.system_prompt = self.prompt_edit.toPlainText().strip() or SYSTEM_PROMPT
