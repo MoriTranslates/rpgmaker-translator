@@ -291,3 +291,22 @@ def test_dialog_local_defaults_when_no_local_set_saved(window, monkeypatch):
     dlg.provider_combo.setCurrentText(OLLAMA)
     assert (dlg.batch_spin.value(), dlg.workers_spin.value()) == (
         5, LOCAL_DEFAULT_WORKERS)
+
+
+def test_key_owner_round_trips_through_settings_file(window, settings_file):
+    _use(window, GEMINI, GEMINI_MODEL)
+    window.client.api_key, window.client.api_key_provider = "k", GEMINI
+    window._save_settings()
+    with open(settings_file, encoding="utf-8") as f:
+        assert json.load(f)["api_key_provider"] == GEMINI
+    window.client.api_key_provider = ""
+    window._load_settings()
+    assert window.client.api_key_provider == GEMINI
+
+
+def test_old_settings_key_owner_migration(window, settings_file):
+    for provider, owner in ((GEMINI, GEMINI), (OLLAMA, "")):
+        with open(settings_file, "w", encoding="utf-8") as f:
+            json.dump({"provider": provider, "api_key": "k"}, f)
+        window._load_settings()
+        assert window.client.api_key_provider == owner, provider

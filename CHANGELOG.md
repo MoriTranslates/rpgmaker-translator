@@ -22,7 +22,7 @@ The release workflow publishes the section whose heading matches the pushed tag
   A bad key, no credit or a paid-model swap found during a retry now also stops the run.
 - The run-paused message now names the real cause. Online providers are no longer told to restart
   Ollama.
-- Switching provider in Settings no longer sends your API key to the new provider. The key is only used for the provider it was saved or typed for; enter the new provider's key to load its model list.
+- Switching provider in Settings no longer sends or saves your API key under the new provider. Each provider shows only its own key (blank until you enter one), Save never stores a key typed for another provider, and a key saved while on Ollama stays attached to its own provider.
 - Downloading a model with `ollama pull` no longer fails when Ollama prints its spinner characters.
 - The model box in Settings now shows its dropdown arrow; the Refresh button no longer covers it.
 - Model suggestions are no longer stuck on old models: the list updates from GitHub, shows which models you've installed, and lets you pull any Ollama tag.

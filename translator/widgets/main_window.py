@@ -4260,6 +4260,10 @@ class MainWindow(QMainWindow):
             self.client.provider = cfg["provider"]
         if "api_key" in cfg:
             self.client.api_key = cfg["api_key"]
+        # Who the key belongs to; old files had none (never guess for Ollama)
+        self.client.api_key_provider = cfg.get("api_key_provider", (
+            "" if cfg.get("provider", "Ollama (Local)") == "Ollama (Local)"
+            else cfg["provider"]))
         if "prompt_preset" in cfg:
             self.client._prompt_preset = cfg["prompt_preset"]
         if "dazed_mode" in cfg:
@@ -4307,6 +4311,7 @@ class MainWindow(QMainWindow):
             "system_prompt": self.client.system_prompt,
             "provider": self.client.provider,
             "api_key": self.client.api_key,
+            "api_key_provider": getattr(self.client, "api_key_provider", ""),
             "prompt_preset": getattr(self.client, "_prompt_preset", "Custom"),
             "dazed_mode": self.client.dazed_mode,
             "workers": self.engine.num_workers,
