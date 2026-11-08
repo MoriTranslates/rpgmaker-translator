@@ -29,6 +29,10 @@ MAX_MODELS = 60
 MAX_LABEL = 60
 MAX_NOTES = 200
 MAX_TAG = 200
+MAX_LANG = 40
+MAX_LANGS_PER_MODEL = 20
+MAX_PICK_LANGUAGES = 40
+DEFAULT_LANGUAGE = "English"
 FAMILIES = ("qwen", "sugoi", "other")
 
 # Letters, digits and . _ : / - only; first character alphanumeric so a tag
@@ -46,20 +50,39 @@ class ModelEntry(NamedTuple):
     vram_gb: float
     section: str  # one of SECTIONS
     notes: str
+    # Target languages the model is good for; () = every language.
+    languages: tuple = ()
+
+    def supports(self, language: str) -> bool:
+        return not self.languages or _lang_key(language) in self.languages
+
+
+def _lang_key(language) -> str:
+    """Catalog key for a target language.  Pig Latin is an English-target
+    mode (the prompts treat it that way), so it follows English."""
+    return "English" if language == "Pig Latin" else language
 
 
 class Catalog(NamedTuple):
     entries: list
-    tier_picks: dict  # {8: tag, 12: tag, 16: tag}
+    tier_picks: dict  # {8: tag, 12: tag, 16: tag}: default for any language
+    # {"English": {8: tag, 12: tag, 16: tag}}: overrides tier_picks
+    tier_picks_by_language: dict = {}
 
-    def pick_for_vram_mb(self, vram_mb: float) -> str:
-        """Recommended tag for the detected VRAM (no GPU -> smallest tier)."""
+    def picks_for(self, language: str = DEFAULT_LANGUAGE) -> dict:
+        return self.tier_picks_by_language.get(
+            _lang_key(language), self.tier_picks)
+
+    def pick_for_vram_mb(self, vram_mb: float,
+                         language: str = DEFAULT_LANGUAGE) -> str:
+        """Recommended tag for the detected VRAM and target language
+        (no GPU -> smallest tier)."""
         gb = vram_mb / 1024 + 0.5  # a "12 GB" card reports a bit under 12
         tier = TIERS[0]
         for t in TIERS:
             if gb >= t:
                 tier = t
-        return self.tier_picks[tier]
+        return self.picks_for(language)[tier]
 
     def by_section(self, *sections):
         return [e for e in self.entries if e.section in sections]
@@ -94,6 +117,16 @@ def _plain_text(value, max_len: int, allow_empty: bool) -> str:
     return value
 
 
+def _parse_languages(value) -> tuple:
+    """Optional ``languages`` list on an entry; absent = every language."""
+    if value is None:
+        return ()
+    if (not isinstance(value, list) or not value
+            or len(value) > MAX_LANGS_PER_MODEL):
+        raise ValueError("bad languages")
+    return tuple(_plain_text(v, MAX_LANG, False) for v in value)
+
+
 def parse_catalog(data) -> Catalog:
     """Validate a decoded models.json; return a Catalog or raise ValueError.
     One bad entry rejects the whole file."""
@@ -120,20 +153,40 @@ def parse_catalog(data) -> Catalog:
             out.append(ModelEntry(
                 _plain_text(row.get("label"), MAX_LABEL, False), tag,
                 float(vram), section,
-                _plain_text(row.get("notes", ""), MAX_NOTES, True)))
+                _plain_text(row.get("notes", ""), MAX_NOTES, True),
+                _parse_languages(row.get("languages"))))
     if not out or len(out) > MAX_MODELS:
         raise ValueError("bad number of models")
-    recommended = {e.tag for e in out if e.section == "recommended"}
-    picks = data.get("tier_picks")
-    if not isinstance(picks, dict):
-        raise ValueError("missing tier_picks")
-    tier_picks = {}
-    for t in TIERS:
-        tag = picks.get(str(t))
-        if tag not in recommended:
-            raise ValueError(f"tier {t} pick is not a recommended model")
-        tier_picks[t] = tag
-    return Catalog(out, tier_picks)
+    recommended = {e.tag: e for e in out if e.section == "recommended"}
+
+    def read_picks(picks, language):
+        """One {tier: tag} table; each pick must be a recommended model
+        that supports ``language`` (None = every language)."""
+        if not isinstance(picks, dict):
+            raise ValueError("missing tier_picks")
+        table = {}
+        for t in TIERS:
+            tag = picks.get(str(t))
+            entry = recommended.get(tag) if isinstance(tag, str) else None
+            if entry is None:
+                raise ValueError(f"tier {t} pick is not a recommended model")
+            if language is None and entry.languages:
+                raise ValueError(f"tier {t} default pick is language-limited")
+            if language is not None and not entry.supports(language):
+                raise ValueError(
+                    f"tier {t} pick does not support {language}")
+            table[t] = tag
+        return table
+
+    tier_picks = read_picks(data.get("tier_picks"), None)
+    by_lang = {}
+    raw = data.get("tier_picks_by_language", {})
+    if not isinstance(raw, dict) or len(raw) > MAX_PICK_LANGUAGES:
+        raise ValueError("bad tier_picks_by_language")
+    for lang, picks in raw.items():
+        lang = _plain_text(lang, MAX_LANG, False)
+        by_lang[lang] = read_picks(picks, lang)
+    return Catalog(out, tier_picks, by_lang)
 
 
 def load_builtin() -> Catalog:

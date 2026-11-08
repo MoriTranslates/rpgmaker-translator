@@ -1,73 +1,102 @@
 {
   "schema": 1,
-  "how_to_edit": "Edit by hand after testing a model on real games. recommended = best general model, tier_picks says which one the app highlights for 8, 12 and 16+ GB of VRAM (each pick must be in recommended). specialist = JP to EN fine-tunes. experimental = exists but not yet tested for translation. vram_gb = download size + about 1.5 GB. tag = exact Ollama tag, letters, digits and . _ : / - only. Verify a tag exists before adding it.",
+  "how_to_edit": "Edit by hand after testing a model on real games. recommended = best models, tier_picks says which one the app highlights for 8, 12 and 16+ GB of VRAM (each pick must be in recommended). tier_picks is the default for any target language and must only name models that work for every language (older app versions read only this). tier_picks_by_language overrides it for one target language, e.g. English; each pick must be in recommended and support that language. languages (optional, on an entry) lists the target languages the model is good for; leave it out for all languages. specialist = JP to EN fine-tunes. experimental = not recommended or not yet tested. vram_gb = download size + about 1.5 GB. tag = exact Ollama tag, letters, digits and . _ : / - only. Verify a tag exists before adding it.",
   "tier_picks": {
     "8": "qwen3.5:9b",
     "12": "qwen3.5:9b",
     "16": "qwen3.5:9b-q8_0"
+  },
+  "tier_picks_by_language": {
+    "English": {
+      "8": "qwen3.5:9b",
+      "12": "hf.co/mradermacher/Sugoi-14B-Ultra-HF-i1-GGUF:i1-IQ4_XS",
+      "16": "hf.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF:Q4_K_M"
+    }
   },
   "recommended": [
     {
       "label": "Qwen3.5 9B",
       "tag": "qwen3.5:9b",
       "vram_gb": 8,
-      "notes": "262K context, multimodal (text + images), 5.6 GB download"
+      "notes": "All languages. Fits 8 GB cards. 5.6 GB download"
     },
     {
       "label": "Qwen3.5 9B Q8",
       "tag": "qwen3.5:9b-q8_0",
       "vram_gb": 12,
-      "notes": "Higher-quality 8-bit build of the 9B, 9.5 GB download"
-    }
-  ],
-  "specialist": [
+      "notes": "All languages. Higher-quality 8-bit build, for 16 GB cards. 9.5 GB download"
+    },
     {
-      "label": "Sugoi 14B Q2_K",
-      "tag": "hf.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF:Q2_K",
-      "vram_gb": 7,
-      "notes": "Japanese to English specialist. Quality: Fair, 5.8 GB download"
+      "label": "Sugoi 14B i1-IQ4_XS",
+      "tag": "hf.co/mradermacher/Sugoi-14B-Ultra-HF-i1-GGUF:i1-IQ4_XS",
+      "vram_gb": 9.4,
+      "languages": ["English"],
+      "notes": "English only. Best English for 12 GB cards. 8.1 GB download, about 9.4 GB with context"
     },
     {
       "label": "Sugoi 14B Q4_K_M",
       "tag": "hf.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF:Q4_K_M",
-      "vram_gb": 10,
-      "notes": "Japanese to English specialist. Quality: Good, 9.0 GB download"
+      "vram_gb": 10.5,
+      "languages": ["English"],
+      "notes": "English only. Most accurate, for 16 GB+ cards. 9.0 GB download"
+    }
+  ],
+  "specialist": [
+    {
+      "label": "Sugoi 14B i1-IQ3_M",
+      "tag": "hf.co/mradermacher/Sugoi-14B-Ultra-HF-i1-GGUF:i1-IQ3_M",
+      "vram_gb": 8.3,
+      "languages": ["English"],
+      "notes": "English only. Nearly as good as IQ4_XS. About 8.3 GB with context, for 10 GB cards"
+    },
+    {
+      "label": "Sugoi 14B Q2_K",
+      "tag": "hf.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF:Q2_K",
+      "vram_gb": 7,
+      "languages": ["English"],
+      "notes": "English only. Noticeably weaker. 5.8 GB download"
     },
     {
       "label": "Sugoi 14B Q8_0",
       "tag": "hf.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF:Q8_0",
       "vram_gb": 17,
-      "notes": "Japanese to English specialist. Quality: Great, 15.7 GB download"
+      "languages": ["English"],
+      "notes": "English only. Japanese to English specialist. Quality: Great, 15.7 GB download"
     },
     {
       "label": "Sugoi 14B F16",
       "tag": "hf.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF:F16",
       "vram_gb": 31,
-      "notes": "Japanese to English specialist. Quality: Best, 29.5 GB download"
+      "languages": ["English"],
+      "notes": "English only. Japanese to English specialist. Quality: Best, 29.5 GB download"
     },
     {
       "label": "Sugoi 32B Q2_K",
       "tag": "hf.co/sugoitoolkit/Sugoi-32B-Ultra-GGUF:Q2_K",
       "vram_gb": 14,
-      "notes": "Japanese to English specialist. Quality: Good, 12.3 GB download"
+      "languages": ["English"],
+      "notes": "English only. Japanese to English specialist. Quality: Good, 12.3 GB download"
     },
     {
       "label": "Sugoi 32B Q4_K_M",
       "tag": "hf.co/sugoitoolkit/Sugoi-32B-Ultra-GGUF:Q4_K_M",
       "vram_gb": 21,
-      "notes": "Japanese to English specialist. Quality: Great, 19.9 GB download"
+      "languages": ["English"],
+      "notes": "English only. Japanese to English specialist. Quality: Great, 19.9 GB download"
     },
     {
       "label": "Sugoi 32B Q8_0",
       "tag": "hf.co/sugoitoolkit/Sugoi-32B-Ultra-GGUF:Q8_0",
       "vram_gb": 36,
-      "notes": "Japanese to English specialist. Quality: Excellent, 34.8 GB download"
+      "languages": ["English"],
+      "notes": "English only. Japanese to English specialist. Quality: Excellent, 34.8 GB download"
     },
     {
       "label": "Sugoi 32B F16",
       "tag": "hf.co/sugoitoolkit/Sugoi-32B-Ultra-GGUF:F16",
       "vram_gb": 67,
-      "notes": "Japanese to English specialist. Quality: Best, 65.5 GB download"
+      "languages": ["English"],
+      "notes": "English only. Japanese to English specialist. Quality: Best, 65.5 GB download"
     }
   ],
   "experimental": [
@@ -75,7 +104,13 @@
       "label": "Qwen3.5 4B",
       "tag": "qwen3.5:4b",
       "vram_gb": 5,
-      "notes": "Not yet tested for translation. For small GPUs, 2.7 GB download"
+      "notes": "Not recommended for dialogue: flips meanings. 2.7 GB download"
+    },
+    {
+      "label": "Qwen3.5 MT 2B",
+      "tag": "kaelri/qwen3.5-mt:2b",
+      "vram_gb": 3.5,
+      "notes": "Not recommended: swaps answers between lines. 2.0 GB download"
     },
     {
       "label": "Qwen3.5 27B",
@@ -106,6 +141,12 @@
       "tag": "qwen3.8:27b",
       "vram_gb": 19,
       "notes": "Newer than Qwen 3.5. Not yet tested for translation. 16.8 GB download"
+    },
+    {
+      "label": "Qwen3.8 27B Uncensored IQ2_M",
+      "tag": "hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ2_M",
+      "vram_gb": 13,
+      "notes": "Slow, unofficial build. 11.3 GB download"
     }
   ]
 }

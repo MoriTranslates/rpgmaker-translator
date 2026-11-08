@@ -13,6 +13,7 @@ The release workflow publishes the section whose heading matches the pushed tag
 - OpenRouter is now a named provider (one key, many models, with a built-in address). Unlike "Custom", it never shares or overwrites your Ollama address.
 
 ### Changed
+- Model suggestions now depend on the target language set in Settings. For English, the Suggest Model dialog picks Qwen3.5 9B (8 GB), Sugoi 14B i1-IQ4_XS (12 GB) or Sugoi 14B Q4_K_M (16 GB+). For any other language it picks Qwen3.5 9B (8 and 12 GB) or Qwen3.5 9B Q8 (16 GB+), because Sugoi is English only. Sugoi models are hidden from the main list and greyed out as "English only" in the specialist list when the target is not English. New list entries: Sugoi 14B i1-IQ4_XS and i1-IQ3_M (for 10 GB cards) and an unofficial Qwen3.8 27B build. Qwen3.5 4B and Qwen3.5 MT 2B are now marked as not recommended.
 - New translation prompt (prompt v2), shared by every engine, local and online models, and
   single-line and batch requests. Its approach is adapted from
   [DazedMTL](https://github.com/dazedanon/DazedMTLTool)'s system prompt (MIT License). It frames
