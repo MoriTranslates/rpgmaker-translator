@@ -9,6 +9,11 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-11-08
+
+### Fixed
+- RPG Maker MV/MZ: plugin note tags whose value is an image file name are no longer offered for translation. Some plugins build pictures from these names (for example `<baseName:...>` loading `name1.png`, `name2.png` ... for enemy animations), so exporting English there broke the images. Projects that already translated such a tag keep the original name on export.
+
 ## [1.1.2] - 2026-11-07
 
 ### Added
