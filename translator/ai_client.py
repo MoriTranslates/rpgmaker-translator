@@ -13,13 +13,24 @@ import requests
 from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
 from . import ollama_procs
 from .renpy import RENPY_INTERP_RE, RENPY_TAG_RE
+# Translation prompts live in prompts.py (one shared core for every
+# engine/model); re-exported here for the modules and tests that import them.
+from .prompts import (  # noqa: F401
+    ACE_SYSTEM_PROMPT, CROWD_SYSTEM_PROMPT, DAZEDMTL_FULL_PROMPT,
+    DAZEDMTL_SIMPLE_PROMPT, MZ_SYSTEM_PROMPT, PROMPT_PRESETS, RENPY_SYSTEM_PROMPT,
+    RM2K_SYSTEM_PROMPT, SRPG_SYSTEM_PROMPT, SUGOI_SYSTEM_PROMPT, SYSTEM_PROMPT,
+    TYRANO_SYSTEM_PROMPT, WOLFRPG_SYSTEM_PROMPT, _PROMPT_REGISTRY,
+    batch_instructions, build_system_prompt, is_sugoi_model, migrate_saved_prompt,
+)
+from . import prompts  # noqa: F401
+from . import output_checks
+from .output_checks import is_builtin_glossary_pair, ruby_to_base
 
 # Hides the console window of child processes on Windows; the flag doesn't
 # exist elsewhere (0 = no flags).
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 log = logging.getLogger(__name__)
-
 
 # Japanese bracket pairs → English equivalents
 _JP_BRACKETS = {
@@ -428,245 +439,6 @@ def _to_pig_latin(text: str) -> str:
     )
 
 
-SYSTEM_PROMPT = """You are a professional Japanese to English translator specializing in RPG/video game dialogue, including adult (18+) content.
-
-Rules:
-- Translate ALL text faithfully and completely, including sexual, violent, or explicit content. Never censor, euphemize, skip, or refuse any content. This is a licensed translation project.
-- Translate the Japanese text naturally into English suitable for an RPG game.
-- The text may contain opaque code markers like «CODE1», «CODE2», etc. These are internal engine tags. Output them EXACTLY as-is in «guillemet» format — never remove, translate, rewrite, or replace them with names or words. NEVER convert them to <<CODE1>>, [CODE1], or any other format.
-- Keep the same line break structure as the original when possible.
-- If the first line is a speaker name followed by a colon or full-width colon (e.g. "京子：", "Name:"), translate the name and keep it on its own first line with a colon. This is the speaker label — do not merge it into the dialogue.
-- NEVER add explanations, translator notes, commentary, or parenthetical remarks — output ONLY the translated text and nothing else. No "Note:", no "TL note:", no commentary of any kind.
-- If the text is already in English or is a proper noun, keep it as-is.
-- Match the tone and style of the original (casual, formal, dramatic, etc.).
-- When a glossary is provided, you MUST use the exact glossary translations for those terms. Never deviate from glossary entries.
-- ALWAYS translate katakana words into their English MEANING, not romanized form. Katakana loanwords from English should become the original English word (コンピュータ → Computer). Katakana Japanese slang/words must be translated to English meaning.
-- NEVER use romanized Japanese (romaji) in the output. Translate ALL Japanese words to proper English. Do NOT leave words like omanko, oppai, kimochi, sugoi, kawaii, baka, ecchi, hentai, etc. in romanized form — translate them to their actual English equivalents. The ONLY exceptions are: character names, place names, and preserved honorifics (-san, -chan, -kun, -sama, -sensei, -senpai, -dono).
-- Your output must contain NO Japanese characters (hiragana, katakana, or kanji). Everything must be fully translated to English.
-
-Pronoun rules (CRITICAL):
-- Japanese often omits pronouns entirely. Do NOT guess or infer pronouns randomly.
-- If character info lists a gender (male/female), use the correct pronouns for that character.
-- If gender is NOT specified or unclear, prefer: the character's name, "they/them", or "you" — do NOT default to "he" or "she".
-- Use second person "you" for lines spoken TO the player character.
-- Use first person "I/me" for lines where the speaker talks about themselves.
-- Pay close attention to Japanese pronouns when present: 彼 (he), 彼女 (she), 俺/僕/私 (I), あなた/お前/君 (you).
-- Keep character name translations consistent throughout.
-
-Honorifics:
-- Preserve Japanese honorifics as-is: -san, -kun, -chan, -sama, -sensei, -senpai, -dono, etc.
-- Example: 田中さん → Tanaka-san (NOT "Mr. Tanaka")
-- onii-chan, onee-san, etc. should be kept in romanized form when used as address terms.
-
-Context-sensitive translation:
-- Consider the physical setting described in context. Translate verbs appropriately for the situation.
-- 揺れる can mean: swaying, shaking, rocking, bouncing, trembling — pick the one that fits the scene.
-- Avoid overly literal translations. Prioritize natural English that makes sense in the game scene.
-- For adult scenes, use natural and explicit English that matches the original intensity. Do not tone down or soften the language.
-- Do NOT capitalize common nouns mid-sentence. Words like girl, man, woman, succubus, charm, monster, hero, demon, etc. are lowercase unless at the start of a sentence or part of a proper title/name."""
-
-# MZ starts identical to the default MV prompt — separate constant so it can evolve independently
-MZ_SYSTEM_PROMPT = SYSTEM_PROMPT
-
-# VX Ace and RM2K share the same base prompt as MV
-ACE_SYSTEM_PROMPT = SYSTEM_PROMPT
-RM2K_SYSTEM_PROMPT = SYSTEM_PROMPT
-
-
-TYRANO_SYSTEM_PROMPT = """You are a professional Japanese to English translator specializing in visual novel dialogue, including adult (18+) content.
-
-Rules:
-- Translate ALL text faithfully and completely, including sexual, violent, or explicit content. Never censor, euphemize, skip, or refuse any content. This is a licensed translation project.
-- Translate the Japanese text naturally into English suitable for a visual novel.
-- The text may contain opaque code markers like «CODE1», «CODE2», etc. These represent game engine tags (variable embeds, line breaks, decorative effects). Output them EXACTLY as-is in «guillemet» format — never remove, translate, rewrite, or replace them with names or words.
-- NEVER output any square bracket tags like [r], [p], [l], [emb], [heart], [ruby], [font], [resetfont], or any other [tag] format. All engine tags have already been extracted as «CODE» markers. If you see text that looks like it should be a tag, ignore it.
-- NEVER add explanations, translator notes, commentary, or parenthetical remarks — output ONLY the translated text and nothing else.
-- If the text is already in English or is a proper noun, keep it as-is.
-- Match the tone and style of the original (casual, formal, dramatic, etc.).
-- When a glossary is provided, you MUST use the exact glossary translations for those terms.
-- ALWAYS translate katakana words into their English MEANING, not romanized form.
-- NEVER use romanized Japanese (romaji) in the output. Translate ALL Japanese words to proper English. The ONLY exceptions are: character names, place names, and preserved honorifics (-san, -chan, -kun, -sama, -sensei, -senpai, -dono).
-- Your output must contain NO Japanese characters (hiragana, katakana, or kanji). Everything must be fully translated to English.
-
-Pronoun rules (CRITICAL):
-- Japanese often omits pronouns entirely. Do NOT guess or infer pronouns randomly.
-- If character info lists a gender (male/female), use the correct pronouns for that character.
-- If gender is NOT specified or unclear, prefer: the character's name, "they/them", or "you" — do NOT default to "he" or "she".
-- Use second person "you" for lines spoken TO the player character.
-- Use first person "I/me" for lines where the speaker talks about themselves.
-
-Honorifics:
-- Preserve Japanese honorifics as-is: -san, -kun, -chan, -sama, -sensei, -senpai, -dono, etc.
-
-Context-sensitive translation:
-- This is a visual novel — dialogue is conversational and character-driven. Keep translations natural and expressive.
-- For adult scenes, use natural and explicit English that matches the original intensity. Do not tone down or soften the language.
-- Do NOT capitalize common nouns mid-sentence unless they are proper names or titles.
-- Do NOT add quotation marks around dialogue. Japanese 「」 brackets are speech markers — the game engine already displays text in dialogue boxes, so quotes are redundant. Just translate the content without wrapping it in "quotes"."""
-
-
-SRPG_SYSTEM_PROMPT = """You are a professional Japanese to English translator specializing in tactical RPG (SRPG) game dialogue, including adult (18+) content.
-
-Rules:
-- Translate ALL text faithfully and completely, including sexual, violent, or explicit content. Never censor, euphemize, skip, or refuse any content. This is a licensed translation project.
-- Translate the Japanese text naturally into English suitable for a tactical RPG game (Fire Emblem-style).
-- This game has NO inline control codes or placeholders. The text is pure prose — translate it directly.
-- Keep the same number of line breaks (newlines) as the original. Each line break corresponds to a line in the game's text box.
-- NEVER add explanations, translator notes, commentary, or parenthetical remarks — output ONLY the translated text and nothing else.
-- If the text is already in English or is a proper noun, keep it as-is.
-- Match the tone and style of the original (casual, formal, dramatic, etc.).
-- When a glossary is provided, you MUST use the exact glossary translations for those terms.
-- ALWAYS translate katakana words into their English MEANING, not romanized form.
-- NEVER use romanized Japanese (romaji) in the output. Translate ALL Japanese words to proper English. The ONLY exceptions are: character names, place names, and preserved honorifics (-san, -chan, -kun, -sama, -sensei, -senpai, -dono).
-- Your output must contain NO Japanese characters (hiragana, katakana, or kanji). Everything must be fully translated to English.
-
-Pronoun rules (CRITICAL):
-- Japanese often omits pronouns entirely. Do NOT guess or infer pronouns randomly.
-- If character info lists a gender (male/female), use the correct pronouns for that character.
-- If gender is NOT specified or unclear, prefer: the character's name, "they/them", or "you" — do NOT default to "he" or "she".
-- Use second person "you" for lines spoken TO the player character.
-- Use first person "I/me" for lines where the speaker talks about themselves.
-
-Honorifics:
-- Preserve Japanese honorifics as-is: -san, -kun, -chan, -sama, -sensei, -senpai, -dono, etc.
-
-Context-sensitive translation:
-- This is a tactical RPG with unit classes, skills, maps, and turn-based combat. Keep class names, skill names, and UI labels concise.
-- For adult scenes, use natural and explicit English that matches the original intensity. Do not tone down or soften the language.
-- Do NOT capitalize common nouns mid-sentence unless they are proper names or titles."""
-
-
-CROWD_SYSTEM_PROMPT = """You are a professional Japanese to English translator specializing in visual novel dialogue, including adult (18+) content.
-
-Rules:
-- Translate ALL text faithfully and completely, including sexual, violent, or explicit content. Never censor, euphemize, skip, or refuse any content. This is a licensed translation project.
-- Translate the Japanese text naturally into English suitable for a visual novel.
-- The text may contain opaque code markers like «CODE1», «CODE2», etc. These represent game engine tags. Output them EXACTLY as-is in «guillemet» format — never remove, translate, rewrite, or replace them with names or words.
-- NEVER add explanations, translator notes, commentary, or parenthetical remarks — output ONLY the translated text and nothing else.
-- If the text is already in English or is a proper noun, keep it as-is.
-- Match the tone and style of the original (casual, formal, dramatic, etc.).
-- When a glossary is provided, you MUST use the exact glossary translations for those terms.
-- ALWAYS translate katakana words into their English MEANING, not romanized form.
-- NEVER use romanized Japanese (romaji) in the output. Translate ALL Japanese words to proper English. The ONLY exceptions are: character names, place names, and preserved honorifics (-san, -chan, -kun, -sama, -sensei, -senpai, -dono).
-- Your output must contain NO Japanese characters (hiragana, katakana, or kanji). Everything must be fully translated to English.
-
-Pronoun rules (CRITICAL):
-- Japanese often omits pronouns entirely. Do NOT guess or infer pronouns randomly.
-- If character info lists a gender (male/female), use the correct pronouns for that character.
-- If gender is NOT specified or unclear, prefer: the character's name, "they/them", or "you" — do NOT default to "he" or "she".
-- Use second person "you" for lines spoken TO the player character.
-- Use first person "I/me" for lines where the speaker talks about themselves.
-
-Honorifics:
-- Preserve Japanese honorifics as-is: -san, -kun, -chan, -sama, -sensei, -senpai, -dono, etc.
-
-Context-sensitive translation:
-- This is a visual novel — dialogue is conversational and character-driven. Keep translations natural and expressive.
-- For adult scenes, use natural and explicit English that matches the original intensity. Do not tone down or soften the language.
-- Do NOT capitalize common nouns mid-sentence unless they are proper names or titles.
-- Do NOT add quotation marks around dialogue. Japanese 「」 brackets are speech markers — the game engine already displays text in dialogue boxes, so quotes are redundant. Just translate the content without wrapping it in "quotes"."""
-
-
-WOLFRPG_SYSTEM_PROMPT = """You are a professional Japanese to English translator specializing in RPG/video game dialogue, including adult (18+) content.
-
-Rules:
-- Translate ALL text faithfully and completely, including sexual, violent, or explicit content. Never censor, euphemize, skip, or refuse any content. This is a licensed translation project.
-- Translate the Japanese text naturally into fluent English suitable for an RPG game.
-- The text may contain placeholder markers like «CODE1», «CODE2». Output these EXACTLY as-is — never remove, translate, or replace them.
-- Keep the same number of line breaks (newlines) as the original. Each line break corresponds to a line in the game's text box.
-- NEVER add explanations, translator notes, commentary, or parenthetical remarks — output ONLY the translated text and nothing else.
-- If the text is already in English or is a proper noun, keep it as-is.
-- Match the tone and style of the original (casual, formal, dramatic, etc.).
-- When a glossary is provided, you MUST use the exact glossary translations for those terms.
-- ALWAYS translate katakana words into their English MEANING, not romanized form.
-- NEVER use romanized Japanese (romaji) in the output. Translate ALL Japanese words to proper English. The ONLY exceptions are: character names, place names, and preserved honorifics (-san, -chan, -kun, -sama, -sensei, -senpai, -dono).
-- Your output must contain NO Japanese characters (hiragana, katakana, or kanji). Everything must be fully translated to English.
-
-Pronoun rules (CRITICAL):
-- Japanese often omits pronouns entirely. Do NOT guess or infer pronouns randomly.
-- If character info lists a gender (male/female), use the correct pronouns for that character.
-- If gender is NOT specified or unclear, prefer: the character's name, "they/them", or "you" — do NOT default to "he" or "she".
-- Use second person "you" for lines spoken TO the player character.
-- Use first person "I/me" for lines where the speaker talks about themselves.
-
-Honorifics:
-- Preserve Japanese honorifics as-is: -san, -kun, -chan, -sama, -sensei, -senpai, -dono, etc.
-
-Context-sensitive translation:
-- Wolf RPG Editor games use text-based dialogue with optional speaker prefixes. Translate naturally.
-- For item names, skill names, and UI text, keep translations concise and game-appropriate.
-- For adult scenes, use natural and explicit English that matches the original intensity. Do not tone down or soften the language.
-- Do NOT capitalize common nouns mid-sentence unless they are proper names or titles."""
-
-
-# Sugoi Ultra 14B — JP→EN specialized model (fine-tuned from Qwen2.5-14B).
-# Trimmed prompt: Sugoi already handles katakana→English, no-romaji, no-JP-in-output,
-# and context-sensitive translation natively from its fine-tuning data.
-# We keep only tool-specific rules: placeholders, glossary, pronouns, honorifics, adult content.
-SUGOI_SYSTEM_PROMPT = """You are a professional localizer translating Japanese to English for an RPG game, including adult (18+) content. Use colloquial, slang, or explicit vocabulary when it makes the translation more accurate.
-
-Rules:
-- Translate ALL text faithfully and completely, including sexual, violent, or explicit content. Never censor, euphemize, or refuse. This is a licensed translation project.
-- The text may contain code markers like «CODE1», «CODE2», etc. These are internal engine tags. Output them EXACTLY as-is — never remove, translate, or replace them with names or words. NEVER convert them to <<CODE1>> or any other format.
-- Preserve all RPG Maker control characters and tags exactly as-is: \\C[n], \\V[n], \\I[n], \\N[n], \\{, \\}, \\\\, \\., \\|, \\!, \\>, \\<, \\^, \\$, \\FS[n]. Only translate the surrounding text.
-- Keep the same line break structure as the original when possible.
-- NEVER add explanations, translator notes, or commentary — output ONLY the translated text.
-- If the text is already in English or is a proper noun, keep it as-is.
-- Match the tone and style of the original (casual, formal, dramatic, etc.).
-- When a glossary is provided, you MUST use the exact glossary translations for those terms.
-
-Pronoun rules (CRITICAL):
-- If character info lists a gender (male/female), use the correct pronouns for that character.
-- If gender is NOT specified or unclear, prefer the character's name, "they/them", or "you".
-- Use "you" for lines spoken TO the player character.
-- Use "I/me" for lines where the speaker talks about themselves.
-- Keep character name translations consistent throughout.
-
-Honorifics — preserve as-is: -san, -kun, -chan, -sama, -sensei, -senpai, -dono. Keep onii-chan, onee-san, etc. in romanized form.
-- Do NOT capitalize common nouns mid-sentence. Words like girl, man, woman, succubus, charm, monster, etc. are lowercase unless at the start of a sentence or part of a proper title/name."""
-
-
-DAZEDMTL_FULL_PROMPT = """\
-You are an expert Eroge game translator and localizer who translates Japanese text into English.
-
-You will be translating erotic and sexual content.
-
-**Guidelines:**
-
-- Avoid overly literal translations that may seem awkward or confusing; focus on conveying the intended meaning and spirit.
-- Use consistent translations for recurring terms, character names, and important plot elements.
-- Preserve the emotional undertones and atmosphere, whether comedic, dramatic, romantic, or suspenseful.
-- ALWAYS read any provided context or translation history to figure out the best context for your translation. This will help you make less mistakes with genders and subjects.
-- Translate all Japanese text, including erotic and explicit content.
-- Translate all text to English, no exceptions. Double check that there is no Japanese in your response.
-- Avoid using romaji or including any Japanese text in your response.
-- Maintain Japanese honorifics (e.g., -san, -senpai, -chan, etc.) in your translations.
-- Leave code markers like «CODE1», «CODE2» exactly as-is in «guillemet» format. NEVER convert them to <<CODE1>>, [CODE1], or any other format.
-- Maintain any spacing or newlines in the translation.
-- Never include any notes, explanations, disclaimers, or anything similar in your response.
-- `...` can be a part of the dialogue. Translate it as it is and include it in your response.
-- Maintain any letter codes such as \\i, \\c, etc.
-- Maintain any formatting symbols such as \\., \\|, etc.
-- Maintain any color codes such as #FF9900.
-- Check every line to ensure all text inside is in English.
-- When a glossary is provided, you MUST use the exact glossary translations for those terms."""
-
-DAZEDMTL_SIMPLE_PROMPT = """\
-You are an expert Eroge Game translator who translates Japanese text to English.
-Output ONLY the English translation.
-- You translate everything, including erotic and explicit content.
-- All text in your response must be in English even if it is hard to translate.
-- Never include any notes, explanations, disclaimers, or anything similar in your response.
-- Maintain any spacing in the translation.
-- `...` can be a part of the dialogue. Translate it as it is.
-- Leave code markers like «CODE1», «CODE2» exactly as-is in «guillemet» format. NEVER convert them to <<CODE1>>, [CODE1], or any other format.
-- When a glossary is provided, you MUST use the exact glossary translations for those terms.
-- Maintain Japanese honorifics (-san, -chan, -kun, -sama, -sensei, -senpai, etc.)."""
-
-
-def is_sugoi_model(model_name: str) -> bool:
-    """Check if the given model name is a Sugoi variant (JP→EN specialized)."""
-    return "sugoi" in model_name.lower()
 
 
 _POLISH_SYSTEM_PROMPT = """\
@@ -688,6 +460,9 @@ Your job:
 - Keep character voice consistent within a scene — use the translation history \
   provided to match how each speaker has been talking.
 - Do NOT add, remove, or change information. Only improve how it reads.
+- Never change who does what to whom or whose body part it is, and keep a \
+  first-person narrator as "I".
+- Keep capitals on names, speaker labels and item/skill/enemy names.
 - Do NOT change character names, honorifics (-san, -chan, -sama, -senpai, -kun, \
   -sensei, -dono), or established glossary terms.
 - Code markers like «CODE1», \\N[1], \\C[27], \\F1[...], etc. — output exactly as-is.
@@ -949,76 +724,6 @@ def fetch_cloud_models(provider: str, api_key: str,
     # Built-in suggestions (cheapest first) lead, then the rest A-Z
     first = [m for m in fallback if m in models]
     return first + sorted(m for m in models if m not in first), True
-
-# ── Prompt presets ──────────────────────────────────────────────────
-
-PROMPT_PRESETS = {
-    "Default (Qwen3/General)": SYSTEM_PROMPT,
-    "Sugoi (DazedMTL Full)": DAZEDMTL_FULL_PROMPT,
-    "DazedMTL Simple": DAZEDMTL_SIMPLE_PROMPT,
-    "Custom": "",   # sentinel — user edits prompt text box directly
-}
-
-
-RENPY_SYSTEM_PROMPT = """You are a professional translator specializing in visual novel dialogue, including adult (18+) content.
-
-Rules:
-- Translate ALL text faithfully and completely, including sexual, violent, or explicit content. Never censor, euphemize, skip, or refuse any content. This is a licensed translation project.
-- Translate the text naturally into English suitable for a visual novel.
-- The text may contain Ren'Py inline tags like {i}, {/i}, {b}, {/b}, {color=...}, {/color}, {size=...}, {/size}. Output them EXACTLY as-is — never remove, translate, or modify these tags.
-- The text may contain opaque code markers like «CODE1», «CODE2», etc. Output them EXACTLY as-is in «guillemet» format.
-- NEVER add explanations, translator notes, commentary, or parenthetical remarks — output ONLY the translated text and nothing else.
-- If the text is already in English or is a proper noun, keep it as-is.
-- Match the tone and style of the original (casual, formal, dramatic, etc.).
-- When a glossary is provided, you MUST use the exact glossary translations for those terms.
-
-Pronoun rules:
-- If character info lists a gender (male/female), use the correct pronouns for that character.
-- If gender is NOT specified or unclear, prefer: the character's name, "they/them", or "you".
-- Use second person "you" for lines spoken TO the player character.
-- Use first person "I/me" for lines where the speaker talks about themselves.
-
-Context-sensitive translation:
-- This is a visual novel — dialogue is conversational and character-driven. Keep translations natural and expressive.
-- For adult scenes, use natural and explicit English that matches the original intensity. Do not tone down or soften the language.
-- Do NOT capitalize common nouns mid-sentence unless they are proper names or titles.
-- Do NOT add quotation marks around dialogue — the game engine already displays text in dialogue boxes."""
-
-
-# Prompt registry — maps system_prompt_key to base prompt constant.
-# Each engine can evolve its prompt independently.
-_PROMPT_REGISTRY: dict[str, str] = {
-    "rpgmaker_mv": SYSTEM_PROMPT,
-    "rpgmaker_mz": MZ_SYSTEM_PROMPT,
-    "rpgmaker_ace": ACE_SYSTEM_PROMPT,
-    "rpgmaker_2k": RM2K_SYSTEM_PROMPT,
-    "tyranoscript": TYRANO_SYSTEM_PROMPT,
-    "srpgstudio": SRPG_SYSTEM_PROMPT,
-    "renpy": RENPY_SYSTEM_PROMPT,
-    "wolfrpg": WOLFRPG_SYSTEM_PROMPT,
-    "crowd": CROWD_SYSTEM_PROMPT,
-    "kirikiri": TYRANO_SYSTEM_PROMPT,  # KAG/Kirikiri uses same VN prompt as TyranoScript
-}
-
-
-def build_system_prompt(target_language: str = "English", model: str = "",
-                        project_type: str = "rpgmaker_mv") -> str:
-    """Build the main translation system prompt for a given target language and model.
-
-    Sugoi models use DazedMTL Full — soft guidance that works better with
-    Sugoi's fine-tuning than verbose rule lists.
-    Each engine has its own prompt via _PROMPT_REGISTRY so they can evolve
-    independently.
-    Sugoi prompt is only used for English target — non-English falls back to
-    the engine-specific prompt since Sugoi is JP→EN only.
-    """
-    if is_sugoi_model(model) and target_language in ("English", "Pig Latin"):
-        return DAZEDMTL_FULL_PROMPT
-    base = _PROMPT_REGISTRY.get(project_type, SYSTEM_PROMPT)
-    if target_language not in ("English", "Pig Latin"):
-        base = base.replace("English", target_language)
-    return base
-
 
 def _build_name_prompt(target_language: str = "English") -> str:
     """Build the short name-translation prompt for a given target language."""
@@ -1792,7 +1497,7 @@ class AIClient:
         filtered_glossary = self._filter_glossary(text)
         if filtered_glossary:
             glossary_str = "\n".join(
-                f"  {jp} → {self._glossary_en_lower(en)}"
+                f"  {jp} → {self._glossary_en_lower(en, jp)}"
                 for jp, en in filtered_glossary.items())
             parts.append(f"REQUIRED glossary — use these EXACT translations:\n{glossary_str}")
         parts.append(f"Translate this:\n{text}")
@@ -1836,7 +1541,7 @@ class AIClient:
         user_msg = ""
         if filtered_glossary:
             glossary_str = "\n".join(
-                f"  {jp} → {self._glossary_en_lower(en)}"
+                f"  {jp} → {self._glossary_en_lower(en, jp)}"
                 for jp, en in filtered_glossary.items())
             user_msg += f"REQUIRED glossary — use these EXACT translations:\n{glossary_str}\n\n"
 
@@ -2053,8 +1758,8 @@ class AIClient:
         return self._CODE_HINT_HEADER + "\n".join(hints)
 
     _CODE_HINT_HEADER = (
-        "Character name codes (these will display as character names "
-        "in-game — use the CORRECT pronouns for each):\n"
+        "Name codes (the game shows a character's name there; copy the marker "
+        "itself, never write the name — use the CORRECT pronouns for each):\n"
     )
 
     def _actor_display_name(self, actor_id: int) -> str:
@@ -2088,7 +1793,7 @@ class AIClient:
                 pronoun = "he/him"
             else:
                 pronoun = "they/them"
-            hints.append(f"  {prefix}{placeholder} = name of {name} ({pronoun})")
+            hints.append(f"  {prefix}{placeholder} = name code for {name} ({pronoun})")
         return hints
 
     def _build_speaker_hint(self, context: str) -> str:
@@ -2132,6 +1837,24 @@ class AIClient:
                 )
         return ""
 
+    def _batch_speaker_hints(self, entries) -> str:
+        """Speaker hints for a batch, one per speaker, labelled by line.
+
+        One speaker for every line gives the plain single hint (as before);
+        otherwise each hint names its lines ("Line1, Line3: Speaker: ...").
+        Lines without a known speaker get no hint.
+        """
+        by_hint: dict[str, list[str]] = {}
+        for key, _orig, ctx, _field in entries:
+            hint = self._build_speaker_hint(ctx or "").strip()
+            if hint:
+                by_hint.setdefault(hint, []).append(key)
+        if not by_hint:
+            return ""
+        if len(by_hint) == 1 and len(next(iter(by_hint.values()))) == len(entries):
+            return next(iter(by_hint)) + "\n"
+        return "".join(f"{', '.join(keys)}: {hint}\n" for hint, keys in by_hint.items())
+
     def _filter_glossary(self, text: str, context: str = "") -> dict[str, str]:
         """Return only glossary entries whose JP term appears in text or context.
 
@@ -2145,14 +1868,20 @@ class AIClient:
         return {jp: en for jp, en in self.glossary.copy().items() if jp in search_text}
 
     @staticmethod
-    def _glossary_en_lower(en: str) -> str:
-        """Lowercase a glossary EN term so the LLM doesn't force-capitalize
-        it mid-sentence.  Preserves all-caps (HP, MP) and multi-word title
-        case that looks like a proper noun (Holy Knight, Dark Elf)."""
-        words = en.split()
-        if not words:
+    def _glossary_en_lower(en: str, jp: str = "") -> str:
+        """The glossary EN term as it is sent to the model.
+
+        Built-in default-glossary words are title-cased lists ("胸 → Breasts",
+        "少女 → Girl"); a single word from there is lowercased so the model
+        doesn't capitalise it mid-sentence. Everything else (project and
+        user entries: names like "Migaro", items, skills) is sent exactly as
+        written, capitals included: lowercasing those made models write
+        "migaro". All-caps (HP) and multi-word title case stay as they are.
+        """
+        if not is_builtin_glossary_pair(jp, en):
             return en
-        if en.isupper():
+        words = en.split()
+        if not words or en.isupper():
             return en
         if len(words) > 1 and all(w[0:1].isupper() for w in words):
             return en
@@ -2185,6 +1914,7 @@ class AIClient:
         parts: list[str] = []
         if self.actor_context:
             parts.append(self.actor_context)
+        context = ruby_to_base(context)
         if context:
             # If history pairs are being sent separately, the bulky surrounding-
             # dialogue dump is redundant — but keep the speaker_hint either way
@@ -2221,7 +1951,7 @@ class AIClient:
         filtered_glossary = self._filter_glossary(raw_text, context)
         if filtered_glossary:
             glossary_str = "\n".join(
-                f"  {jp} → {self._glossary_en_lower(en)}"
+                f"  {jp} → {self._glossary_en_lower(en, jp)}"
                 for jp, en in filtered_glossary.items())
             parts.append(
                 f"REQUIRED glossary — use these EXACT translations:\n{glossary_str}"
@@ -2236,14 +1966,18 @@ class AIClient:
         r"\b(\w+)\s*(['\u2019])\s*(ve|re|ll|t|s|d|m)\b", re.IGNORECASE)
 
     def _postprocess_result(self, result: str, code_map: dict,
-                            source: str = "") -> str:
+                            source: str = "", field: str = "") -> str:
         """Strip thinking/notes, apply Pig Latin, restore control codes.
 
         ``source`` is the cleaned source text the LLM saw (placeholders +
         converted brackets); used to avoid stripping content that mirrors it.
+        ``field`` is the entry's field type (speaker_name labels are fixed).
         """
         result = self._strip_thinking(result)
         result = self._strip_notes(result, source)
+        # Prompt v2 repairs (line breaks, "……", name/label capitals, leading
+        # blank line). Before codes are restored, so a code is never touched.
+        result = self._clean_output(source, result, field)
         if self.target_language == "Pig Latin":
             result = _to_pig_latin(result)
         if code_map:
@@ -2253,11 +1987,13 @@ class AIClient:
         # Strip outer quotes if LLM wrapped the entire translation in them.
         # Only a single wrapping pair (exactly 2 quotes) — `"Yes," she said,
         # "go."` must survive — and only if the source wasn't itself quoted.
-        if (result.startswith('"') and result.endswith('"')
-                and len(result) > 1 and '\n' not in result
-                and result.count('"') == 2
+        lead = result[:len(result) - len(result.lstrip("\n"))]
+        body = result[len(lead):]
+        if (body.startswith('"') and body.endswith('"')
+                and len(body) > 1 and '\n' not in body
+                and body.count('"') == 2
                 and not source.lstrip().startswith('"')):
-            result = result[1:-1]
+            result = lead + body[1:-1]
         # Strip leading whitespace from continuation lines (JP formatting
         # artifact — continuation 401 lines often have leading spaces that
         # look wrong in English prose).
@@ -2266,6 +2002,15 @@ class AIClient:
             result = parts[0] + '\n' + '\n'.join(
                 line.lstrip() for line in parts[1:])
         return result
+
+    def _clean_output(self, source: str, output: str, field: str = "") -> str:
+        """output_checks.clean_output with this client's glossary and actors."""
+        return output_checks.clean_output(
+            source, output,
+            glossary=self.glossary.copy() if self.glossary else None,
+            actor_names=self.actor_names.copy(),
+            actor_names_en=self.actor_names_en.copy(),
+            field=field, target_language=self.target_language)
 
     # Human-readable labels for RPG Maker entry field types
     _FIELD_HINTS = {
@@ -2356,7 +2101,7 @@ class AIClient:
 
             # Save raw result (with «CODEn» placeholders) before restoring codes
             raw_result = self._strip_thinking(result)
-            result = self._postprocess_result(result, code_map, clean_text)
+            result = self._postprocess_result(result, code_map, clean_text, field)
 
             # Auto-retry if the translation still contains Japanese characters
             if self._contains_japanese(result) and not self.cancel_event.is_set():
@@ -2382,7 +2127,7 @@ class AIClient:
                     )
                     retry_result = data2.get("message", {}).get("content", "").strip()
                     if self._strip_thinking(retry_result):
-                        result = self._postprocess_result(retry_result, code_map, clean_text)
+                        result = self._postprocess_result(retry_result, code_map, clean_text, field)
                 except FatalProviderError:
                     raise  # bad key / no credit / paid swap: stop the run
                 except (requests.RequestException, ConnectionError, ValueError) as exc:
@@ -2397,6 +2142,46 @@ class AIClient:
             if _leaked_placeholder(result, text):
                 raise ValueError(
                     "LLM output contains an unknown «CODE» placeholder")
+            # A name/variable code the model dropped or replaced with the
+            # character's current name ("\n[1]" -> "Shadow"): ask once more,
+            # then reject (never write the name into the game)
+            reason = output_checks.name_code_mismatch(text, result)
+            if reason and not self.cancel_event.is_set():
+                log.info("Translation lost a name code (%s) — retrying", reason)
+                markers = ", ".join(k for k, v in code_map.items()
+                                    if output_checks.name_code_mismatch(v, ""))
+                retry_msg = (
+                    f"Your translation dropped or replaced these code markers: {markers}. "
+                    "Each one is the player's chosen name or a game value. Copy every "
+                    "«CODE» marker exactly, the same number of times; never write a name "
+                    f"in its place.\n\nFix this translation:\n{raw_result}"
+                )
+                try:
+                    data3 = self._chat(
+                        messages=[{"role": "system", "content": self.system_prompt},
+                                  {"role": "user", "content": user_msg},
+                                  {"role": "assistant", "content": raw_result},
+                                  {"role": "user", "content": retry_msg}],
+                        timeout=120,
+                        options=self._base_options(num_predict=1024, num_ctx=num_ctx),
+                    )
+                    fixed = data3.get("message", {}).get("content", "").strip()
+                    if self._strip_thinking(fixed):
+                        result = self._postprocess_result(fixed, code_map, clean_text, field)
+                except FatalProviderError:
+                    raise
+                except (requests.RequestException, ConnectionError, ValueError) as exc:
+                    # RequestCancelled included: the check below rejects the line
+                    log.debug("Name-code retry failed: %s", exc)
+                reason = output_checks.name_code_mismatch(text, result)
+            if reason:
+                raise ValueError(f"Translation lost a name code: {reason}")
+            if _leaked_placeholder(result, text):
+                raise ValueError(
+                    "LLM output contains an unknown «CODE» placeholder")
+            # A single line has no fallback left: note an odd answer, keep it
+            for reason in output_checks.problems(clean_text, raw_result):
+                log.info("Single translation looks odd: %s", reason)
             return result
         except (ConnectionError, ValueError):
             raise  # keep subclass (ServerUnreachable / RateLimited) intact
@@ -2411,8 +2196,10 @@ class AIClient:
         """
         out = []
         for hist_jp, hist_en in history:
-            jp, _ = self._extract_codes(hist_jp or "")
-            en, _ = self._extract_codes(hist_en or "")
+            # Ruby codes show as their word (history is reference only); other
+            # codes become «CODE» markers, never raw "\r[" / "\C[" text
+            jp, _ = self._extract_codes(ruby_to_base(hist_jp or ""))
+            en, _ = self._extract_codes(ruby_to_base(hist_en or ""))
             out.append((self._convert_jp_brackets(jp), en))
         return out
 
@@ -2457,6 +2244,7 @@ class AIClient:
         if not result:
             return text  # Keep original on empty response
 
+        result = self._clean_output(clean_text, result)
         if code_map:
             result = self._restore_codes(result, code_map)
 
@@ -2559,12 +2347,9 @@ class AIClient:
         # ── Build messages (DazedMTL-style structure) ──
 
         # System prompt with batch instruction
-        batch_sys = (
-            self.system_prompt + "\n\n"
-            "CRITICAL: You must respond with a valid JSON object. "
-            "Use the exact same keys from the input. "
-            "Do not add any text outside the JSON."
-        )
+        # (JSON rules + a few short examples in this exact format)
+        batch_sys = (self.system_prompt + "\n\n"
+                     + batch_instructions(self.target_language))
 
         # Translation history as context (DazedMTL passes previous translations).
         # Folded into the ONE system message: strict chat templates (Qwen 3.5)
@@ -2587,7 +2372,7 @@ class AIClient:
             user_msg += f"{self.actor_context}\n\n"
 
         # Use context from the first entry (entries are sequential)
-        first_context = entries[0][2] if entries[0][2] else ""
+        first_context = ruby_to_base(entries[0][2] or "")
         if first_context:
             # If we sent translation history above, the surrounding-dialogue
             # block is redundant — history already covers prior lines in the
@@ -2595,9 +2380,8 @@ class AIClient:
             # the speaker hint (small, gender disambiguator history can't replace).
             if not history:
                 user_msg += f"Context (surrounding dialogue for reference, do NOT translate this):\n{first_context}\n\n"
-            speaker_hint = self._build_speaker_hint(first_context)
-            if speaker_hint:
-                user_msg += speaker_hint + "\n"
+        # Speaker hint per line (a batch can span several speakers)
+        user_msg += self._batch_speaker_hints(entries)
 
         if any_codes:
             user_msg += (
@@ -2618,7 +2402,7 @@ class AIClient:
         filtered_glossary = self._filter_glossary(batch_search_text, first_context)
         if filtered_glossary:
             glossary_str = "\n".join(
-                f"  {jp} → {self._glossary_en_lower(en)}"
+                f"  {jp} → {self._glossary_en_lower(en, jp)}"
                 for jp, en in filtered_glossary.items())
             user_msg += f"REQUIRED glossary — use these EXACT translations:\n{glossary_str}\n\n"
 
@@ -2685,12 +2469,20 @@ class AIClient:
         # Collect entries that still have Japanese for individual retry
         results = {}
         retry_entries = []
+        # An answer that belongs to another line (shifted / duplicated, or
+        # absurdly long/short for its source) is retried on its own
+        shifted = output_checks.batch_problems(payload, parsed)
         for key, translation in parsed.items():
             source = payload.get(key, "")
             translation = self._strip_notes(translation, source)
 
             # Content validation: empty or suspiciously short translations
             orig = next((o for k, o, _c, _f in entries if k == key), "")
+            if key in shifted:
+                log.info("Batch entry %s looks misplaced (%s)", key,
+                         "; ".join(shifted[key]))
+                retry_entries.append((key, orig))
+                continue
             if not translation.strip():
                 retry_entries.append((key, orig))
                 continue
@@ -2705,10 +2497,17 @@ class AIClient:
             # Same cleanup as the single-entry path (Pig Latin, code restore,
             # contraction fix, outer-quote strip, continuation-line lstrip)
             translation = self._postprocess_result(
-                translation, code_maps.get(key, {}), source)
+                translation, code_maps.get(key, {}), source,
+                next((f for k, _o, _c, f in entries if k == key), ""))
             # Placeholder the model invented or mangled beyond normalization —
             # would leak «CODEn» into the game; retry this line on its own.
             if _leaked_placeholder(translation, orig):
+                retry_entries.append((key, orig))
+                continue
+            # A name/variable code dropped or replaced by the name itself
+            name_code = output_checks.name_code_mismatch(orig, translation)
+            if name_code:
+                log.info("Batch entry %s: %s", key, name_code)
                 retry_entries.append((key, orig))
                 continue
             results[key] = translation
@@ -2827,6 +2626,7 @@ class AIClient:
 
         results = {}
         for key, translation in parsed.items():
+            translation = self._clean_output(payload.get(key, ""), translation)
             if code_maps.get(key):
                 translation = self._restore_codes(translation, code_maps[key])
             results[key] = translation

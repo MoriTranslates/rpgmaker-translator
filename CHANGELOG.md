@@ -12,7 +12,41 @@ The release workflow publishes the section whose heading matches the pushed tag
 ### Added
 - OpenRouter is now a named provider (one key, many models, with a built-in address). Unlike "Custom", it never shares or overwrites your Ollama address.
 
+### Changed
+- New translation prompt (prompt v2), shared by every engine, local and online models, and
+  single-line and batch requests. Its approach is adapted from
+  [DazedMTL](https://github.com/dazedanon/DazedMTLTool)'s system prompt (MIT License). It frames
+  the job plainly as translating an adult game, without the old "never refuse / licensed project"
+  wording. It checks who does what to whom: narration in the first person stays "I" for the
+  whole scene (the narrator's gender comes from the character info, never assumed), body parts
+  and actions stay with their owner, "lets me" / "for you" forms keep their direction, and "if"
+  or "I felt that" sentences stay hypothetical. The old "if the gender is unclear, use they"
+  rule is gone; pronouns now follow the previous lines and the character info. It keeps names,
+  speaker labels and item/skill/enemy names capitalised, keeps laughs and sound words as sounds
+  (Fufu, slapping sounds) instead of puns, writes drawn-out words with ～ and `＝` names as
+  "Bunker (Bet)", keeps blank lines, and uses "..." for ellipses. Batch requests include a few
+  short examples. If you never edited the prompt, your saved copy of the old default is replaced
+  with the new one when the app starts. An edited prompt is kept as it is.
+- The grammar polish prompt now also keeps who does what, a first-person narrator, and the
+  capitals on names.
+
 ### Fixed
+- A reply that writes the hero's current name (or a value) in place of a name or variable code
+  such as `\n[1]`, `\N[1]` or `\V[3]` is no longer saved: the line is retried, and rejected if
+  the code is still missing. Before, a renamed hero could keep the old name in that line.
+- Names from your project glossary are sent to the model with their capitals ("Migaro", not
+  "migaro"). A glossary name the model wrote in lowercase is corrected, and so is a speaker
+  label on a dialogue's first line or in the name box.
+- In a batch, an answer that belongs to a different line is retried on its own instead of being
+  saved. This covers the same answer given for two different lines, and a long line answered
+  with one or two words.
+- A line that starts with a blank line keeps it. A Japanese "……" left in an English reply
+  becomes "...", and a stray carriage return becomes a normal line break.
+- A ruby code (`\r[word,reading]`) in the surrounding context or the translation history is
+  shown to the model as the word itself, so the model no longer copies the code or breaks the
+  line at it. Other codes in the history were already shown as markers.
+- Each line in a batch now gets the speaker hint for its own speaker. Before, the whole batch
+  used the hint of its first line.
 - Restarting or closing Ollama from the app no longer leaves its model runners (`llama-server.exe`)
   running in the background. These leftovers could hold many GB of RAM and nearly all VRAM. The
   app now ends Ollama together with its runners and cleans up runners left behind by earlier

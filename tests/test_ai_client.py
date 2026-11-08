@@ -136,7 +136,7 @@ def test_pronoun_and_speaker_hints(client, fake_llm):
     client.actor_names = {1: "アリス", 2: "ボブ"}
     client.translate(DIALOG, context="[Speaker: アリス]", field="dialog")
     sent = fake_llm.user_messages()[-1]
-    assert "«CODE2» = name of ボブ (he/him)" in sent
+    assert "«CODE2» = name code for ボブ (he/him)" in sent
     assert "Speaker: アリス is FEMALE" in sent
 
 
