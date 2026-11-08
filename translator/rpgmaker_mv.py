@@ -228,6 +228,10 @@ def _image_stems(data_dir: str) -> frozenset:
                      for name in files)
 
 
+_IMAGE_NAME_NOTE = ("Image file name used by a plugin: kept in Japanese so the "
+                    "picture still loads. Set to Reviewed to translate it anyway.")
+
+
 def _is_image_ref(value: str, stems: frozenset) -> bool:
     """True if *value* names an image: exactly, or as the prefix of numbered
     frames (``<baseName:ルキウス騎乗待機>`` -> ルキウス騎乗待機1.png ...).
@@ -606,6 +610,7 @@ class RPGMakerMVParser:
         # re-exports after inline edits still find the original text to match.
         source_dir = backup_dir if os.path.isdir(backup_dir) else data_dir
         self._image_names = _image_stems(data_dir)
+        self.image_names_kept = 0
 
         # Build global speaker name lookup (one translation applies to all files)
         global_speakers = {}
@@ -834,6 +839,7 @@ class RPGMakerMVParser:
         backup_dir = data_dir + "_original"
         source_dir = backup_dir if os.path.isdir(backup_dir) else data_dir
         self._image_names = _image_stems(data_dir)
+        self.image_names_kept = 0
 
         # Relative path from project root to data dir (e.g. "data" or "www/data")
         data_rel = os.path.relpath(data_dir, project_dir).replace("\\", "/")
@@ -1597,8 +1603,10 @@ class RPGMakerMVParser:
         """Extract translatable values from plugin note tags.
 
         Matches ``<TagName:val1,val2,...>`` where any value contains
-        Japanese.  Each unique JP value becomes a TranslationEntry, except
-        values that name an image file (see ``_is_image_ref``).
+        Japanese.  Each unique JP value becomes a TranslationEntry.  Values
+        that name an image file (see ``_is_image_ref``) start as "skipped",
+        still listed so a display word that shares an image's name can be
+        set to Reviewed and translated by hand.
         """
         entries = []
         for m in re.finditer(r'<([A-Za-z_]\w*):([^>]+)>', note):
@@ -1606,13 +1614,15 @@ class RPGMakerMVParser:
             values = m.group(2).split(',')
             for vi, val in enumerate(values):
                 val = val.strip()
-                if (val and _has_japanese(val)
-                        and not _is_image_ref(val, image_names)):
+                if val and _has_japanese(val):
+                    is_image = _is_image_ref(val, image_names)
                     entry_id = f"{filename}/{item_id}/note/{tag_name}/{vi}"
                     entries.append(TranslationEntry(
                         id=entry_id,
                         file=filename,
                         field=f"note_tag:{tag_name}",
+                        status="skipped" if is_image else "untranslated",
+                        context=_IMAGE_NAME_NOTE if is_image else "",
                         original=val,
                     ))
         return entries
@@ -3086,10 +3096,18 @@ class RPGMakerMVParser:
                         if field_name == "note" and len(parts) >= 5:
                             # Note tag: "File/id/note/TagName/valueIndex".
                             # Projects made before image names were skipped
-                            # may hold a translation for one: keep the name.
-                            if _is_image_ref(entry.original, getattr(
-                                    self, "_image_names", frozenset())):
+                            # may hold a machine translation for one: keep the
+                            # name (logged and counted). Reviewed = the user's
+                            # call, so it is written.
+                            if entry.status != "reviewed" and _is_image_ref(
+                                    entry.original,
+                                    getattr(self, "_image_names", frozenset())):
                                 self._placed = True
+                                self.image_names_kept = getattr(
+                                    self, "image_names_kept", 0) + 1
+                                log.info("Export kept image name %r in %s "
+                                         "(set it to Reviewed to translate it)",
+                                         entry.original, entry.id)
                             elif self._apply_note_tag(item, parts[3],
                                                     int(parts[4]),
                                                     entry.original,
