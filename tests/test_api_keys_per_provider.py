@@ -167,3 +167,20 @@ def test_old_ollama_file_key_is_kept_but_never_given_an_owner(window,
     window._load_settings()
     assert window.client.api_key == "gem-key"
     assert "mystery" not in window.client.api_keys.values()
+
+
+def test_key_typed_for_another_provider_is_kept_on_save(window, settings_file):
+    """Type a Gemini key, switch to OpenRouter, type its key, then OK: both kept."""
+    dlg = _dialog(window)
+    try:
+        dlg.provider_combo.setCurrentText(GEMINI)
+        dlg.api_key_edit.setText("gem-typed")
+        dlg.provider_combo.setCurrentText(OR)
+        dlg.api_key_edit.setText("or-typed")
+        dlg._save()
+    finally:
+        dispose(dlg)
+    window._save_settings()
+    cfg = _read(settings_file)
+    assert cfg["api_keys"] == {GEMINI: "gem-typed", OR: "or-typed"}
+    assert window.client.api_key == "or-typed"

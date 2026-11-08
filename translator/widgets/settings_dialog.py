@@ -1259,12 +1259,20 @@ class SettingsDialog(QDialog):
     def _save(self):
         """Apply settings and close."""
         self.client.provider = self.provider_combo.currentText()
-        # The box is saved under the selected provider only; every other
-        # provider keeps its saved key. An empty box removes only this
-        # provider's key. Ollama has no key: leave the stored ones as they were.
+        # Each key is saved under the provider it was typed for: the box under
+        # the selected provider, and keys typed for other providers in this
+        # dialog (stashed on switching) under theirs. An emptied box removes
+        # only that provider's key. Ollama has no key: leave the stored ones.
         if self.client.provider != "Ollama (Local)":
             key = self.api_key_edit.text().strip()
             keys = dict(getattr(self, "_saved_keys", {}))
+            for prov, typed in getattr(self, "_keys", {}).items():
+                if prov in ("Ollama (Local)", self.client.provider):
+                    continue
+                if typed:
+                    keys[prov] = typed
+                else:
+                    keys.pop(prov, None)
             if key:
                 keys[self.client.provider] = key
             else:
