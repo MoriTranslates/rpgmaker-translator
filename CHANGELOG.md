@@ -61,7 +61,10 @@ The release workflow publishes the section whose heading matches the pushed tag
   put back. Otherwise the line is retried on its own or left untranslated.
 - Local runs no longer reload the model before every batch. The context size sent to Ollama is
   rounded up to a few fixed sizes and doesn't shrink during a session, so the loaded model is
-  reused instead of being restarted for each slightly different batch.
+  reused instead of being restarted for each slightly different batch. The size that sticks
+  stops at 8K: an unusually large batch gets a bigger size for that one request, but later
+  batches go back to 8K, so one big batch no longer keeps the model at 12-16K (several GB more
+  VRAM, which could spill an 8-12 GB card) for the rest of the session.
 - An online model that doesn't exist or that your account can't use now stops the run once with a
   clear message instead of failing every line. This includes OpenRouter's "No endpoints found
   matching your data policy" (common with :free models), which now points you to
@@ -80,9 +83,21 @@ The release workflow publishes the section whose heading matches the pushed tag
 - A free tier's daily limit (OpenRouter free models, Gemini free tier) now stops the run once with
   "Daily free limit reached … try again tomorrow" instead of backing off and retrying for hours.
   A bad key, no credit or a paid-model swap found during a retry now also stops the run.
+- Running out of credit on OpenAI ("You exceeded your current quota") or Anthropic ("Your
+  credit balance is too low") now stops the run once with a "no credit left" message. Before,
+  OpenAI's message was treated as a rate limit and retried for hours, and Anthropic's failed
+  every line. Ordinary rate limits still wait and retry.
+- Grammar polish now goes through the same checks as translation. A polished line that replaces
+  a name or variable code (such as `\N[1]`) with a name, or leaves a `«CODE»` marker in the
+  text, is not saved: the line keeps its current translation and is reported.
 - The run-paused message now names the real cause. Online providers are no longer told to restart
   Ollama.
-- Switching provider in Settings no longer sends or saves your API key under the new provider. Each provider shows only its own key (blank until you enter one), Save never stores a key typed for another provider, and a key saved while on Ollama stays attached to its own provider.
+- Each online provider now keeps its own API key. Saving an OpenRouter key no longer erases your
+  saved Gemini key: switch back and the Gemini key is shown and used again. A key is only ever
+  sent to the provider it was saved for, Save stores the box only under the provider shown, and
+  clearing the box removes only that provider's key. Settings from older versions are kept: a
+  saved key goes under the provider it was saved for, and a key from an old file saved on Ollama
+  (whose provider can't be known) stays in the file but isn't used.
 - Downloading a model with `ollama pull` no longer fails when Ollama prints its spinner characters.
 - The model box in Settings now shows its dropdown arrow; the Refresh button no longer covers it.
 - Model suggestions are no longer stuck on old models: the list updates from GitHub, shows which models you've installed, and lets you pull any Ollama tag.

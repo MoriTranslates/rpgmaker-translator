@@ -1,7 +1,10 @@
 """Ollama restarts its model runner whenever options.num_ctx changes, so
 per-request context sizes made it reload the model before every batch.
 num_ctx sent to Ollama must come from a few fixed sizes and never shrink
-for the same model within a session.
+for the same model within a session, up to an 8K floor. A rare request
+that needs more gets its own bigger size without raising that floor, so one
+big batch doesn't pin a 12-16K context (and spill VRAM) for the rest of the
+session.
 
 No network: requests.post is replaced with a fake that records payloads.
 """
@@ -66,11 +69,11 @@ def test_similar_batches_send_identical_num_ctx(sent):
     assert ctxs[0] % 4096 == 0
 
 
-def test_num_ctx_never_shrinks_for_the_same_model(sent):
+def test_num_ctx_never_shrinks_below_the_floor(sent):
     c = AIClient()
-    c.translate_batch(_batch(6, 1500))      # big batch
+    c.translate_batch(_batch(5, 700))       # normal batch: 8K
     big = _ctx(sent[-1])
-    assert big > 4096
+    assert big == ai_client.NUM_CTX_FLOOR_CAP
     c.translate("おはよう")                  # small single line
     c.polish("Good morning")
     c.translate_names_batch([("a", "アリス", "name")])
@@ -91,3 +94,23 @@ def test_num_ctx_is_tracked_per_model(sent):
     c.model = "other-model:7b"
     c.translate("おはよう")
     assert _ctx(sent[-1]) == 4096 < big
+
+
+def test_one_big_request_does_not_raise_the_floor_above_8k(sent):
+    c = AIClient()
+    c.translate_batch(_batch(5, 700))        # normal batch
+    assert _ctx(sent[-1]) == 8192
+    c.translate_batch(_batch(6, 3000))       # ~14K+ request
+    assert _ctx(sent[-1]) == 16384           # gets the room it needs
+    c.translate_batch(_batch(5, 700))        # back to a 6-8K request
+    c.translate("おはよう")                   # single-line fallback
+    assert _ctx(sent[-2]) == 8192
+    assert _ctx(sent[-1]) == 8192
+
+
+def test_big_first_request_leaves_an_8k_floor(sent):
+    c = AIClient()
+    c.translate_batch(_batch(6, 3000))       # first request is huge
+    assert _ctx(sent[-1]) == 16384
+    c.translate("おはよう")
+    assert _ctx(sent[-1]) == 8192
