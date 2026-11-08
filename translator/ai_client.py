@@ -115,6 +115,36 @@ def _is_daily_quota(exc) -> bool:
     return bool(_DAILY_QUOTA_RE.search(_error_text(exc)))
 
 
+def _has_error_code(node, code: str, depth: int = 0) -> bool:
+    """True if a JSON error body carries ``code`` as its "code" or "type"."""
+    if depth > 4:
+        return False
+    if isinstance(node, dict):
+        if code in (node.get("code"), node.get("type")):
+            return True
+        return any(_has_error_code(v, code, depth + 1)
+                   for v in node.values() if isinstance(v, (dict, list)))
+    if isinstance(node, list):
+        return any(_has_error_code(v, code, depth + 1) for v in node)
+    return False
+
+
+def _is_insufficient_quota(exc) -> bool:
+    """OpenAI's "no prepaid credit left" 429 (code/type insufficient_quota).
+
+    Matched on the error code, not the wording: Gemini's free-tier quota
+    429 uses the same "exceeded your current quota" text but is a timed cap.
+    """
+    if "insufficient_quota" in (getattr(exc, "code", None),
+                                getattr(exc, "type", None)):
+        return True
+    return _has_error_code(getattr(exc, "body", None), "insufficient_quota")
+
+
+# Anthropic answers HTTP 400 with this when the account has no credit.
+_LOW_CREDIT_RE = re.compile(r"credit balance is too low", re.IGNORECASE)
+
+
 # OpenRouter :free models are refused when the account's privacy settings
 # exclude every provider that serves them.
 _DATA_POLICY_RE = re.compile(r"no endpoints found matching your data policy",
@@ -334,6 +364,18 @@ def _leaked_placeholder(result: str, original: str) -> bool:
                for t in _PLACEHOLDER_LEAK_RE.findall(result))
 
 
+def _polish_rejection(original: str, polished: str) -> str | None:
+    """Reason to reject a polished line, or None: the same placeholder and
+    name-code guards a translation has to pass (both texts are raw game
+    text with codes restored)."""
+    if _leaked_placeholder(polished, original):
+        return "polish left an unknown «CODE» placeholder"
+    name_code = output_checks.name_code_mismatch(original, polished)
+    if name_code:
+        return f"polish lost a name code: {name_code}"
+    return None
+
+
 def _is_reasoning_model(model: str) -> bool:
     """OpenAI reasoning models (gpt-5*, o1/o3/o4...) reject temperature and
     use max_completion_tokens instead of max_tokens."""
@@ -375,6 +417,10 @@ def _estimate_num_ctx(messages: list, num_predict: int, floor: int = 4096) -> in
 # sent are rounded up to a few fixed steps (see AIClient._stable_num_ctx).
 NUM_CTX_CAP = 16384
 _NUM_CTX_STEP = 4096
+# The per-model size that sticks for the session never goes above this:
+# a bigger request gets its own size once, so a single huge batch doesn't
+# pin 12-16K (several GB more VRAM) for the rest of the run.
+NUM_CTX_FLOOR_CAP = 8192
 
 
 def _ctx_bucket(n: int) -> int:
@@ -743,7 +789,12 @@ class AIClient:
         # "fast translate + slow polish" two-pass workflow.
         self.polish_model: str | None = None
         self.provider = "Ollama (Local)"  # Active provider
-        self.api_key = ""                 # Cloud API key
+        self.api_key = ""                 # Cloud API key in use (active provider's)
+        self.api_key_provider = None      # Owner of api_key; None = not known
+        self.api_keys: dict[str, str] = {}  # Saved key per cloud provider
+        # Key from an old single-key settings file whose owner is unknown:
+        # kept in the file, never sent anywhere.
+        self.unowned_api_key = ""
         self.system_prompt = SYSTEM_PROMPT  # Customizable system prompt
         self.target_language = "English"   # Target translation language
         self.actor_context = ""  # Character reference for pronoun inference
@@ -774,6 +825,21 @@ class AIClient:
     def is_cloud(self) -> bool:
         """True if using a cloud API provider (not local Ollama)."""
         return self.provider != "Ollama (Local)"
+
+    def all_api_keys(self) -> dict[str, str]:
+        """Every saved key by provider: ``api_keys`` plus the key in use,
+        under its owner (an empty key in use removes that owner's entry).
+        A key with no known owner is never included."""
+        keys = {p: k for p, k in (self.api_keys or {}).items()
+                if isinstance(p, str) and isinstance(k, str) and k.strip()
+                and p != "Ollama (Local)"}
+        owner = self.api_key_provider
+        if owner and owner != "Ollama (Local)":
+            if (self.api_key or "").strip():
+                keys[owner] = self.api_key.strip()
+            else:
+                keys.pop(owner, None)
+        return keys
 
     @property
     def _is_sugoi(self) -> bool:
@@ -950,12 +1016,16 @@ class AIClient:
 
     def _stable_num_ctx(self, model: str, wanted: int) -> int:
         """num_ctx to send for this model: the request's need rounded up to
-        a fixed step, and never below what this model already got this
-        session (a change of num_ctx makes Ollama reload the model)."""
+        a fixed step, and never below this model's floor for the session
+        (a change of num_ctx makes Ollama reload the model). The floor grows
+        with requests but stops at NUM_CTX_FLOOR_CAP; a request needing more
+        gets its own bigger size without raising the floor."""
         size = _ctx_bucket(wanted)
         with self._num_ctx_lock:
-            size = max(size, self._num_ctx_high.get(model, 0))
-            self._num_ctx_high[model] = size
+            floor = self._num_ctx_high.get(model, 0)
+            if size <= floor:
+                return floor
+            self._num_ctx_high[model] = max(floor, min(size, NUM_CTX_FLOOR_CAP))
         return size
 
     def preload_model(self) -> bool:
@@ -1131,6 +1201,12 @@ class AIClient:
             # Also covers APITimeoutError (subclass)
             raise ServerUnreachable(f"Cannot reach {self.provider} API: {e}") from e
         except openai.RateLimitError as e:
+            if _is_insufficient_quota(e):
+                # OpenAI: prepaid credit used up. Retrying can't help.
+                raise OutOfCredits(
+                    f"{self.provider} says there is no credit left on the "
+                    "account (quota used up). Add credit in your billing "
+                    "settings, or pick another provider.") from e
             if _is_daily_quota(e):
                 # Free-tier daily cap: waiting a minute can't help.
                 raise DailyQuotaExceeded(
@@ -1146,6 +1222,11 @@ class AIClient:
                     f"{self.provider} says there is no credit left on the "
                     "account. Add credit, or pick a free model.") from e
             text = _error_text(e)
+            if e.status_code == 400 and _LOW_CREDIT_RE.search(text):
+                # Anthropic: credit balance too low.
+                raise OutOfCredits(
+                    f"{self.provider} says the credit balance is too low. "
+                    "Add credit, or pick another provider.") from e
             if e.status_code in (400, 403):
                 # A prompt the provider's filter refused (Gemini can answer
                 # this way instead of with finish_reason=content_filter).
@@ -2248,6 +2329,11 @@ class AIClient:
         if code_map:
             result = self._restore_codes(result, code_map)
 
+        # Never write a broken polish into the game: the line is reported
+        # and its current translation stays as it was.
+        reason = _polish_rejection(text, result)
+        if reason:
+            raise ValueError(f"Polish rejected: {reason}")
         return result
 
     # ── Batch JSON translation ──────────────────────────────────
@@ -2547,6 +2633,7 @@ class AIClient:
 
         code_maps = {}
         payload = {}
+        originals = dict(entries)
         any_codes = False
 
         for key, text in entries:
@@ -2629,6 +2716,12 @@ class AIClient:
             translation = self._clean_output(payload.get(key, ""), translation)
             if code_maps.get(key):
                 translation = self._restore_codes(translation, code_maps[key])
+            # A broken polish is left out; the caller retries that line on
+            # its own and keeps the current translation if it fails again.
+            reason = _polish_rejection(originals.get(key, ""), translation)
+            if reason:
+                log.info("Batch polish %s rejected: %s", key, reason)
+                continue
             results[key] = translation
 
         return results

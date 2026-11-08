@@ -5,4 +5,4 @@ the release workflow refuses to build if the pushed tag ``vX.Y.Z`` does
 not match ``__version__``.
 """
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"

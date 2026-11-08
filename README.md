@@ -6,7 +6,7 @@
 
 <p align="center">
 Translate RPG Maker MV/MZ/VX Ace/2000/2003, Ren'Py, TyranoScript, SRPG Studio, Kirikiri, Wolf RPG, and Crowd engine games using local or cloud LLMs.<br>
-<b>Local LLM</b> (Ollama + Qwen 3.5 — free, private, no content filters) or <b>Cloud API</b> (OpenAI, Gemini, DeepSeek, Anthropic — experimental, pay-per-token).<br>
+<b>Local LLM</b> (Ollama + Sugoi or Qwen 3.5 — free, private, no content filters) or <b>Cloud API</b> (OpenAI, Gemini, DeepSeek, Anthropic, OpenRouter — experimental, pay-per-token or free models).<br>
 Event-aware translation. Pronoun-aware. Glossary-driven. Batch translation with resume.<br>
 Per-engine settings, prompts, and model selection via the Engines tab.<br>
 Designed by a human, coded with <a href="https://claude.ai/code">Claude Code</a>.
@@ -43,8 +43,8 @@ Open a game folder. Hit Batch Translate. Get a playable translation. Supports 11
 | | |
 |---|---|
 |1
-| **Local LLM (free)** | Ollama + [Qwen 3.5:9b](https://ollama.com/library/qwen3.5) on your GPU — auto-tuned for your hardware, no API keys, no content filters, no account bans. Your data never leaves your PC |
-| **Cloud API (experimental)** | OpenAI, Gemini, DeepSeek, Anthropic — DazedMTL-compatible batch mode with live cost tracking |
+| **Local LLM (free)** | Ollama on your GPU — [Sugoi 14B](https://huggingface.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF) for English, [Qwen 3.5:9b](https://ollama.com/library/qwen3.5) for every language. Auto-tuned for your hardware, no API keys, no content filters, no account bans. Your data never leaves your PC |
+| **Cloud API (experimental)** | OpenAI, Gemini, DeepSeek, Anthropic, OpenRouter — DazedMTL-compatible batch mode with live cost tracking |
 | **Per-engine settings** | Each engine has its own context, batch size, workers, word wrap, model, and system prompt — configurable in the Engines tab |
 | **Pronoun system** | Actor genders, speaker detection, `\N[n]` character mapping — the LLM knows who's "he" and who's "she" |
 | **Glossary-driven** | Two-layer glossary auto-built from translated DB names — "Potion" stays "Potion" everywhere |
@@ -128,11 +128,11 @@ Prefer running from source (any OS, latest code)? Follow the Quick Start below.
 
 ## Quick Start
 
-### 1. Install Ollama + Qwen 3.5
+### 1. Install Ollama + a model
 
 ```bash
 # Install Ollama: https://ollama.com/download
-# Then grab Qwen 3.5 (best JP→EN model):
+# Then grab a model (see Recommended Models for your GPU and target language):
 ollama pull qwen3.5:9b
 ```
 
@@ -175,23 +175,21 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the development and release workflow.
 
 ---
 
-## Recommended Model — Qwen 3.5
+## Recommended Models
 
-Best JP→EN model available locally. 262K native context window, multimodal (also used for image OCR), handles honorifics, adult content, and RPG Maker control codes. Works for all 24 supported target languages.
+Picked with a 100-line benchmark of real adult-RPG dialogue, graded line by line for meaning errors.
+**Sugoi** is a Japanese→English specialist with the most natural English; it only translates into English.
+**Qwen 3.5** handles every target language.
 
-| GPU VRAM | Model | Command |
+| GPU VRAM | Translating into English | Translating into any other language |
 |---|---|---|
-| **6–10GB** | Qwen 3.5:9b Q4_K_M (6.6GB) | `ollama pull qwen3.5:9b` |
-| **12–16GB** | Qwen 3.5:9b Q8_0 (10GB) | `ollama pull qwen3.5:9b-q8_0` |
-| **24GB+** | Qwen 3.5:27b Q4_K_M (17GB) | `ollama pull qwen3.5:27b` |
+| **8GB** | Qwen 3.5:9b — `ollama pull qwen3.5:9b` | Qwen 3.5:9b |
+| **12GB** | Sugoi 14B i1-IQ4_XS — `ollama pull hf.co/mradermacher/Sugoi-14B-Ultra-HF-i1-GGUF:i1-IQ4_XS` | Qwen 3.5:9b |
+| **16GB+** | Sugoi 14B Q4_K_M — `ollama pull hf.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF:Q4_K_M` | Qwen 3.5:9b Q8 — `ollama pull qwen3.5:9b-q8_0` |
 
-Qwen 3.5 comes in 9b, 27b and 35b-a3b sizes (no 14b or 30b); see the
-[Ollama tag list](https://ollama.com/library/qwen3.5/tags). The 9b model is the sweet spot — fast,
-fits in 6GB VRAM (partly offloaded), and produces excellent translations. The 27b model is untested
-with this app; it should be more accurate but much slower.
-
-**Also worth trying on 24GB+ cards (untested):** the newer Qwen 3.8, which only comes in 27b
-(`ollama pull qwen3.8:27b`, 18GB). If you try it or Qwen 3.5 27b, feedback on translation quality is welcome.
+On a 10GB card, Sugoi 14B i1-IQ3_M (`hf.co/mradermacher/Sugoi-14B-Ultra-HF-i1-GGUF:i1-IQ3_M`) is nearly as good
+as the 12GB pick. The smaller Qwen 3.5 4B and 2B models are not recommended for dialogue: they flip meanings
+and swap answers between lines. Settings > Suggest Model shows these picks for your GPU and target language.
 
 ### The model suggestions list (Settings > Suggest Model)
 
@@ -203,15 +201,15 @@ The list lives in [`models.json`](models.json). The app ships a copy and, when t
 refresh it from this repository on GitHub (5 second limit, in the background). If the download fails or the
 file does not validate, the built-in list is used and nothing is shown. It has four parts:
 
-- `recommended`: the best general models. `tier_picks` says which one is highlighted for 8, 12 and 16+ GB of VRAM (each pick must be listed under `recommended`).
+- `recommended`: the best models. `tier_picks` says which one is highlighted for 8, 12 and 16+ GB of VRAM for any target language (each pick must be listed under `recommended` and work for every language). `tier_picks_by_language` overrides it for one target language, such as English.
 - `specialist`: Japanese to English fine-tunes such as Sugoi. A new specialist goes here.
-- `experimental`: models that exist on Ollama but are not yet tested for translation. Newer models start here.
-- Each entry has `label`, `tag`, `vram_gb` (download size plus about 1.5 GB) and `notes`. Check that a tag exists
+- `experimental`: models that are not recommended or not yet tested for translation. Newer models start here.
+- Each entry has `label`, `tag`, `vram_gb` (download size plus about 1.5 GB), `notes`, and optionally `languages` (the target languages it is good for; leave it out for all). Check that a tag exists
   (`https://registry.ollama.ai/v2/library/<name>/manifests/<tag>`) before adding it.
 
 ### No GPU? Use Cloud APIs
 
-In Settings, switch Provider to OpenAI/Gemini/DeepSeek/Anthropic, enter your API key, and go. Same workflow, same features, pay per token. Cheapest options: **gpt-6-luna** or **Claude Haiku 5.5** at $0.10/$0.50 per 1M tokens (prices checked November 2026).
+In Settings, switch Provider to OpenAI/Gemini/DeepSeek/Anthropic/OpenRouter, enter your API key, and go. Same workflow, same features, pay per token. Cheapest options: **gpt-6-luna** or **Claude Haiku 5.5** at $0.10/$0.50 per 1M tokens (prices checked November 2026).
 
 > **Note:** Cloud APIs may refuse or filter adult content and can ban accounts for repeated NSFW requests. For unrestricted translation of all content types, use Local LLM — everything runs on your GPU, nothing is sent to the cloud.
 

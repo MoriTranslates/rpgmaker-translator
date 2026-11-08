@@ -714,15 +714,20 @@ class SettingsDialog(QDialog):
         if idx >= 0:
             self.provider_combo.setCurrentIndex(idx)
         self.api_key_edit.setText(self.client.api_key)
-        # One saved key, and it belongs to the saved provider only. The box
-        # always shows the key of the provider shown (see _on_provider_changed).
-        # The key's owner is stored with it. Without one (old settings) it is
-        # the saved provider if that is a cloud one; never guessed for Ollama.
-        owner = getattr(self.client, "api_key_provider", None)
+        # One saved key per provider. The box always shows the key of the
+        # provider shown (see _on_provider_changed). The key in use has its
+        # owner stored with it. Without one (old settings) it is the saved
+        # provider if that is a cloud one; never guessed for Ollama.
+        keys = self.client.all_api_keys()
+        owner = self.client.api_key_provider
         if owner is None:
             owner = "" if self.client.provider == "Ollama (Local)" else self.client.provider
-        key = self.client.api_key.strip()
-        self._keys = {owner: key} if owner and key else {}
+            key = (self.client.api_key or "").strip()
+            if owner and key:
+                keys[owner] = key
+        # What Save starts from: the saved keys, before any typing here
+        self._saved_keys = dict(keys)
+        self._keys = dict(keys)
         self._shown_provider = self.client.provider
         self.url_edit.setText(self.client.base_url)
 
@@ -1254,10 +1259,26 @@ class SettingsDialog(QDialog):
     def _save(self):
         """Apply settings and close."""
         self.client.provider = self.provider_combo.currentText()
-        # Only the key typed for the selected provider is saved. Ollama has no
-        # key: leave the stored one as it was.
+        # Each key is saved under the provider it was typed for: the box under
+        # the selected provider, and keys typed for other providers in this
+        # dialog (stashed on switching) under theirs. An emptied box removes
+        # only that provider's key. Ollama has no key: leave the stored ones.
         if self.client.provider != "Ollama (Local)":
-            self.client.api_key = self.api_key_edit.text().strip()
+            key = self.api_key_edit.text().strip()
+            keys = dict(getattr(self, "_saved_keys", {}))
+            for prov, typed in getattr(self, "_keys", {}).items():
+                if prov in ("Ollama (Local)", self.client.provider):
+                    continue
+                if typed:
+                    keys[prov] = typed
+                else:
+                    keys.pop(prov, None)
+            if key:
+                keys[self.client.provider] = key
+            else:
+                keys.pop(self.client.provider, None)
+            self.client.api_keys = keys
+            self.client.api_key = key
             self.client.api_key_provider = self.client.provider
         self.client.base_url = self.url_edit.text().strip() or "http://localhost:11434"
         self.client.model = self.model_combo.currentText().strip()
