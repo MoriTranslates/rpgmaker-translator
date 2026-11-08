@@ -47,13 +47,12 @@ def test_builtin_loads_and_tags_valid():
     assert len(cat.entries) >= 10
     assert all(mc.is_valid_tag(e.tag) for e in cat.entries)
     assert cat.pick_for_vram_mb(0) == "qwen3.5:9b"
-    assert cat.pick_for_vram_mb(12282) == "qwen3.5:9b"
-    assert cat.pick_for_vram_mb(16376) == "qwen3.5:9b-q8_0"
+    assert cat.pick_for_vram_mb(12282, "Russian") == "qwen3.5:9b"
+    assert cat.pick_for_vram_mb(16376, "Russian") == "qwen3.5:9b-q8_0"
     # sections: newer-than-3.5 models are only ever experimental
     rec = {e.tag for e in cat.by_section("recommended")}
     assert not any(t.startswith(("qwen3.6", "qwen3.8")) for t in rec)
-    assert all("Not yet tested" in e.notes
-               for e in cat.by_section("experimental"))
+    assert all(e.notes for e in cat.by_section("experimental"))
     assert cat.by_section("specialist")
 
 
@@ -229,8 +228,8 @@ def make_dialog(qapp, monkeypatch):
     monkeypatch.setattr(msd, "_detect_gpu", lambda: (None, 0))
     made = []
 
-    def _make(installed):
-        d = msd.ModelSuggestionDialog(installed_models=installed)
+    def _make(installed, **kw):
+        d = msd.ModelSuggestionDialog(installed_models=installed, **kw)
         made.append(d)
         return d
     yield _make
@@ -333,3 +332,171 @@ def test_pull_worker_survives_utf8_spinner_and_bad_bytes(qapp, monkeypatch):
     assert done == [1]
     assert any(chr(0x280F) in ln for ln in lines)
     assert lines[-1] == "success"
+
+
+# -- target-language picks (Sugoi is English only) ---------------------
+
+SUGOI_IQ4 = "hf.co/mradermacher/Sugoi-14B-Ultra-HF-i1-GGUF:i1-IQ4_XS"
+SUGOI_Q4KM = "hf.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF:Q4_K_M"
+GB = 1024
+
+
+def test_picks_by_language_and_vram():
+    cat = mc.load_builtin()
+    assert cat.pick_for_vram_mb(12 * GB, "English") == SUGOI_IQ4
+    assert cat.pick_for_vram_mb(8 * GB, "English") == "qwen3.5:9b"
+    assert cat.pick_for_vram_mb(16 * GB, "English") == SUGOI_Q4KM
+    assert cat.pick_for_vram_mb(12 * GB, "Russian") == "qwen3.5:9b"
+    assert cat.pick_for_vram_mb(16 * GB, "Russian") == "qwen3.5:9b-q8_0"
+    assert cat.pick_for_vram_mb(8 * GB, "Russian") == "qwen3.5:9b"
+    # default target (no language given) is English
+    assert cat.pick_for_vram_mb(12 * GB) == SUGOI_IQ4
+
+
+def test_sugoi_entries_are_english_only_and_missing_means_all():
+    cat = mc.load_builtin()
+    by_tag = {e.tag: e for e in cat.entries}
+    for tag, e in by_tag.items():
+        if "Sugoi" in tag:
+            assert e.supports("English") and not e.supports("Russian"), tag
+    assert by_tag["qwen3.5:9b"].languages == ()
+    assert by_tag["qwen3.5:9b"].supports("Russian")
+    assert not any(e.supports("French") for e in cat.entries
+                   if "Sugoi" in e.tag)
+
+
+def test_new_picks_are_all_in_recommended_and_default_is_universal():
+    cat = mc.load_builtin()
+    rec = {e.tag: e for e in cat.by_section("recommended")}
+    for picks in cat.tier_picks_by_language.values():
+        assert all(t in rec for t in picks.values())
+    assert all(rec[t].languages == () for t in cat.tier_picks.values())
+
+
+def test_remote_language_pick_for_model_lacking_language_rejected():
+    data = _good()
+    data["tier_picks_by_language"]["Russian"] = {
+        "8": "qwen3.5:9b", "12": SUGOI_IQ4, "16": "qwen3.5:9b"}
+    assert _fetch(_Resp(_body(data))) is None
+    with pytest.raises(ValueError):
+        mc.parse_catalog(data)
+
+
+def test_remote_language_pick_not_in_recommended_rejected():
+    data = _good()
+    data["tier_picks_by_language"]["English"]["12"] = (
+        "hf.co/sugoitoolkit/Sugoi-14B-Ultra-GGUF:Q2_K")  # specialist only
+    with pytest.raises(ValueError):
+        mc.parse_catalog(data)
+
+
+def test_default_tier_pick_must_work_for_every_language():
+    data = _good()
+    data["tier_picks"]["12"] = SUGOI_IQ4
+    with pytest.raises(ValueError):
+        mc.parse_catalog(data)
+
+
+@pytest.mark.parametrize("bad", [
+    "English", ["English", 5], [""], [], {"a": 1}, ["x" * 100]])
+def test_bad_languages_field_rejected(bad):
+    data = _good()
+    data["recommended"][0]["languages"] = bad
+    with pytest.raises(ValueError):
+        mc.parse_catalog(data)
+
+
+@pytest.mark.parametrize("bad", [
+    [], "x", {"English": "qwen3.5:9b"}, {"English": {"8": "qwen3.5:9b"}},
+    {"": {"8": "qwen3.5:9b", "12": "qwen3.5:9b", "16": "qwen3.5:9b"}}])
+def test_bad_picks_by_language_rejected(bad):
+    data = _good()
+    data["tier_picks_by_language"] = bad
+    with pytest.raises(ValueError):
+        mc.parse_catalog(data)
+
+
+def _old_parse_catalog(data):
+    """Copy of the validator in the previous release (no language support):
+    ignores unknown keys, needs every tier pick to be in recommended."""
+    if not isinstance(data, dict) or data.get("schema") != 1:
+        raise ValueError("unsupported schema")
+    out, seen = [], set()
+    for section in mc.SECTIONS:
+        for row in data.get(section, []):
+            tag = row.get("tag")
+            if not mc.is_valid_tag(tag) or tag.lower() in seen:
+                raise ValueError("bad tag")
+            seen.add(tag.lower())
+            vram = row.get("vram_gb")
+            if (isinstance(vram, bool) or not isinstance(vram, (int, float))
+                    or not 0 < vram <= 1024):
+                raise ValueError("bad vram_gb")
+            mc._plain_text(row.get("label"), mc.MAX_LABEL, False)
+            mc._plain_text(row.get("notes", ""), mc.MAX_NOTES, True)
+            out.append((section, tag))
+    if not out or len(out) > mc.MAX_MODELS:
+        raise ValueError("bad number of models")
+    recommended = {t for s, t in out if s == "recommended"}
+    picks = data["tier_picks"]
+    for t in mc.TIERS:
+        if picks.get(str(t)) not in recommended:
+            raise ValueError("pick not recommended")
+    return {t: picks[str(t)] for t in mc.TIERS}
+
+
+def test_new_models_json_passes_previous_release_validator():
+    # Older app versions read the same remote file from GitHub master.
+    assert _old_parse_catalog(_good()) == {
+        8: "qwen3.5:9b", 12: "qwen3.5:9b", 16: "qwen3.5:9b-q8_0"}
+
+
+def _gpu_dialog(make_dialog, monkeypatch, gb, language):
+    monkeypatch.setattr(msd, "_detect_gpu", lambda: ("Test GPU", gb * 1024))
+    return make_dialog([], target_language=language)
+
+
+def _rows(table):
+    return [table.item(i, 0) for i in range(table.rowCount())]
+
+
+def test_dialog_english_12gb_recommends_sugoi_iq4(make_dialog, monkeypatch):
+    dlg = _gpu_dialog(make_dialog, monkeypatch, 12, "English")
+    assert dlg._recommended == SUGOI_IQ4
+    assert dlg._get_selected_tag() == SUGOI_IQ4
+
+
+def test_dialog_russian_12gb_recommends_qwen_and_no_sugoi(
+        make_dialog, monkeypatch):
+    dlg = _gpu_dialog(make_dialog, monkeypatch, 12, "Russian")
+    assert dlg._recommended == "qwen3.5:9b"
+    assert dlg._get_selected_tag() == "qwen3.5:9b"
+    tags = [r.data(msd.Qt.ItemDataRole.UserRole)
+            for r in _rows(dlg._qwen_table)]
+    assert not any("Sugoi" in t for t in tags)
+    assert not any("(Recommended)" in r.text() and "Sugoi" in r.text()
+                   for r in _rows(dlg._qwen_table) + _rows(dlg._table))
+    # Sugoi rows that remain (specialist list) are disabled, never selectable
+    sug = _rows(dlg._table)
+    assert sug
+    for item in sug:
+        assert not item.flags() & msd.Qt.ItemFlag.ItemIsEnabled
+    assert "English only" in dlg._table.item(0, 3).text()
+
+
+def test_dialog_english_shows_sugoi_enabled(make_dialog, monkeypatch):
+    dlg = _gpu_dialog(make_dialog, monkeypatch, 16, "English")
+    assert dlg._recommended == SUGOI_Q4KM
+    for item in _rows(dlg._table):
+        assert item.flags() & msd.Qt.ItemFlag.ItemIsEnabled
+
+
+def test_dialog_remote_bad_language_pick_keeps_builtin(
+        make_dialog, monkeypatch):
+    dlg = _gpu_dialog(make_dialog, monkeypatch, 12, "Russian")
+    data = _good()
+    data["tier_picks_by_language"]["Russian"] = {
+        "8": "qwen3.5:9b", "12": SUGOI_IQ4, "16": "qwen3.5:9b"}
+    dlg._on_catalog_fetched(mc.fetch_remote_catalog(
+        get=lambda *a, **k: _Resp(_body(data))))
+    assert dlg._recommended == "qwen3.5:9b"

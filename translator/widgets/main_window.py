@@ -4467,7 +4467,9 @@ class MainWindow(QMainWindow):
     def _show_model_suggestion(self):
         """Show GPU-aware model recommendation dialog (first launch)."""
         installed = self.client.list_models() if self.client.is_available() else []
-        dlg = ModelSuggestionDialog(installed_models=installed, parent=self)
+        dlg = ModelSuggestionDialog(
+            installed_models=installed, parent=self,
+            target_language=self.client.target_language)
         dlg.model_selected.connect(self._on_suggested_model)
         dlg.exec()
 

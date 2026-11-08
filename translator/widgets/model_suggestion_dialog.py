@@ -36,6 +36,10 @@ def _installed_text() -> str:
     return chr(0x2713) + " Installed"  # check mark + word
 
 
+def _language_only_text(languages) -> str:
+    return ", ".join(languages) + " only"
+
+
 def _detect_gpu() -> tuple:
     """Detect GPU name and total VRAM via nvidia-smi.
 
@@ -135,18 +139,21 @@ class ModelSuggestionDialog(QDialog):
     # Tests switch this off so no dialog touches the network.
     _AUTO_FETCH = True
 
-    def __init__(self, installed_models: list = None, parent=None):
+    def __init__(self, installed_models: list = None, parent=None,
+                 target_language: str = "English"):
         super().__init__(parent)
         self.setWindowTitle("Model Recommendations")
         self.setMinimumWidth(700)
         self.setMinimumHeight(500)
         self._installed = set(installed_models or [])
+        self._language = target_language or "English"
         self._pull_worker = None
         self._catalog = model_catalog.load_builtin()
 
         # Detect GPU
         self._gpu_name, self._vram_mb = _detect_gpu()
-        self._recommended = self._catalog.pick_for_vram_mb(self._vram_mb)
+        self._recommended = self._catalog.pick_for_vram_mb(
+            self._vram_mb, self._language)
 
         self._build_ui()
         if self._AUTO_FETCH:
@@ -170,7 +177,8 @@ class ModelSuggestionDialog(QDialog):
     def _apply_catalog(self, catalog):
         keep = self._current_tag()
         self._catalog = catalog
-        self._recommended = catalog.pick_for_vram_mb(self._vram_mb)
+        self._recommended = catalog.pick_for_vram_mb(
+            self._vram_mb, self._language)
         self._fill_tables()
         self._reselect(keep or self._recommended)
 
@@ -274,8 +282,12 @@ class ModelSuggestionDialog(QDialog):
 
     def _fill_tables(self):
         """(Re)build both tables from the current catalog."""
-        self._fill(self._qwen_table,
-                   self._catalog.by_section("recommended", "experimental"))
+        # Models that do not support the target language are hidden from the
+        # general list (nothing to choose there) and shown greyed out and
+        # unselectable in the specialist list.  A tag can still be typed.
+        self._fill(self._qwen_table, [
+            e for e in self._catalog.by_section("recommended", "experimental")
+            if e.supports(self._language)])
         self._fill(self._table, self._catalog.by_section("specialist"))
 
     def _fill(self, table, entries):
@@ -285,7 +297,8 @@ class ModelSuggestionDialog(QDialog):
         for i, entry in enumerate(entries):
             tag = entry.tag
             fits = self._fits(entry.vram_gb)
-            is_rec = (tag == self._recommended)
+            lang_ok = entry.supports(self._language)
+            is_rec = (tag == self._recommended) and lang_ok
             label = entry.label
             if entry.section == "experimental":
                 label += " (experimental)"
@@ -300,6 +313,10 @@ class ModelSuggestionDialog(QDialog):
             if self._is_installed(tag):
                 status = QTableWidgetItem(_installed_text())
                 status.setForeground(theme.qcolor("ok"))
+            elif not lang_ok:
+                status = QTableWidgetItem(
+                    _language_only_text(entry.languages))
+                status.setForeground(theme.qcolor("text_dim"))
             elif fits:
                 status = QTableWidgetItem("Available")
                 status.setForeground(theme.qcolor("warn"))
@@ -308,7 +325,10 @@ class ModelSuggestionDialog(QDialog):
                 status.setForeground(theme.qcolor("text_dim"))
             items.append(status)
             for j, item in enumerate(items):
-                if not fits and not is_rec:
+                if not lang_ok:
+                    item.setForeground(theme.qcolor("text_dim"))
+                    item.setFlags(Qt.ItemFlag.NoItemFlags)
+                elif not fits and not is_rec:
                     item.setForeground(theme.qcolor("text_dim"))
                 if is_rec:
                     font = item.font()
@@ -326,7 +346,7 @@ class ModelSuggestionDialog(QDialog):
         for table in (self._qwen_table, self._table):
             for i in range(table.rowCount()):
                 item = table.item(i, 0)
-                if item and normalize_model_tag(
+                if item and item.flags() & Qt.ItemFlag.ItemIsEnabled and normalize_model_tag(
                         item.data(Qt.ItemDataRole.UserRole)) == norm:
                     table.selectRow(i)  # fires the selection handler
                     return

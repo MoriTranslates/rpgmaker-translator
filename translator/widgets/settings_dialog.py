@@ -1155,7 +1155,8 @@ class SettingsDialog(QDialog):
             installed.append(self.model_combo.itemText(i))
 
         dlg = ModelSuggestionDialog(
-            installed_models=installed, parent=self)
+            installed_models=installed, parent=self,
+            target_language=self.lang_combo.currentData() or "English")
         dlg.model_selected.connect(self._on_suggested_model_selected)
         dlg.exec()
 
