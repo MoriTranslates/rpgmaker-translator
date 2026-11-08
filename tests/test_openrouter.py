@@ -26,7 +26,7 @@ from translator.ai_client import (  # noqa: E402
 
 OR = "OpenRouter"
 OR_URL = "https://openrouter.ai/api/v1"
-OLLAMA_URL = "http://192.168.50.12:11434"
+OLLAMA_URL = "http://192.168.1.20:11434"
 
 
 def _client(provider=OR, model="deepseek/deepseek-chat"):
