@@ -288,7 +288,7 @@ def test_paid_model_with_unreported_served_name_is_fine(monkeypatch):
 
 
 def _status_error(code):
-    import httpx
+    from http_lib import httpx
     req = httpx.Request("POST", OR_URL + "/chat/completions")
     resp = httpx.Response(code, request=req, json={"error": {"message": "x"}})
     return openai.APIStatusError("Insufficient credits", response=resp,

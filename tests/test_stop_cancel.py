@@ -237,7 +237,7 @@ def test_fatal_in_variants_propagates(monkeypatch):
 # ── 4. daily quota 429 ends the run; per-minute 429 still backs off ──
 
 def _rate_limit_error(body):
-    import httpx
+    from http_lib import httpx
     req = httpx.Request("POST", "https://example.invalid/chat/completions")
     resp = httpx.Response(429, request=req, json=body)
     msg = body[0]["error"]["message"] if isinstance(body, list) else body["error"]["message"]

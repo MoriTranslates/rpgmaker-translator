@@ -17,7 +17,7 @@ if ROOT not in sys.path:
 
 from types import SimpleNamespace  # noqa: E402
 
-import httpx  # noqa: E402
+from http_lib import httpx  # noqa: E402
 import openai  # noqa: E402
 import pytest  # noqa: E402
 

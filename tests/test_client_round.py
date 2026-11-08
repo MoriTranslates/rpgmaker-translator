@@ -7,7 +7,7 @@ No network: the OpenAI SDK and requests.post are replaced with fakes.
 import json
 from types import SimpleNamespace
 
-import httpx
+from http_lib import httpx
 import openai
 import pytest
 
