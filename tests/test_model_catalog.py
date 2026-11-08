@@ -174,10 +174,12 @@ def test_remote_timeout_and_network_errors():
 
 
 def test_remote_slow_body_times_out():
-    # Deadline already passed when the first chunk arrives
+    # Deadline already passed when the first chunk arrives. Negative, not 0:
+    # Windows' clock ticks every ~15 ms, so with 0 "now > deadline" can be
+    # false when no tick happens in between.
     resp = _Resp(_body(_good()))
     assert mc.fetch_remote_catalog(
-        get=lambda *a, **k: resp, timeout=0) is None
+        get=lambda *a, **k: resp, timeout=-1) is None
     assert resp.closed
 
 
