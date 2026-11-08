@@ -216,6 +216,28 @@ def _substitute_mv_plugin_command(full_cmd: str, original_text: str,
     return full_cmd.replace(original_text, translation, 1)
 
 
+# What may follow an image-name prefix in a frame file: 待機1, 待機_01, 待機-2-3
+_FRAME_SUFFIX_RE = re.compile(r'[_-]?\d+(?:[_-]\d+)*')
+
+
+def _image_stems(data_dir: str) -> frozenset:
+    """File names (without extension) of every file under the game's img/."""
+    img_dir = os.path.join(os.path.dirname(data_dir), "img")
+    return frozenset(os.path.splitext(name)[0]
+                     for _root, _dirs, files in os.walk(img_dir)
+                     for name in files)
+
+
+def _is_image_ref(value: str, stems: frozenset) -> bool:
+    """True if *value* names an image: exactly, or as the prefix of numbered
+    frames (``<baseName:ルキウス騎乗待機>`` -> ルキウス騎乗待機1.png ...).
+    Translating such a value breaks the image, so it must stay as is."""
+    if value in stems:
+        return True
+    return any(s.startswith(value) and _FRAME_SUFFIX_RE.fullmatch(s[len(value):])
+               for s in stems)
+
+
 # Patterns that indicate a plugin param is NOT display text
 _PLUGIN_TAG_RE = re.compile(r'^<[^>]+>$')  # <選択肢ヘルプ> — plugin tag
 _ASSET_ID_RE = re.compile(r'^[^\s]*_[^\s]*$')  # 立ち絵_通常 — asset filename (no spaces, has _)
@@ -340,6 +362,7 @@ class RPGMakerMVParser:
         self._actor_names = self._load_actor_names(data_dir)
         # Build face graphic → actor lookup for MV speaker resolution
         self._face_to_actor = self._load_face_to_actor(data_dir)
+        self._image_names = _image_stems(data_dir)
 
         entries = []
         entries.extend(self._parse_database_files(data_dir))
@@ -582,6 +605,7 @@ class RPGMakerMVParser:
         # Always read from the backup (original Japanese) so that
         # re-exports after inline edits still find the original text to match.
         source_dir = backup_dir if os.path.isdir(backup_dir) else data_dir
+        self._image_names = _image_stems(data_dir)
 
         # Build global speaker name lookup (one translation applies to all files)
         global_speakers = {}
@@ -809,6 +833,7 @@ class RPGMakerMVParser:
         # Use backup (original JP) as source, same as save_project
         backup_dir = data_dir + "_original"
         source_dir = backup_dir if os.path.isdir(backup_dir) else data_dir
+        self._image_names = _image_stems(data_dir)
 
         # Relative path from project root to data dir (e.g. "data" or "www/data")
         data_rel = os.path.relpath(data_dir, project_dir).replace("\\", "/")
@@ -1562,16 +1587,18 @@ class RPGMakerMVParser:
             note = item.get("note", "")
             if note:
                 entries.extend(self._extract_note_tags(
-                    filename, item_id, note))
+                    filename, item_id, note,
+                    getattr(self, "_image_names", frozenset())))
         return entries
 
     @staticmethod
     def _extract_note_tags(filename: str, item_id: int,
-                           note: str) -> list:
+                           note: str, image_names: frozenset = frozenset()) -> list:
         """Extract translatable values from plugin note tags.
 
         Matches ``<TagName:val1,val2,...>`` where any value contains
-        Japanese.  Each unique JP value becomes a TranslationEntry.
+        Japanese.  Each unique JP value becomes a TranslationEntry, except
+        values that name an image file (see ``_is_image_ref``).
         """
         entries = []
         for m in re.finditer(r'<([A-Za-z_]\w*):([^>]+)>', note):
@@ -1579,7 +1606,8 @@ class RPGMakerMVParser:
             values = m.group(2).split(',')
             for vi, val in enumerate(values):
                 val = val.strip()
-                if val and _has_japanese(val):
+                if (val and _has_japanese(val)
+                        and not _is_image_ref(val, image_names)):
                     entry_id = f"{filename}/{item_id}/note/{tag_name}/{vi}"
                     entries.append(TranslationEntry(
                         id=entry_id,
@@ -3056,8 +3084,13 @@ class RPGMakerMVParser:
                 for item in data:
                     if item and isinstance(item, dict) and item.get("id") == item_id:
                         if field_name == "note" and len(parts) >= 5:
-                            # Note tag: "File/id/note/TagName/valueIndex"
-                            if self._apply_note_tag(item, parts[3],
+                            # Note tag: "File/id/note/TagName/valueIndex".
+                            # Projects made before image names were skipped
+                            # may hold a translation for one: keep the name.
+                            if _is_image_ref(entry.original, getattr(
+                                    self, "_image_names", frozenset())):
+                                self._placed = True
+                            elif self._apply_note_tag(item, parts[3],
                                                     int(parts[4]),
                                                     entry.original,
                                                     entry.translation):
