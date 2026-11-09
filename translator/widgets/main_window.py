@@ -1032,27 +1032,11 @@ class MainWindow(QMainWindow):
             self._project_type = "rpgmaker_mv"
         self._sync_project_type(self._project_type)
 
-        # Wolf RPG may need to unpack Data.wolf (can take 10-30s for large archives)
-        if self._project_type == "wolfrpg":
-            from pathlib import Path as _Path
-            wolf_file = _Path(path) / 'Data.wolf'
-            data_dir = _Path(path) / 'Data'
-            needs_unpack = wolf_file.is_file() and not (
-                data_dir.is_dir() and (data_dir / 'MapData').is_dir())
-            if needs_unpack:
-                progress = QProgressDialog(
-                    "Unpacking Data.wolf...", None, 0, 0, self)
-                progress.setWindowTitle("Unpacking Wolf RPG Data")
-                progress.setMinimumDuration(0)
-                progress.setCancelButton(None)
-                progress.setValue(0)
-                QApplication.processEvents()
-
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.statusbar.showMessage(f"Reading {os.path.basename(path)}\u2026")
         self.statusbar.repaint()
         try:
-            entries = self.handler.load_project(path)
+            entries = self._load_entries(path)
         except FileNotFoundError as e:
             QApplication.restoreOverrideCursor()
             self.statusbar.clearMessage()
@@ -1067,10 +1051,6 @@ class MainWindow(QMainWindow):
         else:
             QApplication.restoreOverrideCursor()
             self.statusbar.clearMessage()
-        finally:
-            # Close progress dialog if it was opened
-            if self._project_type == "wolfrpg" and 'progress' in locals():
-                progress.close()
 
         # Files the parser could not read (or an engine version it can't
         # handle): say so, instead of silently showing a partial project.
@@ -2381,6 +2361,37 @@ class MainWindow(QMainWindow):
         if "model" in existing:
             overrides["model"] = existing["model"]
         self._engine_overrides[engine_key] = overrides
+
+    def _load_entries(self, path: str) -> list:
+        """Parse the game folder with the current handler.
+
+        Wolf RPG may first unpack Data.wolf, which can take minutes for a
+        big archive: it runs on a worker thread behind a modal busy dialog,
+        so the window keeps responding.  Other engines load as before.
+        Exceptions from the parser are raised here, on the GUI thread.
+        """
+        if self._project_type != "wolfrpg":
+            return self.handler.load_project(path)
+        outcome = self._run_blocking(
+            "Opening Wolf RPG Game",
+            "Reading the game (unpacking Data.wolf can take a few "
+            "minutes)...",
+            self._load_worker, self.handler, path)
+        if outcome is None:
+            # _load_worker catches everything; None means it never ran.
+            raise RuntimeError("The game could not be read (see the log).")
+        kind, value = outcome
+        if kind == "error":
+            raise value
+        return value
+
+    @staticmethod
+    def _load_worker(handler, path):
+        """Load a project off the UI thread; return (kind, entries|exc)."""
+        try:
+            return ("ok", handler.load_project(path))
+        except Exception as exc:  # noqa: BLE001 -- re-raised on GUI thread
+            return ("error", exc)
 
     def _call_in_worker(self, fn, *args, **kwargs):
         """Run a blocking call on a worker thread and wait for it while a

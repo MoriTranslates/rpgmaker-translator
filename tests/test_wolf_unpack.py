@@ -43,6 +43,10 @@ def _write_good_output(cwd):
     (data / "BasicData" / "Game.dat").write_bytes(b"unpacked game.dat")
     (data / "MapData").mkdir()
     (data / "MapData" / "Map001.mps").write_bytes(b"map")
+    # pictures/sounds: a complete unpack is at least the archive's size
+    (data / "Picture").mkdir()
+    (data / "Picture" / "title.png").write_bytes(
+        b"p" * (cwd / "Data.wolf").stat().st_size)
 
 
 class FakePopen:
@@ -402,3 +406,339 @@ def test_uberwolf_pin_and_licence_are_in_the_repo():
     # the binary itself is downloaded at build time, never committed
     ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     assert "third_party/UberWolf/UberWolfCli.exe" in ignore
+
+
+# ── review round (wolf 1.2): partial unpacks, leftovers, updates ─────────
+
+R3_OUTPUT = (b"Unpacking: Data.wolf ... Error writing Picture/title.png: "
+             b"disk full\r\nFailed\r\n")
+
+
+def _data_only_output(cwd):
+    """The data files came out, the pictures/sounds did not."""
+    data = cwd / "Data"
+    (data / "BasicData").mkdir(parents=True)
+    (data / "BasicData" / "CommonEvent.dat").write_bytes(b"ce")
+    (data / "MapData").mkdir()
+    (data / "MapData" / "Map001.mps").write_bytes(b"map")
+
+
+def test_partial_unpack_with_quiet_output_is_refused(tmp_path, fake_uw):
+    """M1: UberWolf printed "Done" (or nothing readable) but stopped short."""
+    FakePopen.behaviour = staticmethod(_data_only_output)
+    game = _game(tmp_path)
+    before = _snapshot(game)
+    with pytest.raises(wolf_unpack.WolfUnpackError,
+                       match="only part of the archive came out"):
+        wolf_unpack.unpack_data_wolf(game)
+    assert _snapshot(game) == before
+
+
+def test_partial_unpack_is_not_merged_into_existing_data(tmp_path, fake_uw):
+    FakePopen.behaviour = staticmethod(_data_only_output)
+    game = _game(tmp_path)
+    (game / "Data" / "Picture").mkdir(parents=True)
+    (game / "Data" / "Picture" / "mine.png").write_bytes(b"png")
+    before = _snapshot(game)
+    with pytest.raises(wolf_unpack.WolfUnpackError):
+        wolf_unpack.unpack_data_wolf(game)
+    assert _snapshot(game) == before
+
+
+def test_failed_line_in_output_fails_the_unpack(tmp_path, fake_uw,
+                                                monkeypatch):
+    """M1: a readable "Failed" is trusted even when the sizes look fine."""
+    monkeypatch.setattr(FakePopen, "communicate",
+                        lambda self, timeout=None: (R3_OUTPUT, None))
+    game = _game(tmp_path)
+    before = _snapshot(game)
+    with pytest.raises(wolf_unpack.WolfUnpackError, match="stopped part way"):
+        wolf_unpack.unpack_data_wolf(game)
+    assert _snapshot(game) == before
+
+
+@pytest.mark.parametrize("output, failed", [
+    ("Unpacking: Data.wolf ... Done", False),
+    ("", False),
+    ("Unpacking: Data.wolf ... Error writing x.png: disk full", True),
+    ("Unpacking: Data.wolf ... Searching for game executable in: C:\\G\r\n"
+     "Could not find the game executable\r\nFailed", True),
+    ("Error: cannot open file", True),
+    ("Unpacking: Data.wolf ... Done\r\nSearching in: C:\\Error Games\\x",
+     False),
+])
+def test_reported_failure(output, failed):
+    assert bool(wolf_unpack._reported_failure(output)) is failed
+
+
+def test_r3_partial_unpack_is_not_loaded_or_exported(tmp_path, fake_uw,
+                                                     monkeypatch):
+    """The review's repro: the project must not load, Data.wolf stays."""
+    FakePopen.behaviour = staticmethod(_data_only_output)
+    monkeypatch.setattr(FakePopen, "communicate",
+                        lambda self, timeout=None: (R3_OUTPUT, None))
+    game = _game(tmp_path)
+    before = _snapshot(game)
+    p = wolfrpg.WolfRPGParser()
+    assert p.load_project(str(game)) == []
+    (msg,) = p.load_warnings
+    assert msg.startswith("This game's data is packed in Data.wolf")
+    assert _snapshot(game) == before
+    with pytest.raises(wolf_unpack.WolfUnpackError):
+        p.save_project(str(game), [])
+    assert _snapshot(game) == before
+
+
+def test_not_enough_free_space_refuses_before_unpacking(tmp_path, fake_uw,
+                                                         monkeypatch):
+    free = len(ARCHIVE) * wolf_unpack.FREE_SPACE_FACTOR - 1
+    monkeypatch.setattr(wolf_unpack.shutil, "disk_usage",
+                        lambda p: shutil_usage(free))
+    game = _game(tmp_path)
+    before = _snapshot(game)
+    with pytest.raises(wolf_unpack.WolfUnpackError,
+                       match="not enough free space"):
+        wolf_unpack.unpack_data_wolf(game)
+    assert FakePopen.calls == []
+    assert _snapshot(game) == before
+
+
+def test_copy_fallback_needs_room_for_the_copy(tmp_path, fake_uw,
+                                               monkeypatch):
+    free = len(ARCHIVE) * wolf_unpack.FREE_SPACE_FACTOR  # enough to link
+    monkeypatch.setattr(wolf_unpack.shutil, "disk_usage",
+                        lambda p: shutil_usage(free))
+
+    def no_link(src, dst):
+        raise OSError("exFAT: no hard links")
+    monkeypatch.setattr(wolf_unpack.os, "link", no_link)
+    game = _game(tmp_path)
+    before = _snapshot(game)
+    with pytest.raises(wolf_unpack.WolfUnpackError,
+                       match="not enough free space"):
+        wolf_unpack.unpack_data_wolf(game)
+    assert FakePopen.calls == []
+    assert _snapshot(game) == before
+
+
+def shutil_usage(free):
+    import shutil
+    return shutil._ntuple_diskusage(10 ** 12, 10 ** 12 - free, free)
+
+
+def _junction(link, target):
+    if os.name != "nt":
+        os.symlink(target, link, target_is_directory=True)
+        return
+    import _winapi
+    _winapi.CreateJunction(str(target), str(link))
+
+
+def test_leftover_unpack_folders_are_removed_on_open(tmp_path):
+    """M2: a killed unpack's temp folder (GBs) is cleaned on the next open;
+    links, files and look-alike names are left alone."""
+    game = tmp_path / "Game"
+    (game / "Data" / "MapData").mkdir(parents=True)
+    (game / "Game.exe").write_bytes(b"MZ")
+    left = game / (wolf_unpack.TEMP_PREFIX + "abc123")
+    (left / "Data" / "Picture").mkdir(parents=True)
+    (left / "Data" / "Picture" / "big.png").write_bytes(b"x" * 100)
+    (left / "Data.wolf").write_bytes(ARCHIVE)
+    (game / (wolf_unpack.TEMP_PREFIX + "file")).write_bytes(b"keep")
+    (game / ".rmt_unpackX").mkdir()                   # not our prefix
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious.txt").write_bytes(b"keep me")
+    _junction(game / (wolf_unpack.TEMP_PREFIX + "link"), outside)
+
+    p = wolfrpg.WolfRPGParser()
+    p.load_project(str(game))
+
+    assert not left.exists()
+    assert (game / (wolf_unpack.TEMP_PREFIX + "file")).read_bytes() == b"keep"
+    assert (game / ".rmt_unpackX").is_dir()
+    assert (game / (wolf_unpack.TEMP_PREFIX + "link")).exists()
+    assert (outside / "precious.txt").read_bytes() == b"keep me"
+
+
+def test_leftover_folder_is_removed_before_unpacking(tmp_path, fake_uw):
+    game = _game(tmp_path)
+    left = game / (wolf_unpack.TEMP_PREFIX + "old")
+    (left / "Data").mkdir(parents=True)
+    wolf_unpack.unpack_data_wolf(game)
+    assert sorted(x.name for x in game.iterdir()) == [
+        "Data", "Data.wolf", "Game.exe"]
+
+
+def test_interrupted_merge_is_finished_on_next_open(tmp_path, fake_uw):
+    """M2: Data/ half-merged by a killed unpack is not trusted as is: the
+    next open unpacks again and adds what is missing (nothing replaced)."""
+    game = _game(tmp_path)
+    data = game / "Data"
+    (data / "MapData").mkdir(parents=True)        # merged before the kill
+    (data / "MapData" / "Map001.mps").write_bytes(b"map")
+    (data / "Picture").mkdir()
+    (data / "Picture" / "mine.png").write_bytes(b"user's own")
+    (data / wolf_unpack.MERGE_MARKER).write_bytes(b"")
+    p = wolfrpg.WolfRPGParser()
+    p.load_project(str(game))
+    assert len(FakePopen.calls) == 1
+    assert (data / "BasicData" / "CommonEvent.dat").read_bytes() == b"ce"
+    assert (data / "Picture" / "title.png").is_file()
+    assert (data / "Picture" / "mine.png").read_bytes() == b"user's own"
+    assert not (data / wolf_unpack.MERGE_MARKER).exists()
+    assert (game / "Data.wolf").read_bytes() == ARCHIVE
+
+
+def test_merge_marker_stays_when_merge_cannot_be_undone(tmp_path, fake_uw,
+                                                        monkeypatch):
+    game = _game(tmp_path)
+    (game / "Data" / "Picture").mkdir(parents=True)
+    real_rename = os.rename
+    seen = []
+
+    def flaky(src, dst):
+        seen.append(dst)
+        if len(seen) == 2 and pathlib.Path(dst).parent == game / "Data":
+            raise OSError("disk full")              # 2nd move fails
+        if len(seen) > 2:
+            raise OSError("locked")                 # and so does the undo
+        return real_rename(src, dst)
+    monkeypatch.setattr(wolf_unpack.os, "rename", flaky)
+    with pytest.raises(wolf_unpack.WolfUnpackError, match="taken back out"):
+        wolf_unpack.unpack_data_wolf(game)
+    assert wolf_unpack.merge_was_interrupted(game / "Data")
+
+
+def _exported_game(tmp_path):
+    """A packed game after an export: Data/ + Data.wolf.bak."""
+    game = tmp_path / "Game"
+    (game / "Data" / "BasicData").mkdir(parents=True)
+    (game / "Data" / "MapData").mkdir()
+    (game / "Game.exe").write_bytes(b"MZ")
+    (game / "Data.wolf.bak").write_bytes(b"old version archive")
+    return game
+
+
+def test_game_update_after_export_is_refused(tmp_path, monkeypatch):
+    """M3: a new Data.wolf next to Data.wolf.bak and Data/ is an update;
+    loading or exporting must not move it aside or use the old Data/."""
+    def must_not_run(game_dir):
+        raise AssertionError("archive was unpacked")
+    monkeypatch.setattr(wolfrpg, "unpack_data_wolf", must_not_run)
+    game = _exported_game(tmp_path)
+    (game / "Data.wolf").write_bytes(b"NEW version archive")
+    before = _snapshot(game)
+    p = wolfrpg.WolfRPGParser()
+    assert p.load_project(str(game)) == []
+    (msg,) = p.load_warnings
+    assert msg.startswith("This game has a new Data.wolf")
+    assert "Data.wolf.bak" in msg and "Restore Originals" in msg
+    with pytest.raises(wolfrpg.WolfGameUpdated):
+        p.save_project(str(game), [])
+    assert _snapshot(game) == before
+
+
+def test_identical_data_wolf_and_bak_is_not_an_update(tmp_path):
+    game = _exported_game(tmp_path)
+    (game / "Data.wolf").write_bytes(b"old version archive")
+    p = wolfrpg.WolfRPGParser()
+    p.load_project(str(game))
+    assert not any("new Data.wolf" in w for w in p.load_warnings)
+    assert p.data_dir == game / "Data"
+
+
+def test_v6_archive_header_is_not_judged_by_offset_44(tmp_path):
+    """L1: before DXArchive v8 there is no Flags field at offset 44."""
+    head = bytearray(_dx_header(1000))           # "Pro" bits at 44 ...
+    head[2:4] = struct.pack("<H", 6)              # ... in a v6 header
+    f = tmp_path / "Data.wolf"
+    f.write_bytes(bytes(head))
+    assert wolf_unpack.archive_crypt_version(f) is None
+    assert wolf_unpack.archive_refusal(f) is None
+
+
+def test_refusal_after_merge_says_what_was_added(tmp_path, fake_uw):
+    """L3: files merged into an existing Data/ stay there; the message must
+    not claim nothing changed."""
+    def wolf35_output(cwd):
+        _write_good_output(cwd)
+        (cwd / "Data" / "BasicData" / "DataBase.dat").write_bytes(
+            b"\x00W\x00\x00OLUFM\x00\xc4" + b"\x00" * 6)
+    FakePopen.behaviour = staticmethod(wolf35_output)
+    game = _game(tmp_path)
+    (game / "Data" / "Save").mkdir(parents=True)
+    p = wolfrpg.WolfRPGParser()
+    assert p.load_project(str(game)) == []
+    msg = p.load_warnings[0]
+    assert "Your game files were not changed" not in msg
+    assert "added to the existing Data folder" in msg
+    assert (game / "Data.wolf").read_bytes() == ARCHIVE
+
+
+def test_restore_never_unpacks(tmp_path, monkeypatch):
+    """L4: Restore Originals on a packed game with nothing exported."""
+    def must_not_run(*a, **k):
+        raise AssertionError("archive was unpacked")
+    monkeypatch.setattr(wolfrpg, "unpack_data_wolf", must_not_run)
+    monkeypatch.setattr(wolf_unpack, "unpack_data_wolf", must_not_run)
+    game = _game(tmp_path)
+    before = _snapshot(game)
+    with pytest.raises(FileNotFoundError, match="Nothing to restore"):
+        wolfrpg.WolfRPGParser().restore_originals(str(game))
+    assert _snapshot(game) == before
+
+
+def test_restore_without_data_folder_uses_the_backup(tmp_path, monkeypatch):
+    def must_not_run(*a, **k):
+        raise AssertionError("archive was unpacked")
+    monkeypatch.setattr(wolfrpg, "unpack_data_wolf", must_not_run)
+    game = tmp_path / "Game"
+    (game / "Data_original" / "BasicData").mkdir(parents=True)
+    (game / "Data_original" / "BasicData" / "CommonEvent.dat").write_bytes(
+        b"jp")
+    (game / "Data.wolf.bak").write_bytes(ARCHIVE)
+    wolfrpg.WolfRPGParser().restore_originals(str(game))
+    assert (game / "Data" / "BasicData" / "CommonEvent.dat").read_bytes() \
+        == b"jp"
+    assert (game / "Data.wolf").read_bytes() == ARCHIVE
+
+
+# ── the window stays responsive while a Wolf game loads (M2) ─────────────
+
+@pytest.fixture
+def window(qapp, monkeypatch, tmp_path):
+    from qt_helpers import dispose_main_window
+
+    from translator.widgets import main_window as mw
+    settings = tmp_path / "_settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(mw.MainWindow, "_SETTINGS_FILE", str(settings))
+    monkeypatch.setattr(mw.AIClient, "is_available", lambda self: False)
+    monkeypatch.setattr(mw.AIClient, "list_models", lambda self: [])
+    win = mw.MainWindow()
+    win._closing = True
+    yield win
+    dispose_main_window(win)
+
+
+def test_wolf_load_runs_off_the_gui_thread(window, monkeypatch):
+    import threading
+    seen = {}
+
+    def load(path):
+        seen["thread"] = threading.current_thread()
+        return ["entry"]
+    monkeypatch.setattr(window.handler, "load_project", load)
+    window._project_type = "wolfrpg"
+    assert window._load_entries("C:/game") == ["entry"]
+    assert seen["thread"] is not threading.main_thread()
+
+
+def test_wolf_load_errors_reach_the_gui_thread(window, monkeypatch):
+    def load(path):
+        raise FileNotFoundError("No Data/ folder or Data.wolf")
+    monkeypatch.setattr(window.handler, "load_project", load)
+    window._project_type = "wolfrpg"
+    with pytest.raises(FileNotFoundError, match="No Data/ folder"):
+        window._load_entries("C:/game")

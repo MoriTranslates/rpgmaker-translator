@@ -19,6 +19,7 @@ Sinflower; FileCoder.hpp, Map.hpp, CommonEvents.hpp, Database.hpp).
 
 from __future__ import annotations
 
+import filecmp
 import logging
 import os
 import re
@@ -92,6 +93,26 @@ class WolfArchiveUnsupported(WolfVersionUnsupported):
         self.reason = reason
         super().__init__(f'{WOLF_UNSUPPORTED}: Data.wolf {reason}. Your game '
                          f'files were not changed.')
+
+
+class WolfGameUpdated(RuntimeError):
+    """Data.wolf, Data.wolf.bak and Data/ all exist: the game was updated
+    after an export (see WolfRPGParser._check_not_updated)."""
+
+    def __init__(self):
+        super().__init__(
+            "This game has a new Data.wolf, probably from a game update "
+            "installed after you exported a translation. The Data folder "
+            "still holds the older version's files, so the translator won't "
+            "use them, and won't move the new Data.wolf aside. Nothing was "
+            "changed.\n\nTo translate the updated game, move these out of "
+            "the game folder (keep them somewhere safe until the new export "
+            "works): the Data and Data_original folders, "
+            "Data_original.manifest.json and Data.wolf.bak. Then open the "
+            "game folder again: the new Data.wolf is unpacked, and your "
+            "translation (_translation_state.json) is not touched by any of "
+            "this. (Restore Originals doesn't fix this: it keeps the new "
+            "Data.wolf and the old Data folder.)")
 
 
 class WolfTextError(ValueError):
@@ -1029,6 +1050,8 @@ class WolfRPGParser:
         self.context_size: int = 3
         # Files the last load_project() could not read, for the UI
         self.load_warnings: list[str] = []
+        # The last unpack added files to a Data/ that was already there
+        self._merged_into_existing = False
 
     # ── Detection ─────────────────────────────────────────────────────
 
@@ -1069,11 +1092,20 @@ class WolfRPGParser:
         self.databases = []
 
         self.load_warnings = []
+        self._merged_into_existing = False
+
+        # An unpack cut off earlier (app closed, crash) can leave its
+        # temporary folder, which may hold gigabytes.
+        wolf_unpack.remove_leftover_temps(self.game_dir)
 
         # Find data directory
         existed = self._unpack_targets_existing()
         try:
             self.data_dir = self._find_data_dir()
+        except WolfGameUpdated as e:
+            log.warning('Wolf RPG game updated after an export; refused')
+            self.load_warnings.append(str(e))
+            return []
         except WolfArchiveUnsupported as e:
             log.warning('Wolf RPG game not supported (%s %s)', e.where, e.reason)
             self.load_warnings.append(
@@ -1166,8 +1198,9 @@ class WolfRPGParser:
                         self.load_warnings.append(f'BasicData/{db_name}: {e}')
         return entries
 
-    def _find_data_dir(self) -> Path:
-        """Find or create the Data/ directory."""
+    def _existing_data_dir(self) -> Optional[Path]:
+        """The folder with the game's loose data files, or None.  Never
+        unpacks anything."""
         # Check Data/ folder with actual game content
         data_dir = self.game_dir / 'Data'
         if data_dir.is_dir():
@@ -1181,9 +1214,50 @@ class WolfRPGParser:
         if (self.game_dir / 'BasicData').is_dir():
             if (self.game_dir / 'MapData').is_dir():
                 return self.game_dir
+        return None
+
+    def _check_not_updated(self):
+        """Refuse a game whose Data.wolf was replaced after an export.
+
+        Export moves Data.wolf to Data.wolf.bak and the game then runs from
+        Data/.  A Data.wolf next to both is new (a game update): Data/ holds
+        the older version, and exporting would move the update aside.
+        """
+        wolf = self.game_dir / 'Data.wolf'
+        bak = self.game_dir / 'Data.wolf.bak'
+        if not (wolf.is_file() and bak.is_file()
+                and (self.game_dir / 'Data').is_dir()):
+            return
+        try:
+            same = filecmp.cmp(wolf, bak, shallow=False)
+        except OSError as exc:
+            log.warning('Could not compare Data.wolf with Data.wolf.bak: %s',
+                        exc)
+            same = False            # unknown: treated as an update
+        if not same:
+            raise WolfGameUpdated()
+
+    def _find_data_dir(self) -> Path:
+        """Find the data folder, unpacking Data.wolf when there is none."""
+        self._check_not_updated()
+        wolf_file = self.game_dir / 'Data.wolf'
+        data_dir = self.game_dir / 'Data'
+        if wolf_unpack.merge_was_interrupted(data_dir):
+            # A merge of unpacked files into Data/ was cut off: Data/ may
+            # be missing files.  Unpacking again adds what is missing.
+            if not wolf_file.is_file():
+                raise WolfUnpackError(
+                    'an earlier unpack into the Data folder was interrupted '
+                    'and Data.wolf is no longer there to finish it')
+            log.warning('Data/ was left half-merged by an interrupted '
+                        'unpack; unpacking Data.wolf again')
+            found = None
+        else:
+            found = self._existing_data_dir()
+        if found is not None:
+            return found
 
         # Need to unpack Data.wolf
-        wolf_file = self.game_dir / 'Data.wolf'
         if wolf_file.is_file():
             # Protected (Pro) and 3.5 archives are refused from the archive
             # header, before unpacking.  find_unsupported still checks
@@ -1191,7 +1265,10 @@ class WolfRPGParser:
             reason = wolf_unpack.archive_refusal(wolf_file)
             if reason:
                 raise WolfArchiveUnsupported(reason)
-            return unpack_data_wolf(self.game_dir)
+            self._merged_into_existing = data_dir.is_dir()
+            out = unpack_data_wolf(self.game_dir)
+            (data_dir / wolf_unpack.MERGE_MARKER).unlink(missing_ok=True)
+            return out
 
         raise FileNotFoundError(
             f'No Data/ folder or Data.wolf in {self.game_dir}')
@@ -1403,6 +1480,7 @@ class WolfRPGParser:
         # Don't rely on load_project state — export can run straight after
         # restoring a saved project state.
         self.game_dir = Path(project_dir)
+        self._merged_into_existing = False
         existed = self._unpack_targets_existing()
         try:
             self.data_dir = self._find_data_dir()
@@ -1924,6 +2002,12 @@ class WolfRPGParser:
                     "Data.wolf to check the version could not be removed: "
                     "delete them before playing (the game itself uses "
                     "Data.wolf).")
+        elif self._merged_into_existing:
+            # The unpack added files to a Data/ that was already there;
+            # which ones is not tracked, so they are left in place.
+            tail = (" Data.wolf was not changed. Files unpacked from it to "
+                    "check the version were added to the existing Data "
+                    "folder (nothing already there was replaced).")
         else:
             tail = " Your game files were not changed."
         return f'{WOLF_UNSUPPORTED}: {where} {reason}.{tail}'
@@ -1932,7 +2016,15 @@ class WolfRPGParser:
         """Restore original files from backup."""
         game_dir = Path(folder)
         self.game_dir = game_dir
-        data_dir = self._find_data_dir()
+        # Never unpacks Data.wolf: with no data folder, a Data_original/
+        # backup is restored into Data/; with neither, nothing to restore.
+        data_dir = self._existing_data_dir()
+        if data_dir is None:
+            data_dir = game_dir / 'Data'
+            if not self._backup_dir_for(data_dir).is_dir():
+                raise FileNotFoundError(
+                    'Nothing to restore: no translation has been exported '
+                    'to this game yet (there is no Data_original backup).')
         self.data_dir = data_dir
         backup_dir = self._backup_dir_for(data_dir)
         if not backup_dir.is_dir():

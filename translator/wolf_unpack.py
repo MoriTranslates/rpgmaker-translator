@@ -4,8 +4,11 @@ UberWolf (https://github.com/Sinflower/UberWolf, MIT License) ships a
 command-line build, ``UberWolfCli.exe``.  Given ``X/Data.wolf`` it writes the
 archive's contents to ``X/Data/`` (next to the archive; there is no output
 option) and skips the archive when ``X/Data/`` already has files in it.  Its
-exit code is 0 even when an archive could not be decrypted, so the result is
-judged only by what it wrote.
+exit code is 0 even when an archive could not be decrypted, and its output
+stops at the first non-ASCII character of a path, so the result is judged by
+what it wrote: the parser's files must be there and the unpacked files must
+add up to (nearly) the archive's size, or nothing is used.  A "Failed" or
+error line in its output, when there is one, also fails the unpack.
 
 So the game folder is never written to directly: the archive is linked (or
 copied) into a fresh temporary folder inside the game folder, UberWolf runs
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -41,6 +45,22 @@ UBERWOLF_URL = 'https://github.com/Sinflower/UberWolf'
 ENV_OVERRIDE = 'RMT_UBERWOLF'      # source runs only
 UNPACK_TIMEOUT_S = 600             # big archives (all images + audio) are slow
 TEMP_PREFIX = '.rmt_unpack_'       # short: UberWolf uses MAX_PATH buffers
+# Written into an existing Data/ before unpacked files are merged into it
+# and removed once the merge (or its undo) is complete: if it is still
+# there, the merge was interrupted and Data/ may be missing files.
+MERGE_MARKER = '.rmt_unpack_merging'
+
+# Free space needed on the game folder's drive, as a multiple of
+# Data.wolf's size.  Unpacked files are larger than the archive (DXArchive
+# compresses some files): 1.19x-1.79x on the 2.x sample archives.  2x
+# covers that; the copy of Data.wolf made when a hard link isn't possible
+# needs one more archive's worth.
+FREE_SPACE_FACTOR = 2
+FREE_SPACE_FACTOR_COPY = 3
+# Every file comes out at least as large as it was stored, and the file
+# table is small, so a complete unpack totals at least the archive size
+# (measured: 1.19x-1.79x).  Below this share of it, files are missing.
+MIN_UNPACKED_RATIO = 0.9
 
 _NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
@@ -109,6 +129,10 @@ def archive_crypt_version(wolf_file) -> Optional[int]:
         return None
     if len(head) < 48 or head[:2] != b'DX':
         return None
+    # The Flags field exists from DXArchive v8 on; in older headers offset
+    # 44 is already file data, so nothing is judged from it.
+    if struct.unpack_from('<H', head, 2)[0] < 8:
+        return None
     return struct.unpack_from('<I', head, 44)[0] >> 16
 
 
@@ -137,7 +161,28 @@ def has_game_data(data_dir: Path) -> bool:
     return (data_dir / 'BasicData' / 'CommonEvent.dat').is_file()
 
 
-def _link_or_copy(src: Path, dst: Path):
+def _mb(n: int) -> str:
+    return f'{n / (1024 * 1024):,.1f} MB'
+
+
+def check_free_space(folder: Path, archive_size: int, factor: int):
+    """Refuse (WolfUnpackError) when folder's drive can't hold the unpack."""
+    need = archive_size * factor
+    try:
+        free = shutil.disk_usage(folder).free
+    except OSError as exc:
+        # Can't tell: the completeness check after unpacking still catches
+        # a disk that fills up part way.
+        log.warning('Could not read free space for %s: %s', folder, exc)
+        return
+    if free < need:
+        raise WolfUnpackError(
+            f'there is not enough free space on the drive with the game '
+            f'folder (unpacking needs about {_mb(need)}, {_mb(free)} is '
+            f'free). Free up some space and open the game folder again')
+
+
+def _link_or_copy(src: Path, dst: Path, archive_size: int):
     """Hard-link src to dst (instant, no extra disk); copy if not possible.
 
     UberWolf only reads the archive, so a link never changes Data.wolf, and
@@ -148,7 +193,81 @@ def _link_or_copy(src: Path, dst: Path):
     except OSError as exc:
         # FAT/exFAT, network shares, other volume: a copy works everywhere.
         log.info('Hard link for %s failed (%s); copying instead', src, exc)
+        check_free_space(dst.parent, archive_size, FREE_SPACE_FACTOR_COPY)
         shutil.copy2(src, dst)
+
+
+def _tree_size(folder: Path) -> int:
+    """Total size of the files under folder (links are not followed)."""
+    total = 0
+    for root, _dirs, files in os.walk(folder):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError as exc:
+                # Counted as missing: a short total fails the unpack.
+                log.warning('Could not size %s: %s', name, exc)
+    return total
+
+
+def _reported_failure(output: str) -> Optional[str]:
+    """A line in which UberWolf reports a failure or error, or None.
+
+    Its exit code is always 0, and its output may stop early (at the first
+    non-ASCII character of a path), so a missing "Failed" proves nothing;
+    one that is there is trusted.
+    """
+    for line in output.splitlines():
+        # Status words start a line or follow "...", like its
+        # "Unpacking: Data.wolf ... Done"; paths it prints are not judged.
+        if _FAILURE_RE.search(line.strip()):
+            return line.strip()
+    return None
+
+
+_FAILURE_RE = re.compile(r'(^|\.\.\.\s*)(failed|error)\b|\bfailed$',
+                         re.IGNORECASE)
+
+
+def remove_leftover_temps(game_dir) -> list[str]:
+    """Remove temporary unpack folders an earlier, interrupted run left.
+
+    Only folders named with our exact prefix, directly inside game_dir (by
+    real path), and never links or junctions, are removed.  Returns the
+    names removed.
+    """
+    game_dir = Path(game_dir)
+    removed = []
+    try:
+        entries = list(os.scandir(game_dir))
+    except OSError as exc:
+        log.warning('Could not list %s for leftover unpack folders: %s',
+                    game_dir, exc)
+        return removed
+    real_game = os.path.realpath(game_dir)
+    for entry in entries:
+        if not entry.name.startswith(TEMP_PREFIX) or entry.name == MERGE_MARKER:
+            continue
+        path = Path(entry.path)
+        if (entry.is_symlink() or path.is_junction()
+                or not entry.is_dir(follow_symlinks=False)):
+            continue
+        if os.path.dirname(os.path.realpath(path)) != real_game:
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            log.warning('Could not remove leftover unpack folder %s: %s',
+                        path, exc)
+            continue
+        log.info('Removed leftover unpack folder %s', path)
+        removed.append(entry.name)
+    return removed
+
+
+def merge_was_interrupted(data_dir: Path) -> bool:
+    """An earlier merge of unpacked files into data_dir did not finish."""
+    return (Path(data_dir) / MERGE_MARKER).exists()
 
 
 def run_uberwolf(exe: Path, archive: Path, timeout: float) -> str:
@@ -227,18 +346,26 @@ def _move_into_place(unpacked: Path, data_dir: Path):
         return
     skipped: list[str] = []
     moved: list[tuple[Path, Path]] = []
+    marker = data_dir / MERGE_MARKER
+    # Each item moves atomically, but a crash between moves would leave
+    # Data/ half-merged: the marker says so on the next open (and a new
+    # unpack then adds what is missing; nothing there is replaced).
+    marker.write_bytes(b'')
     try:
         _merge_without_overwrite(unpacked, data_dir, skipped, moved)
     except OSError as exc:
         stuck = _undo_moves(moved)
         if stuck:
+            # The marker stays: Data/ really is half-merged.
             raise WolfUnpackError(
                 f'the unpacked files could not be moved into Data/ ({exc}), '
                 f'and {len(stuck)} item(s) already moved there could not be '
                 'taken back out: ' + ', '.join(stuck[:5])) from exc
+        marker.unlink()
         raise WolfUnpackError(
             f'the unpacked files could not be moved into Data/ ({exc})'
         ) from exc
+    marker.unlink()
     if skipped:
         log.info('Kept %d item(s) already in Data/ instead of the unpacked '
                  'copy: %s', len(skipped), ', '.join(skipped[:10]))
@@ -276,6 +403,13 @@ def unpack_data_wolf(game_dir, timeout: float = UNPACK_TIMEOUT_S) -> Path:
             f'the unpacker is missing from this copy of the app '
             f'({UBERWOLF_EXE} was not found)')
 
+    remove_leftover_temps(game_dir)
+    try:
+        archive_size = wolf_file.stat().st_size
+    except OSError as exc:
+        raise WolfUnpackError(f'Data.wolf could not be read ({exc})') from exc
+    check_free_space(game_dir, archive_size, FREE_SPACE_FACTOR)
+
     try:
         temp = Path(tempfile.mkdtemp(prefix=TEMP_PREFIX, dir=game_dir))
     except OSError as exc:
@@ -285,7 +419,7 @@ def unpack_data_wolf(game_dir, timeout: float = UNPACK_TIMEOUT_S) -> Path:
     try:
         archive = temp / 'Data.wolf'
         try:
-            _link_or_copy(wolf_file, archive)
+            _link_or_copy(wolf_file, archive, archive_size)
         except OSError as exc:
             raise WolfUnpackError(
                 f'Data.wolf could not be read or copied ({exc})') from exc
@@ -296,6 +430,18 @@ def unpack_data_wolf(game_dir, timeout: float = UNPACK_TIMEOUT_S) -> Path:
             raise WolfUnpackError(
                 'it could not decrypt this archive (its format or encryption '
                 f'is not one it knows; UberWolf said: "{last}")')
+        failure = _reported_failure(output)
+        if failure:
+            raise WolfUnpackError(
+                f'it stopped part way (UberWolf said: "{failure}")')
+        # Judged by what was written, not by UberWolf's output: it may say
+        # nothing about a disk that filled up or a file it skipped.
+        unpacked_size = _tree_size(unpacked)
+        if unpacked_size < archive_size * MIN_UNPACKED_RATIO:
+            raise WolfUnpackError(
+                f'only part of the archive came out ({_mb(unpacked_size)} '
+                f'of at least {_mb(archive_size)}); the drive may be full '
+                'or some files could not be written')
         try:
             _move_into_place(unpacked, data_dir)
         except OSError as exc:
