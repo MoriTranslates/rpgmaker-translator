@@ -9,6 +9,9 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+### Fixed
+- Wolf RPG: games whose data is packed in `Data.wolf` can be opened again in the Windows release. Before, every such game failed with an "ImportError: Wolf_RPG_Decompyler not found" message. The app now unpacks `Data.wolf` with [UberWolf](https://github.com/Sinflower/UberWolf) (MIT License), which ships inside the app. It unpacks into a temporary folder first and only then moves the files into `Data/`. `Data.wolf` itself is never changed, and files already in a `Data/` folder are never replaced or deleted. If unpacking fails, the game folder is left as it was and a plain message explains why (you can then unpack the game yourself with UberWolf and open the folder again). Games made with WOLF RPG Editor 3.x or Pro are recognised from the archive and get the usual "3.x isn't supported yet" message without being unpacked.
+
 ## [1.1.3] - 2026-11-08
 
 ### Fixed

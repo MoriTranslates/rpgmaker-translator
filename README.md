@@ -167,7 +167,11 @@ pip install -r requirements-dev.txt     # app + pytest, ruff, pyinstaller
 python -m pytest -q                     # run the test suite
 python main.py                          # run the app
 
-# Build the Windows bundle (dist\RPGMakerTranslator\ + a zip):
+# Optional, for opening packed Wolf RPG games (Data.wolf) from source:
+# downloads the pinned UberWolfCli.exe into third_party\UberWolf\ (SHA-256 checked)
+powershell -ExecutionPolicy Bypass -File packaging\fetch_uberwolf.ps1
+
+# Build the Windows bundle (dist\RPGMakerTranslator\ + a zip; fetches UberWolf too):
 powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 ```
 
@@ -377,6 +381,7 @@ All engines auto-detect when you open a game folder — no manual configuration 
 - **[rubymarshal](https://github.com/d9pouces/RubyMarshal)** — Ruby Marshal binary format parser, used for RPG Maker VX Ace `.rvdata2` files.
 - **[pycryptodome](https://www.pycryptodome.org/)** — AES decryption for SRPG Studio `data.dts` files.
 - **[EasyRPG Player](https://easyrpg.org/)** — Open-source RPG Maker 2000/2003 runtime, used for locale-independent play of translated RM2K games.
+- **[UberWolf](https://github.com/Sinflower/UberWolf)** by Sinflower (MIT) — Wolf RPG archive unpacker. The Windows release bundles its command-line tool (`UberWolfCli.exe`, unchanged) to unpack `Data.wolf`; its licence is in `_internal/third_party/UberWolf/LICENSE` and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 

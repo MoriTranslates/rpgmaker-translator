@@ -30,12 +30,27 @@ $Version = & $Python -c "import sys; sys.path.insert(0, r'$Root'); from translat
 if ($LASTEXITCODE -ne 0 -or -not $Version) { throw "Could not read translator/version.py" }
 Write-Host "Building $AppName $Version"
 
+# Wolf RPG Data.wolf unpacker, bundled into the app (pinned + SHA-256 checked).
+& (Join-Path $PSScriptRoot "fetch_uberwolf.ps1")
+
 & $Python -m PyInstaller (Join-Path $PSScriptRoot "rpgmaker_translator.spec") `
     --noconfirm --clean --distpath $OutDir --workpath $WorkDir
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
 $BundleDir = Join-Path $OutDir $AppName
 if (-not (Test-Path (Join-Path $BundleDir "$AppName.exe"))) { throw "Bundle exe missing" }
+
+# The bundled unpacker must be exactly the pinned file.
+$UwPin = (Get-Content (Join-Path $Root "third_party/UberWolf/PIN.txt") |
+    Where-Object { $_ -match '^sha256=' }) -replace '^sha256=', ''
+$UwExe = Join-Path $BundleDir "_internal/third_party/UberWolf/UberWolfCli.exe"
+if (-not (Test-Path $UwExe)) { throw "Bundled UberWolfCli.exe missing" }
+if ((Get-FileHash -Algorithm SHA256 $UwExe).Hash.ToLower() -ne $UwPin.Trim().ToLower()) {
+    throw "Bundled UberWolfCli.exe does not match third_party/UberWolf/PIN.txt"
+}
+if (-not (Test-Path (Join-Path $BundleDir "_internal/third_party/UberWolf/LICENSE"))) {
+    throw "Bundled UberWolf LICENSE missing"
+}
 
 $Zip = Join-Path $OutDir "$AppName-$Version-win64.zip"
 if (Test-Path $Zip) { Remove-Item $Zip -Force }

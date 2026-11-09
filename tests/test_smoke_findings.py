@@ -1069,9 +1069,18 @@ def test_no_control_bytes_in_source_files():
     root = pathlib.Path(__file__).resolve().parent.parent
     files = [*root.joinpath("translator").rglob("*.py"),
              *root.joinpath("tests").glob("*.py"), root / "main.py"]
+    # Invisible characters editor tools can produce from typed escapes:
+    # line/paragraph separators, BOM / zero-width space, non-characters.
+    invisible = re.compile("[" + "".join(map(chr, (
+        0x2028, 0x2029, 0xFEFF, 0x200B, 0xFFFE, 0xFFFF))) + "]")
     bad = {}
     for f in files:
-        n = len(re.findall(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]", f.read_bytes()))
+        raw = f.read_bytes()
+        n = len(re.findall(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]", raw))
+        try:
+            n += len(invisible.findall(raw.decode("utf-8")))
+        except UnicodeDecodeError:      # includes lone surrogates
+            n += 1
         if n:
             bad[str(f.relative_to(root))] = n
     assert bad == {}

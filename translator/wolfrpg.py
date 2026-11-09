@@ -2,7 +2,8 @@
 
 Handles:
   - Detection: Game.exe + Data.wolf or Data/ folder
-  - DXArchive unpacking: Data.wolf → loose files (via bundled decompyler)
+  - DXArchive unpacking: Data.wolf → loose files (bundled UberWolf CLI,
+    see wolf_unpack.py)
   - Binary parsing: .mps maps, CommonEvent.dat, DataBase.dat
   - Export: writes translated strings back into binary files
 
@@ -19,8 +20,9 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from . import game_io
+from . import game_io, wolf_unpack
 from .project_model import TranslationEntry
+from .wolf_unpack import WolfUnpackError
 
 # The only data folders the exporter writes (and backs up / restores).
 _WOLF_DATA_SUBDIRS = ('BasicData', 'MapData')
@@ -46,6 +48,15 @@ WOLF3_UNSUPPORTED = (
 
 class WolfVersionUnsupported(RuntimeError):
     """The game was made with a Wolf RPG Editor version we can't write."""
+
+
+class WolfArchiveUnsupported(WolfVersionUnsupported):
+    """Data.wolf's header shows 3.x/Pro: refused before anything is unpacked."""
+
+    def __init__(self, marker: str):
+        self.marker = marker
+        super().__init__(f'{WOLF3_UNSUPPORTED} Your game files were not '
+                         f'changed. (Detected from {marker}.)')
 
 
 def wolf3_marker(data_dir) -> Optional[str]:
@@ -969,69 +980,12 @@ def _apply_string_patches(data: bytearray,
 # ── DXArchive unpacker ───────────────────────────────────────────────────
 
 def unpack_data_wolf(game_dir: Path) -> Path:
-    """Unpack Data.wolf into a Data/ folder using Wolf_RPG_Decompyler.
+    """Unpack Data.wolf into Data/ with the bundled UberWolf CLI.
 
-    Returns the path to the data folder.
+    Returns the data folder.  Raises WolfUnpackError (a plain message for
+    users) when it can't; the game folder is then left as it was.
     """
-    wolf_file = game_dir / 'Data.wolf'
-    data_dir = game_dir / 'Data'
-
-    if not wolf_file.is_file():
-        raise FileNotFoundError(f'No Data.wolf found in {game_dir}')
-
-    # Try importing the decompyler from _reference
-    import sys
-    ref_dir = Path(__file__).parent.parent / '_reference'
-    if str(ref_dir) not in sys.path:
-        sys.path.insert(0, str(ref_dir))
-
-    try:
-        from Wolf_RPG_Decompyler import decompiler_pairs
-    except ImportError:
-        raise ImportError(
-            'Wolf_RPG_Decompyler not found in _reference/. '
-            'Clone https://github.com/Daviid-P/Wolf_RPG_Decompyler into _reference/'
-        )
-
-    # Decompile to Data/ folder (extract everything, not just Game.dat)
-    temp_dir = game_dir / 'decompiled_temp'
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
-
-    success = False
-    for decompiler, key in decompiler_pairs:
-        try:
-            success = decompiler.decodeArchive(
-                archivePath=wolf_file,
-                outputPath=temp_dir,
-                only_game_dat=False,
-                keyString_=key,
-            )
-            if success:
-                break
-        except Exception:
-            continue
-
-    if not success:
-        raise RuntimeError(f'Failed to unpack {wolf_file}')
-
-    # If Data/ already exists (e.g. partial), merge
-    if data_dir.is_dir():
-        # Copy temp contents into existing Data/
-        for item in temp_dir.iterdir():
-            target = data_dir / item.name
-            if item.is_dir():
-                if target.is_dir():
-                    shutil.copytree(item, target, dirs_exist_ok=True)
-                else:
-                    shutil.copytree(item, target)
-            else:
-                shutil.copy2(item, target)
-        shutil.rmtree(temp_dir)
-    else:
-        temp_dir.rename(data_dir)
-
-    return data_dir
+    return wolf_unpack.unpack_data_wolf(Path(game_dir))
 
 
 # ── Main parser ──────────────────────────────────────────────────────────
@@ -1094,7 +1048,17 @@ class WolfRPGParser:
 
         # Find data directory
         existed = self._unpack_targets_existing()
-        self.data_dir = self._find_data_dir()
+        try:
+            self.data_dir = self._find_data_dir()
+        except WolfArchiveUnsupported as e:
+            log.warning('Wolf RPG Editor 3.x game (%s): not supported',
+                        e.marker)
+            self.load_warnings.append(self._refusal_message(e.marker, existed))
+            return []
+        except WolfUnpackError as e:
+            log.warning('Data.wolf unpack failed: %s', e.reason)
+            self.load_warnings.append(str(e))
+            return []
 
         marker = wolf3_marker(self.data_dir)
         if marker:
@@ -1170,6 +1134,11 @@ class WolfRPGParser:
         # Need to unpack Data.wolf
         wolf_file = self.game_dir / 'Data.wolf'
         if wolf_file.is_file():
+            # 3.x/Pro is refused from the archive header, before unpacking
+            # (Pro archives also can't be unpacked away from the game).
+            # wolf3_marker still checks whatever does get unpacked.
+            if wolf_unpack.archive_is_wolf3(wolf_file):
+                raise WolfArchiveUnsupported('the Data.wolf archive header')
             return unpack_data_wolf(self.game_dir)
 
         raise FileNotFoundError(
@@ -1383,7 +1352,11 @@ class WolfRPGParser:
         # restoring a saved project state.
         self.game_dir = Path(project_dir)
         existed = self._unpack_targets_existing()
-        self.data_dir = self._find_data_dir()
+        try:
+            self.data_dir = self._find_data_dir()
+        except WolfArchiveUnsupported as e:
+            raise WolfVersionUnsupported(
+                self._refusal_message(e.marker, existed)) from None
 
         # Refuse before anything is backed up or written: 3.x files are
         # UTF-8 and would be patched with cp932 text.

@@ -1,0 +1,3 @@
+version=v0.6.4
+url=https://github.com/Sinflower/UberWolf/releases/download/v0.6.4/UberWolfCli.exe
+sha256=0c9645733ae9544df11ee0c859a7f2cb51aa547d5d13f7935cb480bdab96fb3a

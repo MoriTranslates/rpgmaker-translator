@@ -71,6 +71,30 @@ def _wordninja_data():
     return [(gz, "wordninja")]
 
 
+def _uberwolf_data():
+    """Bundled Wolf RPG unpacker (translator/wolf_unpack.py runs it).
+
+    packaging/fetch_uberwolf.ps1 downloads it; the build stops here unless
+    the file is exactly the one pinned in third_party/UberWolf/PIN.txt.
+    """
+    import hashlib
+
+    folder = os.path.join(ROOT, "third_party", "UberWolf")
+    exe = os.path.join(folder, "UberWolfCli.exe")
+    with open(os.path.join(folder, "PIN.txt"), encoding="utf-8") as f:
+        pin = dict(line.strip().split("=", 1) for line in f if "=" in line)
+    if not os.path.isfile(exe):
+        raise SystemExit("third_party/UberWolf/UberWolfCli.exe missing: "
+                         "run packaging/fetch_uberwolf.ps1")
+    with open(exe, "rb") as f:
+        got = hashlib.sha256(f.read()).hexdigest()
+    if got != pin["sha256"].lower():
+        raise SystemExit(f"UberWolfCli.exe SHA-256 {got} does not match "
+                         f"PIN.txt {pin['sha256']}")
+    dest = os.path.join("third_party", "UberWolf")
+    return [(exe, dest), (os.path.join(folder, "LICENSE"), dest)]
+
+
 datas = [
     # Read-only app resources, resolved at runtime via translator/resource_paths.py
     (os.path.join(ROOT, "assets"), "assets"),
@@ -80,6 +104,7 @@ datas = [
     (os.path.join(ROOT, "THIRD_PARTY_NOTICES.md"), "."),
 ]
 datas += _wordninja_data()
+datas += _uberwolf_data()
 # Spell checker: English dictionary only (the editor checks English output).
 datas += collect_data_files("spellchecker", includes=["resources/en.json.gz"])
 

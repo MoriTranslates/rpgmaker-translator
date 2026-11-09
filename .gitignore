@@ -24,6 +24,10 @@ build/
 # Translation state files
 *_translation_autosave.json
 
+# Bundled Wolf unpacker: downloaded + SHA-256 checked by packaging/fetch_uberwolf.ps1
+third_party/UberWolf/UberWolfCli.exe
+third_party/UberWolf/UberWolfCli.exe.download
+
 # Reference materials (DazedMTL source, dummy projects, etc.)
 _reference/
 
