@@ -298,7 +298,7 @@ def test_copy_used_when_hard_link_is_not_possible(tmp_path, fake_uw, monkeypatch
     assert (game / "Data.wolf").read_bytes() == ARCHIVE
 
 
-# ── 3.x archives are refused before unpacking ────────────────────────────
+# ── Pro / 3.5 archives are refused before unpacking; plain 3.x unpacks ───
 
 def _dx_header(crypt_version):
     head = bytearray(64)
@@ -308,52 +308,78 @@ def _dx_header(crypt_version):
     return bytes(head)
 
 
-@pytest.mark.parametrize("content, is3", [
-    (_dx_header(0x12C), True),          # Wolf 3.00
-    (_dx_header(0x15E), True),          # Wolf 3.50
-    (_dx_header(1000), True),           # Pro
-    (_dx_header(0xC8), True),           # ChaCha20 Pro
-    (_dx_header(0), False),             # 2.225+ plain DXArchive v8
-    (b"\xb4\x6d\x68\x1c" + bytes(60), False),   # 2.x encrypted header
-    (b"DX", False),                     # too short to judge
+@pytest.mark.parametrize("content, refusal", [
+    (_dx_header(0x12C), None),          # Wolf 3.00 (plain)
+    (_dx_header(0x13A), None),          # Wolf 3.14 (plain)
+    (_dx_header(0x14B), None),          # Wolf 3.31 (plain)
+    (_dx_header(0x15E), wolf_unpack.ARCHIVE_WOLF35),    # 3.50: compressed
+    (_dx_header(1000), wolf_unpack.ARCHIVE_PROTECTED),  # Pro
+    (_dx_header(0x3F2), wolf_unpack.ARCHIVE_PROTECTED), # Pro, later key
+    (_dx_header(0xC8), wolf_unpack.ARCHIVE_PROTECTED),  # ChaCha20 Pro
+    (_dx_header(0x64), wolf_unpack.ARCHIVE_PROTECTED),  # unknown to us
+    (_dx_header(0), None),              # 2.225+ plain DXArchive v8
+    (b"\xb4\x6d\x68\x1c" + bytes(60), None),   # 2.x encrypted header
+    (b"DX", None),                      # too short to judge
 ])
-def test_archive_header_version(tmp_path, content, is3):
+def test_archive_header_refusal(tmp_path, content, refusal):
     f = tmp_path / "Data.wolf"
     f.write_bytes(content)
-    assert wolf_unpack.archive_is_wolf3(f) is is3
+    assert wolf_unpack.archive_refusal(f) == refusal
 
 
-def test_wolf3_archive_refused_without_unpacking(tmp_path, monkeypatch):
+@pytest.mark.parametrize("version, words", [
+    (1000, "is protected (WOLF RPG Editor Pro)"),
+    (0x15E, "is a WOLF RPG Editor 3.5 archive"),
+])
+def test_pro_and_35_archives_refused_without_unpacking(tmp_path, monkeypatch,
+                                                       version, words):
     def must_not_run(game_dir):
-        raise AssertionError("3.x archive was unpacked")
+        raise AssertionError("archive was unpacked")
     monkeypatch.setattr(wolfrpg, "unpack_data_wolf", must_not_run)
     game = tmp_path / "W3"
     game.mkdir()
     (game / "GamePro.exe").write_bytes(b"MZ")
-    (game / "Data.wolf").write_bytes(_dx_header(0x14B))
+    (game / "Data.wolf").write_bytes(_dx_header(version))
     before = _snapshot(game)
     p = wolfrpg.WolfRPGParser()
     assert p.load_project(str(game)) == []
     (msg,) = p.load_warnings
-    assert msg.startswith(wolfrpg.WOLF3_UNSUPPORTED)
+    assert msg.startswith(wolfrpg.WOLF_UNSUPPORTED)
+    assert f"Data.wolf {words}" in msg
     assert "Your game files were not changed" in msg
     assert _snapshot(game) == before
-    with pytest.raises(wolfrpg.WolfVersionUnsupported, match="3.x isn't supported"):
+    with pytest.raises(wolfrpg.WolfVersionUnsupported) as ei:
         p.save_project(str(game), [])
+    assert f"Data.wolf {words}" in str(ei.value)
     assert _snapshot(game) == before
 
 
-def test_wolf3_data_found_after_unpacking_is_still_refused(tmp_path, fake_uw):
-    """A 3.x archive the header check can't see: wolf3_marker still runs."""
-    def wolf3_output(cwd):
+def test_plain_wolf3_archive_is_unpacked(tmp_path, fake_uw):
+    game = _game(tmp_path)
+    (game / "Data.wolf").write_bytes(_dx_header(0x14B))
+    p = wolfrpg.WolfRPGParser()
+    p.load_project(str(game))
+    assert len(FakePopen.calls) == 1                 # UberWolf ran
+    args = FakePopen.calls[0]["args"]
+    assert "--" in args
+    assert not any(a in ("-u", "--unprotect") for a in args)
+    assert (game / "Data" / "MapData" / "Map001.mps").is_file()
+    assert not any("can't be translated" in w for w in p.load_warnings)
+
+
+def test_compressed_data_found_after_unpacking_is_still_refused(tmp_path,
+                                                                fake_uw):
+    """An archive the header check passes: every unpacked file is checked."""
+    def wolf35_output(cwd):
         _write_good_output(cwd)
         (cwd / "Data" / "BasicData" / "DataBase.dat").write_bytes(
-            b"\x00W\x00\x00OLUFM\x00" + b"\x00" * 6)
-    FakePopen.behaviour = staticmethod(wolf3_output)
+            b"\x00W\x00\x00OLUFM\x00\xc4" + b"\x00" * 6)
+    FakePopen.behaviour = staticmethod(wolf35_output)
     game = _game(tmp_path)
     p = wolfrpg.WolfRPGParser()
     assert p.load_project(str(game)) == []
-    assert p.load_warnings[0].startswith(wolfrpg.WOLF3_UNSUPPORTED)
+    assert p.load_warnings[0].startswith(wolfrpg.WOLF_UNSUPPORTED)
+    assert "DataBase.dat is compressed" in p.load_warnings[0]
     # the Data/ this call created is removed again (existing refusal rule)
     assert sorted(x.name for x in game.iterdir()) == ["Data.wolf", "Game.exe"]
 

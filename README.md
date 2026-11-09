@@ -327,7 +327,7 @@ Per-engine overrides for Context, Batch Size, Workers, Word Wrap, and Model. A *
 | SRPG Studio | data.dts | Supported |
 | Kirikiri | .ks (KAG) + .xp3 archives | Supported |
 | Crowd | .sce | Experimental |
-| Wolf RPG Editor | .wolf / .dat | Experimental (2.x; 3.x not supported yet) |
+| Wolf RPG Editor | .wolf / .dat | Experimental (2.x and 3.x; 3.5 compressed and Pro-protected games not supported yet) |
 | CSV Game | .x (CSV scripts) | Experimental |
 
 All engines auto-detect when you open a game folder — no manual configuration needed.
@@ -382,6 +382,7 @@ All engines auto-detect when you open a game folder — no manual configuration 
 - **[pycryptodome](https://www.pycryptodome.org/)** — AES decryption for SRPG Studio `data.dts` files.
 - **[EasyRPG Player](https://easyrpg.org/)** — Open-source RPG Maker 2000/2003 runtime, used for locale-independent play of translated RM2K games.
 - **[UberWolf](https://github.com/Sinflower/UberWolf)** by Sinflower (MIT) — Wolf RPG archive unpacker. The Windows release bundles its command-line tool (`UberWolfCli.exe`, unchanged) to unpack `Data.wolf`; its licence is in `_internal/third_party/UberWolf/LICENSE` and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- **[WolfTL](https://github.com/Sinflower/WolfTL)** by Sinflower (MIT) — Wolf RPG translation tool; its format code is the reference for this app's WOLF RPG Editor 3.x support (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 
 ---
 

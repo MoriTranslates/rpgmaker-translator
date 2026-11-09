@@ -79,14 +79,26 @@ def find_uberwolf() -> Optional[Path]:
 
 # ── Version check from the archive header ────────────────────────────────
 
-def archive_is_wolf3(wolf_file) -> bool:
-    """True when the archive header says WOLF RPG Editor 3.x / Pro.
+# Crypt versions of plain (not Pro-protected) WOLF RPG Editor 3.x archives,
+# which UberWolf opens with fixed keys (UberWolfLib WolfDec.cpp,
+# DEFAULT_CRYPT_MODES): 3.00, 3.14, 3.31.
+PLAIN_WOLF3_CRYPT_VERSIONS = frozenset({0x12C, 0x13A, 0x14B})
+WOLF35_CRYPT_VERSION = 0x15E        # 3.50: its data files are compressed
 
-    2.x archives either have an encrypted header (no "DX" magic) or a
-    plain DXArchive v8 header whose crypt version (high 16 bits of the
+ARCHIVE_WOLF35 = ("is a WOLF RPG Editor 3.5 archive (its data is "
+                  "compressed), which this version can't read or write yet")
+ARCHIVE_PROTECTED = ("is protected (WOLF RPG Editor Pro) or uses an archive "
+                     "format this version doesn't open")
+
+
+def archive_crypt_version(wolf_file) -> Optional[int]:
+    """The DXArchive crypt version of Data.wolf, or None if not judged.
+
+    2.x archives either have an encrypted header (no "DX" magic: None) or
+    a plain DXArchive v8 header whose crypt version (high 16 bits of the
     Flags field at offset 44) is 0.  3.x and Pro archives store their
-    non-zero crypt version there -- the same test UberWolf uses to pick
-    3.x keys.  Only 48 bytes are read.
+    non-zero crypt version there -- the value UberWolf picks its keys by.
+    Only 48 bytes are read.
     """
     try:
         with open(wolf_file, 'rb') as f:
@@ -94,11 +106,25 @@ def archive_is_wolf3(wolf_file) -> bool:
     except OSError as exc:
         # Not judged here: the unpack that follows reports the read error.
         log.warning('Could not read %s header: %s', wolf_file, exc)
-        return False
+        return None
     if len(head) < 48 or head[:2] != b'DX':
-        return False
-    flags = struct.unpack_from('<I', head, 44)[0]
-    return (flags >> 16) != 0
+        return None
+    return struct.unpack_from('<I', head, 44)[0] >> 16
+
+
+def archive_refusal(wolf_file) -> Optional[str]:
+    """Why Data.wolf must not be unpacked (plain words), or None.
+
+    2.x and plain 3.x archives are unpacked; 3.5 archives (compressed
+    data) and Pro-protected or unknown ones are refused before anything
+    is written.  UberWolf's unprotect mode is never used here.
+    """
+    version = archive_crypt_version(wolf_file)
+    if not version or version in PLAIN_WOLF3_CRYPT_VERSIONS:
+        return None
+    if version == WOLF35_CRYPT_VERSION:
+        return ARCHIVE_WOLF35
+    return ARCHIVE_PROTECTED
 
 
 # ── Unpacking ────────────────────────────────────────────────────────────

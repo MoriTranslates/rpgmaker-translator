@@ -27,7 +27,7 @@ def _wstr(s: str) -> bytes:
 def _wolf_db_bytes(strings_per_row: list[list[str]]) -> bytes:
     """One type, fields: 1 int + N strings, one row per list item."""
     n_str = len(strings_per_row[0])
-    out = bytearray(b'\x00' * 10)          # magic placeholder
+    out = bytearray(wolfrpg.MAGIC_DB)      # 2.x header (Shift-JIS text)
     out.append(0x01)                        # version
     out += struct.pack('<I', 1)             # type count
     out += wolfrpg.WolfDatabase.DAT_TYPE_SEP

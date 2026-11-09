@@ -382,7 +382,9 @@ def test_wolf3_refusal_removes_what_it_unpacked(tmp_path, monkeypatch):
     def fake_unpack(game_dir):
         data = game_dir / "Data" / "BasicData"
         data.mkdir(parents=True)
-        (data / "DataBase.dat").write_bytes(b"\x00W\x00\x00OLUFM\x00" + b"\x00" * 6)
+        # 3.5 (compressed) database: refused after unpacking
+        (data / "DataBase.dat").write_bytes(
+            b"\x00W\x00\x00OLUFM\x00\xc4" + b"\x00" * 6)
         (game_dir / "Data" / "MapData").mkdir()
         return game_dir / "Data"
     monkeypatch.setattr(wolfrpg, "unpack_data_wolf", fake_unpack)
@@ -398,20 +400,35 @@ def test_wolf3_refusal_keeps_a_data_folder_that_was_already_there(tmp_path):
     (game / "Data" / "BasicData").mkdir(parents=True)
     (game / "Data" / "MapData").mkdir()
     (game / "Data" / "BasicData" / "DataBase.dat").write_bytes(
-        b"\x00W\x00\x00OLUFM\x00" + b"\x00" * 6)
+        b"\x00W\x00\x00OLUFM\x00\xc4" + b"\x00" * 6)
     (game / "Game.exe").write_bytes(b"MZ")
-    wolfrpg.WolfRPGParser().load_project(str(game))
+    p = wolfrpg.WolfRPGParser()
+    assert p.load_project(str(game)) == []
+    assert "compressed" in p.load_warnings[0]
     assert (game / "Data" / "BasicData" / "DataBase.dat").is_file()
 
 
-def test_wolf3_encrypted_dat_is_detected_and_wolf2_encrypted_is_not(tmp_path):
+@pytest.mark.parametrize("version", [0x54, 0x55, 0x57, 0x50])
+def test_protected_dat_is_refused_whatever_its_protection_version(
+        tmp_path, version):
+    # WolfTL reads every byte-1 == 'P' file as UTF-8 3.x ("V3.1" for
+    # version < 0x55); the old XOR path read 0x54 as Shift-JIS and wrote
+    # it back unencrypted behind its encryption header (a broken game).
     from translator import wolfrpg
     basic = tmp_path / "Data" / "BasicData"
     basic.mkdir(parents=True)
-    (basic / "DataBase.dat").write_bytes(b"\x00P\x00\x00\x00\x57" + b"\x00" * 10)
-    assert "encrypted" in wolfrpg.wolf3_marker(tmp_path / "Data")
-    (basic / "DataBase.dat").write_bytes(b"\x00P\x00\x00\x00\x50" + b"\x00" * 10)
-    assert wolfrpg.wolf3_marker(tmp_path / "Data") is None
+    (basic / "DataBase.dat").write_bytes(
+        b"\x00P\x00\x00\x00" + bytes([version]) + b"\x00K" + b"\x00" * 10)
+    assert wolfrpg.find_unsupported(tmp_path / "Data") == (
+        "BasicData/DataBase.dat", wolfrpg.REASON_PROTECTED)
+
+
+def test_byte1_p_alone_is_not_taken_for_protection(tmp_path):
+    from translator import wolfrpg
+    basic = tmp_path / "Data" / "BasicData"
+    basic.mkdir(parents=True)
+    (basic / "DataBase.dat").write_bytes(b"JP-DB v2")     # not a header at all
+    assert wolfrpg.find_unsupported(tmp_path / "Data") is None
 
 
 # ── Messages, recovery for scenario engines, detection (fixes 16, 17) ─

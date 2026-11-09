@@ -6,8 +6,15 @@ Handles:
     see wolf_unpack.py)
   - Binary parsing: .mps maps, CommonEvent.dat, DataBase.dat
   - Export: writes translated strings back into binary files
+  - Versions: WOLF RPG Editor 2.x (Shift-JIS text) and plain 3.x (UTF-8
+    text), decided per file from its own header.  Compressed (3.5) and
+    protected (Pro-encrypted) files are refused, never half-read.
 
-Binary format reference: WolfTL by Sinflower (MIT), Wolf_RPG_Decompyler by Daviid-P.
+Binary format reference: WolfTL by Sinflower (MIT), Wolf_RPG_Decompyler by
+Daviid-P.  The 3.x handling (UTF-8 marker bytes, map tile-data marker,
+common-event terminator, compressed/protected version bytes) follows WolfTL
+(https://github.com/Sinflower/WolfTL, MIT License, Copyright (c) 2024
+Sinflower; FileCoder.hpp, Map.hpp, CommonEvents.hpp, Database.hpp).
 """
 
 from __future__ import annotations
@@ -31,19 +38,46 @@ log = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────
 
-# Magic bytes (after possible encryption header)
-MAGIC_COMMON = bytes([0x57, 0x00, 0x00, 0x4F, 0x4C, 0x00, 0x46, 0x43, 0x00])
-MAGIC_DB     = bytes([0x57, 0x00, 0x00, 0x4F, 0x4C, 0x00, 0x46, 0x4D, 0x00])
+# File headers, 2.x form.  WOLF RPG Editor 3.x stores text as UTF-8 and
+# marks each such file with 'U' (0x55) in one byte that is 0x00 in 2.x
+# (WolfTL FileCoder.hpp MagicNumber): file offset 6 in the .dat files,
+# 16 in .mps maps, 9 in Game.dat.  Every file is judged by its own byte.
+MAGIC_COMMON = bytes([0x00, 0x57, 0x00, 0x00, 0x4F, 0x4C, 0x00, 0x46, 0x43, 0x00])
+MAGIC_DB     = bytes([0x00, 0x57, 0x00, 0x00, 0x4F, 0x4C, 0x00, 0x46, 0x4D, 0x00])
+MAGIC_GAMEDAT = MAGIC_DB
 MAGIC_MAP    = bytes([0x00] * 10 + [0x57, 0x4F, 0x4C, 0x46, 0x4D, 0x00, 0x00, 0x00, 0x00, 0x00])
+UTF8_MARK = 0x55
+_DAT_UTF8_AT = 6
+_MAP_UTF8_AT = 16
+_GAMEDAT_UTF8_AT = 9
 
-# WOLF RPG Editor 3.x stores text as UTF-8 and marks its files with 'U'
-# (0x55) where 2.x has 0x00: ".dat" files read "W\0\0OLUF.." instead of
-# "W\0\0OL\0F..", and ".mps" maps have 0x55 right after "WOLFM\0".
-# This parser reads and writes 2.x (cp932) only.
-WOLF3_UNSUPPORTED = (
-    "Wolf RPG Editor 3.x isn't supported yet. This game was made with "
-    "WOLF RPG Editor 3 (its text is stored as UTF-8), which this version "
-    "cannot read or write correctly, so it can't be translated or exported.")
+# Versions whose data is LZ4-compressed (WOLF RPG Editor 3.5; WolfTL
+# CommonEvents.hpp / Database.hpp / FileCoder.hpp).
+_CE_COMPRESSED_VERSIONS = (0x93, 0xCC)
+_DB_COMPRESSED_VERSION = 0xC4
+_MAP_COMPRESSED_VERSION = 0x65          # and every later map version
+# A file whose byte 1 is 0x50 ('P') and byte 5 its protection version
+# (0x54 "V3.1", 0x55 "V3.3", 0x57+ "V3.5" in WolfTL; UberWolf calls all of
+# them Pro protection) is encrypted.  WolfTL reads every such file as
+# UTF-8 (3.x).  This version neither decrypts nor re-encrypts it.
+_PROTECTED_BYTE1 = 0x50
+_PROTECTED_MIN_VERSION = 0x50
+
+
+def is_protected(head: bytes) -> bool:
+    """True for a data file encrypted by WOLF RPG Editor's protection."""
+    return (len(head) > 5 and head[1] == _PROTECTED_BYTE1
+            and head[5] >= _PROTECTED_MIN_VERSION)
+
+# The data files this parser reads and writes, besides MapData/*.mps.
+_CE_NAME = 'CommonEvent.dat'
+_DB_NAMES = ('DataBase.dat', 'CDataBase.dat', 'SysDatabase.dat')
+
+WOLF_UNSUPPORTED = "This Wolf RPG game can't be translated by this version"
+REASON_COMPRESSED = ("is compressed (WOLF RPG Editor 3.5 format), which this "
+                     "version can't read or write yet")
+REASON_PROTECTED = ("is encrypted by WOLF RPG Editor's data protection, which "
+                    "this version doesn't remove")
 
 
 class WolfVersionUnsupported(RuntimeError):
@@ -51,45 +85,98 @@ class WolfVersionUnsupported(RuntimeError):
 
 
 class WolfArchiveUnsupported(WolfVersionUnsupported):
-    """Data.wolf's header shows 3.x/Pro: refused before anything is unpacked."""
+    """Data.wolf's header shows a format we can't unpack: refused first."""
 
-    def __init__(self, marker: str):
-        self.marker = marker
-        super().__init__(f'{WOLF3_UNSUPPORTED} Your game files were not '
-                         f'changed. (Detected from {marker}.)')
+    def __init__(self, reason: str):
+        self.where = 'Data.wolf'
+        self.reason = reason
+        super().__init__(f'{WOLF_UNSUPPORTED}: Data.wolf {reason}. Your game '
+                         f'files were not changed.')
 
 
-def wolf3_marker(data_dir) -> Optional[str]:
-    """Relative path of a file showing the game is Wolf RPG Editor 3.x.
+class WolfTextError(ValueError):
+    """A string doesn't decode in its file's encoding (would be garbled)."""
 
-    Returns None for 2.x games (or when nothing can be checked).  Only a
-    few header bytes of each file are read.
+    def __init__(self, encoding: str, offset: int):
+        self.where = ''
+        self.encoding = encoding
+        self.offset = offset
+        name = 'UTF-8' if encoding == 'utf-8' else 'Shift-JIS'
+        super().__init__(
+            f"has text that isn't valid {name} (at byte {offset}), so it "
+            "would show up garbled")
+
+
+def header_utf8(data: bytes, magic: bytes, utf8_at: int) -> Optional[bool]:
+    """True/False (UTF-8 or Shift-JIS) when *data* starts with *magic*.
+
+    The byte at *utf8_at* may be 0x00 (2.x) or 0x55 (3.x); anything else,
+    or any other difference, is not this header: None.
+    """
+    if len(data) < len(magic):
+        return None
+    mark = data[utf8_at]
+    if mark not in (0x00, UTF8_MARK):
+        return None
+    head = bytearray(data[:len(magic)])
+    head[utf8_at] = 0x00
+    if bytes(head) != magic:
+        return None
+    return mark == UTF8_MARK
+
+
+def file_refusal(path, kind: str) -> Optional[str]:
+    """Why this version must not read or write one data file, or None.
+
+    *kind* is 'ce', 'db' or 'map'.  Only header bytes are read.  Files
+    that are merely damaged or of an unknown layout are not refused here:
+    their parse fails and is reported for that file alone.
+    """
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(32)
+    except OSError:
+        return None     # absent/unreadable: the load reports it per file
+    if is_protected(head):
+        return REASON_PROTECTED
+    if kind == 'map':
+        if (header_utf8(head, MAGIC_MAP, _MAP_UTF8_AT) is not None
+                and len(head) >= 24
+                and struct.unpack_from('<I', head, 20)[0]
+                >= _MAP_COMPRESSED_VERSION):
+            return REASON_COMPRESSED
+        return None
+    magic = MAGIC_COMMON if kind == 'ce' else MAGIC_DB
+    if header_utf8(head, magic, _DAT_UTF8_AT) is None or len(head) < 11:
+        return None
+    version = head[10]
+    if kind == 'ce' and version in _CE_COMPRESSED_VERSIONS:
+        return REASON_COMPRESSED
+    if kind == 'db' and version == _DB_COMPRESSED_VERSION:
+        return REASON_COMPRESSED
+    return None
+
+
+def find_unsupported(data_dir) -> Optional[tuple[str, str]]:
+    """(relative path, reason) of the first file this version must refuse.
+
+    Every file the exporter would write is checked (each map too: a few
+    header bytes each).  One such file refuses the whole game: a project
+    missing part of the game, or a game with some files written, would be
+    worse than a clear "not yet".
     """
     data_dir = Path(data_dir)
     basic = data_dir / 'BasicData'
-    for name in ('CommonEvent.dat', 'DataBase.dat', 'CDataBase.dat',
-                 'SysDatabase.dat'):
-        path = basic / name
-        try:
-            with open(path, 'rb') as f:
-                head = f.read(16)
-        except OSError:
-            continue    # absent/unreadable: nothing to judge by; load reports it
-        if len(head) > 6 and head[1:6] == b'W\x00\x00OL' and head[6] == 0x55:
-            return f'BasicData/{name}'
-        if len(head) > 5 and head[1] == 0x50 and head[5] >= 0x55:
-            # encrypted .dat, 3.x encryption (2.x uses lower versions)
-            return f'BasicData/{name} (encrypted)'
+    for name, kind in [(_CE_NAME, 'ce')] + [(n, 'db') for n in _DB_NAMES]:
+        reason = file_refusal(basic / name, kind)
+        if reason:
+            return f'BasicData/{name}', reason
     map_dir = data_dir / 'MapData'
     if map_dir.is_dir():
-        for mps in sorted(map_dir.glob('*.mps'))[:5]:
-            try:
-                with open(mps, 'rb') as f:
-                    head = f.read(20)
-            except OSError:
-                continue    # unreadable: load_project reports it
-            if head[10:16] == b'WOLFM\x00' and len(head) > 16 and head[16] == 0x55:
-                return f'MapData/{mps.name}'
+        for mps in sorted(map_dir.glob('*.mps')):
+            reason = file_refusal(mps, 'map')
+            if reason:
+                return f'MapData/{mps.name}', reason
     return None
 
 
@@ -142,118 +229,37 @@ _SPEAKER_PREFIX_RE = re.compile(r'^(@\d+\r?\n)?([^\n：]{1,20})：\r?\n')
 _FACE_PREFIX_RE = re.compile(r'^@\d+\r?\n')
 
 
-# ── Wolf RPG file decryption ─────────────────────────────────────────────
-
-# Seed indices for decryption (from 10-byte header)
-_DAT_SEED_INDICES = (0, 3, 9)        # CommonEvent.dat, DataBase.dat, etc.
-_GAMEDAT_SEED_INDICES = (0, 8, 6)    # Game.dat
-_DECRYPT_INTERVALS = (1, 2, 5)       # XOR step intervals per seed
-
-# C standard library compatible LCG random (matches MSVC srand/rand)
-class _CRand:
-    """MSVC-compatible rand() for Wolf RPG decryption."""
-    __slots__ = ('_seed',)
-
-    def __init__(self, seed: int):
-        self._seed = seed & 0xFFFFFFFF
-
-    def rand(self) -> int:
-        self._seed = (self._seed * 214013 + 2531011) & 0xFFFFFFFF
-        return (self._seed >> 16) & 0x7FFF
-
-
-def _decrypt_dat_v32(data: bytes, seed_indices: tuple = _DAT_SEED_INDICES
-                     ) -> tuple[bytes, bytes, int]:
-    """Decrypt a Wolf RPG v3.2 encrypted .dat file.
-
-    Returns (decrypted_data, crypt_header, proj_key).
-    Encrypted files have byte[1] == 0x50.
-    """
-    if len(data) < 11 or data[1] != 0x50:
-        return data, b'', -1  # Not encrypted
-
-    # First 10 bytes are the encryption header
-    header = bytearray(data[:10])
-    encrypted = bytearray(data[10:])
-
-    # Extract seeds from header at specified indices
-    seeds = [header[i] for i in seed_indices]
-
-    # XOR decrypt using seeded random
-    for pass_idx, seed in enumerate(seeds):
-        rng = _CRand(seed)
-        interval = _DECRYPT_INTERVALS[pass_idx]
-        for j in range(0, len(encrypted), interval):
-            encrypted[j] ^= (rng.rand() >> 12) & 0xFF
-
-    # After decryption: first 5 bytes are magic-ish, then uint32 key_size
-    # Then proj_key (1 byte) + remaining key bytes
-    key_size = struct.unpack_from('<I', encrypted, 5)[0] if len(encrypted) > 9 else 0
-    proj_key = encrypted[9] if len(encrypted) > 9 and key_size > 0 else -1
-
-    # Skip past: 5 bytes + 4 bytes key_size + key_size bytes
-    skip = 5 + 4 + key_size
-    decrypted = bytes(encrypted[skip:])
-
-    return decrypted, bytes(header), proj_key
-
-
-def _decrypt_project(data: bytes, proj_key: int) -> bytes:
-    """Decrypt a .project file using the project key from the .dat file."""
-    if proj_key < 0:
-        return data  # No encryption
-
-    rng = _CRand(proj_key)
-    result = bytearray(data)
-    for i in range(len(result)):
-        result[i] ^= rng.rand() & 0xFF
-    return bytes(result)
-
-
-# Global project key shared between .dat and .project files
-_g_proj_key: int = -1
-
-
-def _set_proj_key(key: int):
-    global _g_proj_key
-    if _g_proj_key == -1:
-        _g_proj_key = key
-
-
-def _get_proj_key() -> int:
-    return _g_proj_key
-
-
-def _reset_proj_key():
-    global _g_proj_key
-    _g_proj_key = -1
-
-
-def _lz4_decompress(reader: 'BinaryReader') -> bytes:
-    """LZ4 decompress data from current reader position.
-
-    Format: uint32 decompressed_size + uint32 compressed_size + compressed_data.
-    Returns decompressed data with the original file header prepended.
-    """
-    try:
-        import lz4.block
-    except ImportError:
-        raise ImportError(
-            'lz4 package required for compressed Wolf RPG files. '
-            'Install with: pip install lz4'
-        )
-
-    dec_size = reader.read_uint32()
-    enc_size = reader.read_uint32()
-    compressed = reader.read(enc_size)
-
-    return lz4.block.decompress(compressed, uncompressed_size=dec_size)
-
-
 # ── Binary reader ────────────────────────────────────────────────────────
 
+def text_encoding(is_utf8: bool) -> str:
+    """The text encoding of a file: UTF-8 (3.x mark) or Shift-JIS (cp932)."""
+    return 'utf-8' if is_utf8 else 'cp932'
+
+
+def fit_encoding(text: str, is_utf8: bool) -> tuple[str, bool]:
+    """(text the file can store, whether anything had to be replaced).
+
+    Characters the file's encoding can't hold (an accented letter in a
+    Shift-JIS game, a lone surrogate anywhere) become '?'.  The caller
+    reports every replacement; nothing is replaced silently.
+    """
+    enc = text_encoding(is_utf8)
+    try:
+        text.encode(enc)
+        return text, False
+    except UnicodeEncodeError:
+        return text.encode(enc, errors='replace').decode(enc), True
+
+
 class BinaryReader:
-    """Lightweight binary reader for Wolf RPG files."""
+    """Lightweight binary reader for Wolf RPG files.
+
+    ``is_utf8`` comes from the file's own header byte.  ``read_string``
+    decodes strictly (a bad byte raises WolfTextError rather than turning
+    into U+FFFD and being written back as '?'); ``skip_string`` steps over
+    strings that are kept as raw bytes; ``read_label`` is for names that
+    are only shown in logs and never written back.
+    """
 
     __slots__ = ('data', 'pos', 'is_utf8')
 
@@ -263,6 +269,8 @@ class BinaryReader:
         self.is_utf8 = is_utf8
 
     def read(self, n: int) -> bytes:
+        if n < 0 or self.pos + n > len(self.data):
+            raise ValueError(f'unexpected end of file at byte {self.pos}')
         chunk = self.data[self.pos:self.pos + n]
         self.pos += n
         return chunk
@@ -277,20 +285,34 @@ class BinaryReader:
         self.pos += 4
         return val
 
-    def read_string(self) -> str:
+    def _raw_string(self) -> tuple[int, bytes]:
+        offset = self.pos
         length = self.read_uint32()
         if length == 0:
-            return ''
+            return offset, b''
         raw = self.read(length)
         # Strip trailing null
-        if raw and raw[-1] == 0:
+        if raw[-1] == 0:
             raw = raw[:-1]
-        if self.is_utf8:
-            return raw.decode('utf-8', errors='replace')
-        return raw.decode('cp932', errors='replace')
+        return offset, raw
+
+    def read_string(self) -> str:
+        offset, raw = self._raw_string()
+        enc = text_encoding(self.is_utf8)
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            raise WolfTextError(enc, offset) from None
+
+    def read_label(self) -> str:
+        return self._raw_string()[1].decode(
+            text_encoding(self.is_utf8), errors='replace')
+
+    def skip_string(self):
+        self._raw_string()
 
     def skip(self, n: int):
-        self.pos += n
+        self.read(n)
 
     def eof(self) -> bool:
         return self.pos >= len(self.data)
@@ -302,7 +324,8 @@ class BinaryReader:
 # ── Binary writer ────────────────────────────────────────────────────────
 
 class BinaryWriter:
-    """Writes Wolf RPG binary data."""
+    """Writes Wolf RPG binary data.  Strings are encoded strictly in the
+    file's encoding: translations are fitted first (fit_encoding)."""
 
     __slots__ = ('buf', 'is_utf8')
 
@@ -320,10 +343,7 @@ class BinaryWriter:
         self.buf.extend(struct.pack('<I', val))
 
     def write_string(self, s: str):
-        if self.is_utf8:
-            encoded = s.encode('utf-8') + b'\x00'
-        else:
-            encoded = s.encode('cp932', errors='replace') + b'\x00'
+        encoded = s.encode(text_encoding(self.is_utf8)) + b'\x00'
         self.write_uint32(len(encoded))
         self.write(encoded)
 
@@ -441,24 +461,27 @@ class WolfMap:
         self.path = path
         self.name = path.stem
         self.events: list[WolfEvent] = []
+        self.is_utf8 = False
         self._header_data = b''
-        self._tile_data = b''
         self._raw = b''
 
     def load(self):
         self._raw = self.path.read_bytes()
-        reader = BinaryReader(self._raw)
-
-        # Verify magic
-        magic = reader.read(20)
-        if magic != MAGIC_MAP:
+        is_utf8 = header_utf8(self._raw, MAGIC_MAP, _MAP_UTF8_AT)
+        if is_utf8 is None:
             raise ValueError(f'{self.path.name}: bad map magic')
+        self.is_utf8 = is_utf8
+        reader = BinaryReader(self._raw, is_utf8)
+        reader.skip(len(MAGIC_MAP))
 
         version = reader.read_uint32()
-        unknown2 = reader.read_byte()
-        unknown3_str = reader.read_string()
+        if version >= _MAP_COMPRESSED_VERSION:
+            # find_unsupported refuses these first; never half-read one
+            raise ValueError(f'{self.path.name} {REASON_COMPRESSED}')
+        reader.read_byte()      # unknown2
+        reader.skip_string()    # unknown3 (kept as raw bytes in the header)
 
-        tileset_id = reader.read_uint32()
+        reader.read_uint32()    # tileset id
         width = reader.read_uint32()
         height = reader.read_uint32()
         event_count = reader.read_uint32()
@@ -469,26 +492,40 @@ class WolfMap:
             reader.read_uint32()  # unknown4
             layer_count = reader.read_uint32()
 
-        # Tile data
-        tile_size = width * height * layer_count * 4
-        self._tile_data = reader.read(tile_size)
+        # Tile data.  A map ending right after its header has none (and no
+        # events); a 3.x (UTF-8) map may store FFFFFFFF instead of its
+        # tiles (WolfTL Map.hpp).
+        last = len(self._raw) - 1
+        if reader.pos != last:
+            if (is_utf8 and reader.pos + 4 <= len(self._raw) and struct.unpack_from(
+                    '<I', self._raw, reader.pos)[0] == 0xFFFFFFFF):
+                reader.skip(4)
+            else:
+                reader.skip(width * height * layer_count * 4)
 
         # Save everything up to events as header
         self._header_data = self._raw[:reader.pos]
 
         # Read events
-        while reader.peek() == MAP_EVENT_INDICATOR:
+        while reader.pos < last and reader.peek() == MAP_EVENT_INDICATOR:
             reader.read_byte()  # consume indicator
             ev = WolfEvent.read(reader)
             self.events.append(ev)
+        if len(self.events) != event_count:
+            raise ValueError(f'{self.path.name}: {len(self.events)} events '
+                             f'read, header says {event_count}')
 
         terminator = reader.read_byte()
         if terminator != MAP_EVENT_TERMINATOR:
             raise ValueError(f'{self.path.name}: bad map terminator {terminator:#x}')
+        if not reader.eof():
+            raise ValueError(f'{self.path.name}: '
+                             f'{len(self._raw) - reader.pos} unexpected '
+                             'bytes after the end of the map')
 
     def save(self, path: Optional[Path] = None):
         """Write map back to file with modified commands."""
-        writer = BinaryWriter()
+        writer = BinaryWriter(self.is_utf8)
         writer.write(self._header_data)
         for ev in self.events:
             writer.write_byte(MAP_EVENT_INDICATOR)
@@ -562,7 +599,7 @@ class WolfPage:
         #   conditions(1+4+16+16) + movement(4) + flags(1) + route_flags(1) + routes
         pre_start = reader.pos
         reader.read_uint32()     # unknown1
-        reader.read_string()     # graphic name
+        reader.skip_string()     # graphic name (kept as raw bytes)
         reader.skip(4)           # direction, frame, opacity, render mode
         reader.skip(1 + 4 + 16 + 16)  # conditions
         reader.skip(4)           # movement
@@ -636,9 +673,10 @@ class WolfCommonEvent:
 
         # Capture everything from unknown11 onward as _post_data
         # (unknown11 + description + all trailing structures)
+        # (all kept as raw bytes: skipped, not decoded)
         post_start = reader.pos
-        unknown11 = reader.read_string()
-        ce.description = reader.read_string()
+        reader.skip_string()    # unknown11
+        ce.description = reader.read_label()
         indicator = reader.read_byte()
         if indicator != CE_DATA_INDICATOR:
             raise ValueError(f'Bad CE data indicator: {indicator:#x}')
@@ -646,7 +684,7 @@ class WolfCommonEvent:
         # unknown3: string array
         count = reader.read_uint32()
         for _ in range(count):
-            reader.read_string()
+            reader.skip_string()
 
         # unknown4: byte array
         count = reader.read_uint32()
@@ -657,7 +695,7 @@ class WolfCommonEvent:
         for _ in range(count):
             sub_count = reader.read_uint32()
             for _ in range(sub_count):
-                reader.read_string()
+                reader.skip_string()
 
         # unknown6: array of int arrays
         count = reader.read_uint32()
@@ -670,17 +708,17 @@ class WolfCommonEvent:
 
         # unknown8: 100 strings
         for _ in range(100):
-            reader.read_string()
+            reader.skip_string()
 
         # End markers
         indicator = reader.read_byte()
         if indicator != CE_END1:
             raise ValueError(f'Bad CE end1: {indicator:#x}')
-        reader.read_string()  # unknown9
+        reader.skip_string()  # unknown9
 
         indicator = reader.read_byte()
         if indicator == CE_END2:
-            reader.read_string()  # unknown10
+            reader.skip_string()  # unknown10
             reader.read_uint32()  # unknown12
             end = reader.read_byte()
             if end != CE_END2:
@@ -710,49 +748,43 @@ class WolfCommonEvents:
     def __init__(self, path: Path):
         self.path = path
         self.events: list[WolfCommonEvent] = []
+        self.is_utf8 = False
         self._magic = b''
         self._version = 0
         self._terminator = 0
 
     def load(self):
         data = self.path.read_bytes()
-
-        # Handle encryption
-        crypt_header = b''
-        if len(data) > 5 and data[1] == 0x50:
-            crypt_ver = data[5]
-            if crypt_ver >= 0x57:
-                raise ValueError('V3.5 encrypted CommonEvent.dat not supported yet')
-            elif crypt_ver >= 0x55:
-                raise ValueError('V3.3 encrypted CommonEvent.dat not supported yet')
-            # V3.2: seeded XOR
-            data, crypt_header, proj_key = _decrypt_dat_v32(data, _DAT_SEED_INDICES)
-            if proj_key >= 0:
-                _set_proj_key(proj_key)
-
-        reader = BinaryReader(data)
-
-        # Read magic (first byte is 0x00 prefix for unencrypted)
-        if not crypt_header:
-            first = reader.read_byte()
-            magic = reader.read(len(MAGIC_COMMON))
-            if magic != MAGIC_COMMON:
-                raise ValueError(f'Bad CommonEvent magic: {magic.hex()}')
-            self._magic = bytes([first]) + magic
-        else:
-            self._magic = crypt_header  # Preserve for potential re-export
+        if is_protected(data):
+            # find_unsupported refuses these first; never half-read one
+            raise ValueError(f'{_CE_NAME} {REASON_PROTECTED}')
+        is_utf8 = header_utf8(data, MAGIC_COMMON, _DAT_UTF8_AT)
+        if is_utf8 is None:
+            raise ValueError(f'Bad CommonEvent magic: {data[:10].hex()}')
+        self.is_utf8 = is_utf8
+        reader = BinaryReader(data, is_utf8)
+        self._magic = reader.read(len(MAGIC_COMMON))
 
         self._version = reader.read_byte()
+        if self._version in _CE_COMPRESSED_VERSIONS:
+            raise ValueError(f'{_CE_NAME} {REASON_COMPRESSED}')
 
         event_count = reader.read_uint32()
         for i in range(event_count):
             ce = WolfCommonEvent.read(reader, i)
             self.events.append(ce)
 
+        # 2.x ends with 0x8F, 3.x with e.g. 0x90: WolfTL accepts >= 0x89
         self._terminator = reader.read_byte()
+        if self._terminator < 0x89:
+            raise ValueError(f'Bad CommonEvent terminator: '
+                             f'{self._terminator:#x}')
+        if not reader.eof():
+            raise ValueError(f'{len(data) - reader.pos} unexpected bytes '
+                             f'after the last common event')
 
     def save(self, path: Optional[Path] = None):
-        writer = BinaryWriter()
+        writer = BinaryWriter(self.is_utf8)
         writer.write(self._magic)
         writer.write_byte(self._version)
         writer.write_uint32(len(self.events))
@@ -796,52 +828,48 @@ class WolfDatabase:
 
         dat_data = self.dat_path.read_bytes()
         proj_data = self.project_path.read_bytes()
+        is_utf8 = self.dat_header(dat_data, self.dat_path.name)
 
-        # Handle .dat encryption
-        if len(dat_data) > 5 and dat_data[1] == 0x50:
-            crypt_ver = dat_data[5]
-            if crypt_ver >= 0x57:
-                log.warning('Skipping %s: V3.5 encryption not supported yet', self.name)
-                return
-            elif crypt_ver >= 0x55:
-                log.warning('Skipping %s: V3.3 encryption not supported yet', self.name)
-                return
-            # V3.2: seeded XOR
-            dat_data, _header, proj_key = _decrypt_dat_v32(
-                dat_data, _DAT_SEED_INDICES)
-            if proj_key >= 0:
-                _set_proj_key(proj_key)
-
-        # Handle .project encryption (uses proj_key from .dat)
-        proj_key = _get_proj_key()
-        if proj_key >= 0:
-            proj_data = _decrypt_project(proj_data, proj_key)
-
-        # Parse .project file first to get type/field structure
-        self._parse_project(proj_data)
+        # Parse .project file first to get type/field structure.  It has
+        # no header of its own: its text is in the encoding of its .dat.
+        self._parse_project(proj_data, is_utf8)
 
         # Parse .dat file using the structure from .project
         self._parse_dat(dat_data)
 
-    def _parse_project(self, data: bytes):
-        """Parse .project file for type and field definitions."""
-        reader = BinaryReader(data)
-        try:
-            type_count = reader.read_uint32()
-            if type_count > 1000:
-                return  # Probably encrypted/corrupt
-        except Exception:
-            return  # Encrypted or corrupt
+    @staticmethod
+    def dat_header(data: bytes, name: str = 'database') -> bool:
+        """UTF-8 flag of a database .dat; ValueError if it isn't one we read."""
+        if is_protected(data):
+            raise ValueError(f'{name} {REASON_PROTECTED}')
+        is_utf8 = header_utf8(data, MAGIC_DB, _DAT_UTF8_AT)
+        if is_utf8 is None:
+            raise ValueError(f'{name}: bad database magic {data[:10].hex()}')
+        if len(data) > 10 and data[10] == _DB_COMPRESSED_VERSION:
+            raise ValueError(f'{name} {REASON_COMPRESSED}')
+        return is_utf8
+
+    def _parse_project(self, data: bytes, is_utf8: bool = False):
+        """Parse .project file for type and field definitions.
+
+        Its strings are names and descriptions, never extracted or written
+        back, so they are read leniently (read_label / skip_string).
+        """
+        reader = BinaryReader(data, is_utf8)
+        type_count = reader.read_uint32()
+        if type_count > 100000:
+            raise ValueError(f'{self.project_path.name}: implausible type '
+                             f'count {type_count}')
 
         for _ in range(type_count):
             type_info = {}
-            type_info['name'] = reader.read_string()
+            type_info['name'] = reader.read_label()
 
             # Field definitions
             field_count = reader.read_uint32()
             fields = []
             for _ in range(field_count):
-                field_name = reader.read_string()
+                field_name = reader.read_label()
                 fields.append({'name': field_name})
             type_info['fields'] = fields
 
@@ -849,11 +877,11 @@ class WolfDatabase:
             data_count = reader.read_uint32()
             data_names = []
             for _ in range(data_count):
-                data_names.append(reader.read_string())
+                data_names.append(reader.read_label())
             type_info['data_names'] = data_names
 
             # Description
-            type_info['description'] = reader.read_string()
+            type_info['description'] = reader.read_label()
 
             # Field type list
             field_type_list_size = reader.read_uint32()
@@ -867,14 +895,14 @@ class WolfDatabase:
             # Unknown1 strings per field
             count = reader.read_uint32()
             for i in range(count):
-                reader.read_string()
+                reader.skip_string()
 
             # StringArgs per field
             count = reader.read_uint32()
             for i in range(count):
                 sub_count = reader.read_uint32()
                 for _ in range(sub_count):
-                    reader.read_string()
+                    reader.skip_string()
 
             # IntArgs per field
             count = reader.read_uint32()
@@ -887,35 +915,34 @@ class WolfDatabase:
             reader.skip(count * 4)
 
             self._types.append(type_info)
+        if not reader.eof():
+            raise ValueError(f'{self.project_path.name}: '
+                             f'{len(data) - reader.pos} unexpected bytes '
+                             'after the last type')
 
     def _parse_dat(self, data: bytes):
-        """Parse .dat file using structure from .project."""
-        reader = BinaryReader(data)
+        """Parse .dat file using structure from .project.
 
-        # Skip magic (1 byte prefix + 9 bytes magic)
-        reader.skip(10)
-
-        # Version byte — if 0xC4, the rest is LZ4 compressed
+        Strict: a header, layout or ending that doesn't match raises, so a
+        database is either read whole or reported (never half-read).
+        """
+        reader = BinaryReader(data, self.dat_header(data, self.dat_path.name))
+        reader.skip(len(MAGIC_DB))
         version = reader.read_byte()
-        if version == 0xC4:
-            data = _lz4_decompress(reader)
-            reader = BinaryReader(data)
-            # Decompressed data starts at the version byte
-            version = reader.read_byte()
 
         # Type count
         type_count = reader.read_uint32()
         if type_count != len(self._types):
-            return  # Mismatch, skip
+            raise ValueError(f'{self.dat_path.name}: {type_count} types, but '
+                             f'its .project has {len(self._types)}')
 
         for type_idx in range(type_count):
-            try:
-                self._parse_dat_type(reader, type_idx)
-            except Exception:
-                break  # Stop on error, keep what we have
+            self._parse_dat_type(reader, type_idx)
 
-        # Should end with version byte
-        # (not critical if we miss it)
+        # Ends with its version byte again (WolfTL Database.hpp)
+        if reader.eof() or reader.read_byte() != version or not reader.eof():
+            raise ValueError(f'{self.dat_path.name}: unexpected end of the '
+                             'database')
 
     def _parse_dat_type(self, reader: BinaryReader, type_idx: int):
         """Parse one type from the .dat file."""
@@ -930,7 +957,7 @@ class WolfDatabase:
         fields_size = reader.read_uint32()
 
         if unknown1 == self.STRING_INDICATOR:
-            reader.read_string()  # unknown2
+            reader.skip_string()  # unknown2
 
         # Read field index_info values
         field_infos = []
@@ -1041,9 +1068,6 @@ class WolfRPGParser:
         self.common_events = None
         self.databases = []
 
-        # Reset global decryption state
-        _reset_proj_key()
-
         self.load_warnings = []
 
         # Find data directory
@@ -1051,24 +1075,47 @@ class WolfRPGParser:
         try:
             self.data_dir = self._find_data_dir()
         except WolfArchiveUnsupported as e:
-            log.warning('Wolf RPG Editor 3.x game (%s): not supported',
-                        e.marker)
-            self.load_warnings.append(self._refusal_message(e.marker, existed))
+            log.warning('Wolf RPG game not supported (%s %s)', e.where, e.reason)
+            self.load_warnings.append(
+                self._refusal_message(e.where, e.reason, existed))
             return []
         except WolfUnpackError as e:
             log.warning('Data.wolf unpack failed: %s', e.reason)
             self.load_warnings.append(str(e))
             return []
 
-        marker = wolf3_marker(self.data_dir)
-        if marker:
-            # Its text would be garbled (UTF-8 read as cp932) and every
-            # map and common event fails to parse: offer nothing rather
-            # than a partial, garbled project.
-            log.warning('Wolf RPG Editor 3.x game (%s): not supported', marker)
-            self.load_warnings.append(self._refusal_message(marker, existed))
+        bad = find_unsupported(self.data_dir)
+        if bad:
+            # Compressed or protected: offer nothing rather than a partial
+            # project (and an export that writes only part of the game).
+            log.warning('Wolf RPG game not supported (%s %s)', *bad)
+            self.load_warnings.append(self._refusal_message(*bad, existed))
             return []
 
+        try:
+            entries = self._load_files()
+        except WolfTextError as e:
+            # Text that doesn't decode would be shown garbled and written
+            # back damaged: refuse the game, not just that file.
+            log.warning('Wolf RPG game not supported (%s %s)', e.where, e)
+            self.maps, self.common_events, self.databases = [], None, []
+            self.load_warnings = [self._refusal_message(e.where, str(e),
+                                                        existed)]
+            return []
+
+        # Assign IDs as string paths (file/field) for event viewer compatibility
+        for entry in entries:
+            entry.id = f'{entry.file}/{entry.field}'
+
+        return entries
+
+    def _load_files(self) -> list[TranslationEntry]:
+        """Parse every map, CommonEvent.dat and database in data_dir.
+
+        A file that fails to parse is a load warning for that file alone;
+        a WolfTextError (with ``where`` set) is raised to refuse the game.
+        """
+        entries: list[TranslationEntry] = []
         # Parse maps
         map_dir = self.data_dir / 'MapData'
         if map_dir.is_dir():
@@ -1078,26 +1125,32 @@ class WolfRPGParser:
                     wolf_map.load()
                     self.maps.append(wolf_map)
                     entries.extend(self._extract_map_entries(wolf_map, self.context_size))
+                except WolfTextError as e:
+                    e.where = f'MapData/{mps_file.name}'
+                    raise
                 except Exception as e:
                     log.warning('Failed to parse %s: %s', mps_file.name, e)
                     self.load_warnings.append(f'MapData/{mps_file.name}: {e}')
 
         # Parse common events
         basic_dir = self.data_dir / 'BasicData'
-        ce_path = basic_dir / 'CommonEvent.dat' if basic_dir.is_dir() else None
+        ce_path = basic_dir / _CE_NAME if basic_dir.is_dir() else None
         if ce_path and ce_path.is_file():
             try:
                 self.common_events = WolfCommonEvents(ce_path)
                 self.common_events.load()
                 entries.extend(self._extract_ce_entries(self.context_size))
+            except WolfTextError as e:
+                e.where = f'BasicData/{_CE_NAME}'
+                raise
             except Exception as e:
+                self.common_events = None
                 log.warning('Failed to parse CommonEvent.dat: %s', e)
                 self.load_warnings.append(f'BasicData/CommonEvent.dat: {e}')
 
         # Parse databases (skip SysDataBaseBasic — system config only, no text)
         if basic_dir and basic_dir.is_dir():
-            for db_name in ('DataBase.dat', 'CDataBase.dat',
-                            'SysDatabase.dat'):
+            for db_name in _DB_NAMES:
                 db_path = basic_dir / db_name
                 if db_path.is_file():
                     try:
@@ -1105,14 +1158,12 @@ class WolfRPGParser:
                         db.load()
                         self.databases.append(db)
                         entries.extend(self._extract_db_entries(db))
+                    except WolfTextError as e:
+                        e.where = f'BasicData/{db_name}'
+                        raise
                     except Exception as e:
                         log.warning('Failed to parse %s: %s', db_name, e)
                         self.load_warnings.append(f'BasicData/{db_name}: {e}')
-
-        # Assign IDs as string paths (file/field) for event viewer compatibility
-        for entry in entries:
-            entry.id = f'{entry.file}/{entry.field}'
-
         return entries
 
     def _find_data_dir(self) -> Path:
@@ -1134,11 +1185,12 @@ class WolfRPGParser:
         # Need to unpack Data.wolf
         wolf_file = self.game_dir / 'Data.wolf'
         if wolf_file.is_file():
-            # 3.x/Pro is refused from the archive header, before unpacking
-            # (Pro archives also can't be unpacked away from the game).
-            # wolf3_marker still checks whatever does get unpacked.
-            if wolf_unpack.archive_is_wolf3(wolf_file):
-                raise WolfArchiveUnsupported('the Data.wolf archive header')
+            # Protected (Pro) and 3.5 archives are refused from the archive
+            # header, before unpacking.  find_unsupported still checks
+            # every file that does get unpacked.
+            reason = wolf_unpack.archive_refusal(wolf_file)
+            if reason:
+                raise WolfArchiveUnsupported(reason)
             return unpack_data_wolf(self.game_dir)
 
         raise FileNotFoundError(
@@ -1355,14 +1407,17 @@ class WolfRPGParser:
         try:
             self.data_dir = self._find_data_dir()
         except WolfArchiveUnsupported as e:
-            raise WolfVersionUnsupported(
-                self._refusal_message(e.marker, existed)) from None
+            raise WolfVersionUnsupported(self._refusal_message(
+                e.where, e.reason, existed)) from None
 
-        # Refuse before anything is backed up or written: 3.x files are
-        # UTF-8 and would be patched with cp932 text.
-        marker = wolf3_marker(self.data_dir)
-        if marker:
-            raise WolfVersionUnsupported(self._refusal_message(marker, existed))
+        # Refuse before anything is backed up or written: compressed or
+        # protected files can't be written (live files, and the backup the
+        # export reads from).
+        backup = self._backup_dir_for(self.data_dir)
+        bad = find_unsupported(self.data_dir) or (
+            find_unsupported(backup) if backup.is_dir() else None)
+        if bad:
+            raise WolfVersionUnsupported(self._refusal_message(*bad, existed))
 
         # Create backup on first export.  Only the BasicData/ and MapData/
         # subtrees are ever written, so only those are backed up -- when the
@@ -1403,6 +1458,9 @@ class WolfRPGParser:
                 key_file[key] = entry.file
         # keys whose place was found (written, or counted as changed)
         self._visited_keys: set[str] = set()
+        # (key, encoding name) of translations written with '?' for
+        # characters their file can't store; reported in last_export_notes
+        self._unfit: list[tuple[str, str]] = []
         skipped: list[str] = list(self._reload_problems(translations))
         written: list[Path] = []
         # file -> translations not written because the game text changed
@@ -1418,7 +1476,8 @@ class WolfRPGParser:
                 for page in ev.pages:
                     if self._apply_commands(
                             page.commands, f'{file_name}/Ev{ev.id}/p{page.id}',
-                            translations, originals, file_name, changed):
+                            translations, originals, file_name, changed,
+                            is_utf8=wolf_map.is_utf8):
                         modified = True
 
             # Write to live data dir (map was loaded from backup).  An
@@ -1431,7 +1490,9 @@ class WolfRPGParser:
                 else:
                     game_io.atomic_copy(str(wolf_map.path), str(live_path))
                 written.append(live_path)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
+                # ValueError: text the file's encoding can't store (the
+                # writer is strict); the file is not written at all
                 skipped.append(f'MapData/{wolf_map.path.name} ({exc})')
 
         # Apply to common events
@@ -1441,7 +1502,8 @@ class WolfRPGParser:
             for ce in self.common_events.events:
                 if self._apply_commands(
                         ce.commands, f'{file_name}/CE{ce.int_id}',
-                        translations, originals, 'CommonEvent.dat', changed):
+                        translations, originals, 'CommonEvent.dat', changed,
+                        is_utf8=self.common_events.is_utf8):
                     modified = True
 
             live_ce = self.data_dir / 'BasicData' / 'CommonEvent.dat'
@@ -1452,7 +1514,8 @@ class WolfRPGParser:
                     game_io.atomic_copy(str(self.common_events.path),
                                         str(live_ce))
                 written.append(live_ce)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
+                # ValueError: as for maps above; nothing was written
                 skipped.append(f'CommonEvent.dat ({exc})')
 
         # Apply to databases.  A database that can't be written is reported
@@ -1501,6 +1564,10 @@ class WolfRPGParser:
                         f'{file_name}/{k}' for k in self._db_visited)
             except OSError as exc:
                 reason, io_error = str(exc), True
+            except (ValueError, IndexError, struct.error) as exc:
+                # layout or text the walk can't follow (WolfTextError is a
+                # ValueError): nothing was written for this database
+                reason = f'unexpected DB layout ({exc})'
             if reason:
                 log.warning('DB %s not exported: %s', db.name, reason)
                 reported_dbs.add(file_name)
@@ -1547,6 +1614,19 @@ class WolfRPGParser:
                      else 'CommonEvent.dat' if file == 'CommonEvents'
                      else file.split('/')[-1] + '.dat')
             changed[label] = changed.get(label, 0) + 1
+        if self._unfit:
+            names = sorted({enc for _key, enc in self._unfit})
+            shown = ', '.join(key for key, _enc in self._unfit[:5])
+            more = (f' and {len(self._unfit) - 5} more'
+                    if len(self._unfit) > 5 else '')
+            self.last_export_notes.append(
+                f"{len(self._unfit)} translated line(s) contain characters "
+                f"this game's text ({' / '.join(names)}) can't store; they "
+                f"were written with '?' in their place: {shown}{more}. "
+                "Edit those lines (for example, use plain quotes and "
+                "dashes) and export again.")
+            log.warning('Wolf export: %d translation(s) had unstorable '
+                        'characters replaced with "?"', len(self._unfit))
         game_io.raise_export_problems(skipped, changed,
                                       unsupported=unsupported,
                                       outside=sorted(outside),
@@ -1554,16 +1634,26 @@ class WolfRPGParser:
 
     def _apply_commands(self, commands, key_prefix: str, translations: dict,
                         originals: dict, label: str,
-                        changed: dict) -> bool:
+                        changed: dict, is_utf8: bool = False) -> bool:
         """Write translations into one event's command list.
 
         Entries are addressed by command index, so each write first checks
         that the command still holds the entry's original text.  After a
         game update a changed command keeps its new text and is counted in
         *changed* (under *label*) so the export reports it.  Returns True
-        when anything was written.
+        when anything was written.  *is_utf8* is the file's encoding flag:
+        translations are fitted to it (see fit_encoding) and every line
+        that needed a '?' is recorded for the export notes.
         """
         modified = False
+
+        def fitted(key):
+            text, replaced = fit_encoding(translations[key], is_utf8)
+            if replaced:
+                unfit = getattr(self, '_unfit', None)
+                if unfit is not None:
+                    unfit.append((key, 'UTF-8' if is_utf8 else 'Shift-JIS'))
+            return text
 
         def still_there(key, raw, message=False):
             getattr(self, "_visited_keys", set()).add(key)
@@ -1589,7 +1679,7 @@ class WolfRPGParser:
                         key, cmd.string_args[0], message=True):
                     # Rebuild full message with speaker prefix
                     cmd.string_args[0] = self._rebuild_message(
-                        cmd.string_args[0], translations[key],
+                        cmd.string_args[0], fitted(key),
                         originals.get(key))
                     modified = True
 
@@ -1599,14 +1689,14 @@ class WolfRPGParser:
                     key = f'{key_prefix}/{kind}{ci}_{si}'
                     if key in translations and still_there(
                             key, cmd.string_args[si]):
-                        cmd.string_args[si] = translations[key]
+                        cmd.string_args[si] = fitted(key)
                         modified = True
 
             elif cmd.code == CMD_PICTURE:
                 key = f'{key_prefix}/pic{ci}'
                 if (key in translations and cmd.string_args
                         and still_there(key, cmd.string_args[0])):
-                    cmd.string_args[0] = translations[key]
+                    cmd.string_args[0] = fitted(key)
                     modified = True
         return modified
 
@@ -1626,22 +1716,16 @@ class WolfRPGParser:
         self._db_visited: set[str] = set()
         data = bytearray(src_path.read_bytes())
 
-        # Handle encryption the same way as load
-        crypt_header = b''
-        if len(data) > 5 and data[1] == 0x50:
-            crypt_ver = data[5]
-            if crypt_ver >= 0x55:
-                return 'V3.3+ encrypted DB export not supported'
-            dec_data, crypt_header, _proj_key = _decrypt_dat_v32(
-                bytes(data), _DAT_SEED_INDICES)
-            data = bytearray(dec_data)
-
-        reader = BinaryReader(bytes(data))
-        reader.skip(10)  # magic
+        if is_protected(data):
+            return 'encrypted (protected) database, export not supported'
+        if len(data) > 10 and data[10] == _DB_COMPRESSED_VERSION:
+            return 'LZ4-compressed (WOLF RPG Editor 3.5) DB export not supported'
+        is_utf8 = header_utf8(bytes(data), MAGIC_DB, _DAT_UTF8_AT)
+        if is_utf8 is None:
+            return 'not a database file this version can read (bad header)'
+        reader = BinaryReader(bytes(data), is_utf8)
+        reader.skip(len(MAGIC_DB))
         version = reader.read_byte()
-
-        if version == 0xC4:
-            return 'LZ4-compressed DB export not supported'
 
         type_count = reader.read_uint32()
         if type_count != len(db._types):
@@ -1659,7 +1743,7 @@ class WolfRPGParser:
             fields_size = reader.read_uint32()
 
             if unknown1 == db.STRING_INDICATOR:
-                reader.read_string()
+                reader.skip_string()
 
             field_infos = []
             for _ in range(fields_size):
@@ -1694,17 +1778,20 @@ class WolfRPGParser:
                         # Stored length prefix includes the trailing NUL that
                         # read_string strips -- use the raw on-disk length.
                         raw_len = struct.unpack_from('<I', data, str_offset)[0]
-                        enc = 'utf-8' if reader.is_utf8 else 'cp932'
-                        new_bytes = translations[key].encode(enc, errors='replace')
+                        text, replaced = fit_encoding(translations[key], is_utf8)
+                        if replaced and getattr(self, '_unfit', None) is not None:
+                            self._unfit.append(
+                                (f'Database/{db.name}/{key}',
+                                 'UTF-8' if is_utf8 else 'Shift-JIS'))
+                        new_bytes = text.encode(text_encoding(is_utf8))
                         patches.append((str_offset, 4 + raw_len, new_bytes))
 
-        _apply_string_patches(data, patches)
+        # The layout must end exactly as the loader expects (version byte,
+        # then EOF); otherwise the offsets above can't be trusted.
+        if reader.eof() or reader.read_byte() != version or not reader.eof():
+            return 'unexpected DB layout'
 
-        # Re-encrypt if needed
-        if crypt_header:
-            # Wolf RPG .dat re-encryption not yet supported
-            # Write unencrypted for now — game should still read it
-            pass
+        _apply_string_patches(data, patches)
 
         dst_path.parent.mkdir(parents=True, exist_ok=True)
         game_io.atomic_write_bytes(dst_path, bytes(data))
@@ -1760,9 +1847,8 @@ class WolfRPGParser:
                         (f'MapData/{mps.name}', f'MapData/{mps.stem}/'))  # keys use the stem
 
         # Reload common events (same BasicData/ layout as load_project)
-        _reset_proj_key()
         self.common_events = None
-        ce_path = backup_dir / 'BasicData' / 'CommonEvent.dat'
+        ce_path = backup_dir / 'BasicData' / _CE_NAME
         if ce_path.is_file():
             try:
                 self.common_events = WolfCommonEvents(ce_path)
@@ -1777,15 +1863,17 @@ class WolfRPGParser:
         # runs after restoring a saved state without load_project.
         self.databases = []
         basic_dir = backup_dir / 'BasicData'
-        for db_name in ('DataBase.dat', 'CDataBase.dat', 'SysDatabase.dat'):
+        for db_name in _DB_NAMES:
             db_path = basic_dir / db_name
             if db_path.is_file():
                 try:
                     db = WolfDatabase(db_path)
                     db.load()
                     self.databases.append(db)
-                except Exception:
-                    log.debug("Skip DB %s on reload", db_name, exc_info=True)
+                except Exception as exc:
+                    # Not lost: its translations are reported as "could
+                    # not be re-read from backup" by save_project.
+                    log.warning("Skip DB %s on reload: %s", db_name, exc)
 
     @staticmethod
     def _rebuild_message(original: str, translated: str,
@@ -1815,8 +1903,8 @@ class WolfRPGParser:
         return {p for p in (self.game_dir / 'Data',
                             self.game_dir / 'decompiled_temp') if p.exists()}
 
-    def _refusal_message(self, marker: str, existed: set) -> str:
-        """The Wolf 3 refusal, true about what happened to the game folder.
+    def _refusal_message(self, where: str, reason: str, existed: set) -> str:
+        """The refusal (file + plain reason), true about the game folder.
 
         Finding the version may need Data.wolf unpacked into Data/ first.
         A Data/ folder next to Data.wolf can be loaded by the engine instead
@@ -1838,7 +1926,7 @@ class WolfRPGParser:
                     "Data.wolf).")
         else:
             tail = " Your game files were not changed."
-        return f'{WOLF3_UNSUPPORTED}{tail} (Detected from {marker}.)'
+        return f'{WOLF_UNSUPPORTED}: {where} {reason}.{tail}'
 
     def restore_originals(self, folder: str):
         """Restore original files from backup."""
@@ -1877,20 +1965,12 @@ class WolfRPGParser:
 
         try:
             data = game_dat.read_bytes()
-            # Handle encryption
-            if len(data) > 5 and data[1] == 0x50:
-                crypt_ver = data[5]
-                if crypt_ver < 0x55:
-                    data, _, proj_key = _decrypt_dat_v32(
-                        data, _GAMEDAT_SEED_INDICES)
-                    if proj_key >= 0:
-                        _set_proj_key(proj_key)
-                else:
-                    return Path(folder).name  # V3.3+ not supported
-            else:
-                # Unencrypted: skip 10-byte magic prefix
-                data = data[10:]
-            reader = BinaryReader(data)
+            # Protected (encrypted) or unknown header: no title from it.
+            # Its text is UTF-8 when its own header says so (3.x).
+            is_utf8 = header_utf8(data, MAGIC_GAMEDAT, _GAMEDAT_UTF8_AT)
+            if is_utf8 is None:
+                return Path(folder).name
+            reader = BinaryReader(data[len(MAGIC_GAMEDAT):], is_utf8)
             # Game.dat format: byte_array (unknown1), uint32 (string_count),
             # then string[0] = title
             unknown1_count = reader.read_uint32()
@@ -1901,4 +1981,6 @@ class WolfRPGParser:
             title = reader.read_string()
             return title if title else Path(folder).name
         except Exception:
+            # Cosmetic only (a title suggestion); a Game.dat we can't read
+            # (damaged, or text that doesn't decode) just uses the folder name
             return Path(folder).name
