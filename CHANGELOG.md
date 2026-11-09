@@ -9,6 +9,8 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-09
+
 ### Added
 - Wolf RPG: games made with WOLF RPG Editor 3.x can now be translated (experimental). Their text is stored as UTF-8, and the app now reads and writes it that way, deciding for each file from its own header. Packed 3.x games (`Data.wolf`) are unpacked like 2.x ones. Two kinds of 3.x games are still turned away with a plain message that names the file and the reason, and your game files are not changed: games made with WOLF RPG Editor 3.5 (their data is compressed), and games whose data or archive is protected with WOLF RPG Editor Pro (the app does not remove that protection). If any text in a game can't be read in its file's encoding, the game is also turned away instead of showing garbled lines. Thanks to [WolfTL](https://github.com/Sinflower/WolfTL) by Sinflower (MIT License) for the 3.x format details.
 
