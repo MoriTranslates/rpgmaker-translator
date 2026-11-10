@@ -9,8 +9,10 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-09
+
 ### Fixed
-- Local translation with Ollama is much faster on Windows, about 60% more lines per minute (measured with Sugoi 14B: 57 to 94 lines a minute; a 20,000-line game takes roughly 4 hours instead of 6). Every request to `http://localhost:11434` first waited about 2 seconds while Windows tried the IPv6 address, which Ollama doesn't listen on. The app now connects to `127.0.0.1` for a `localhost` address. Your saved Ollama URL and what the settings show are unchanged. A Custom server on your own PC (for example llama.cpp) gets the same fix.
+- Local translation with Ollama is much faster on Windows, about 60% more lines per minute (measured with Sugoi 14B: 57 to 94 lines a minute; a 20,000-line game takes roughly 4 hours instead of 6). Every request to `http://localhost:11434` first waited about 2 seconds while Windows tried the IPv6 address, which Ollama doesn't listen on. The app now connects to `127.0.0.1` for a `localhost` address. Your saved Ollama URL and what the settings show are unchanged. A Custom server on your own PC (for example llama.cpp) gets the same fix. If a proxy setting would catch `127.0.0.1` (for example a proxy that only skips `localhost`), or the address is `https`, the app keeps using the address exactly as typed, so those setups work as before.
 - Ollama no longer reloads the model when the first full batch arrives: the context size now starts at 8K, the size every normal batch fits in, and only grows when a request needs more. The model preload uses the same size.
 
 ## [1.2.0] - 2026-11-09

@@ -19,12 +19,24 @@ import pytest  # noqa: E402
 from translator import ai_client  # noqa: E402
 from translator.ai_client import AIClient, _ipv4_loopback  # noqa: E402
 
+_PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+               "http_proxy", "https_proxy", "all_proxy", "no_proxy")
+
+
+_REAL_PROXY_CHECK = ai_client._proxy_applies
+
+
+@pytest.fixture(autouse=True)
+def _no_proxy(monkeypatch):
+    # This machine's own proxy settings must not decide these tests; the
+    # proxy tests below restore the real check and set their own environment.
+    monkeypatch.setattr(ai_client, "_proxy_applies", lambda url: False)
+
 
 @pytest.mark.parametrize("url, expected", [
     ("http://localhost:11434", "http://127.0.0.1:11434"),
     ("http://LocalHost:11434", "http://127.0.0.1:11434"),
     ("http://localhost", "http://127.0.0.1"),
-    ("https://localhost:8080/v1", "https://127.0.0.1:8080/v1"),
     ("http://localhost:8080/v1/", "http://127.0.0.1:8080/v1/"),
 ])
 def test_localhost_becomes_ipv4(url, expected):
@@ -39,11 +51,43 @@ def test_localhost_becomes_ipv4(url, expected):
     "http://mylocalhost:11434",
     "http://user:pw@localhost:11434",        # credentials: left alone
     "http://localhost:notaport",             # malformed: left for requests
+    "https://localhost:8080/v1",             # https: certificate is for "localhost"
     "",
     "not a url",
 ])
 def test_other_urls_unchanged(url):
     assert _ipv4_loopback(url) == url
+
+
+def _clear_proxy_env(monkeypatch):
+    monkeypatch.setattr(ai_client, "_proxy_applies", _REAL_PROXY_CHECK)
+    for v in _PROXY_VARS:
+        monkeypatch.delenv(v, raising=False)
+
+
+def test_proxy_that_bypasses_localhost_keeps_localhost(monkeypatch):
+    # NO_PROXY=localhost matches the name only: 127.0.0.1 would go through
+    # the proxy and Ollama would look unreachable.
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("NO_PROXY", "localhost")
+    assert _ipv4_loopback("http://localhost:11434") == "http://localhost:11434"
+
+
+def test_proxy_that_bypasses_127_still_rewrites(monkeypatch):
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    assert _ipv4_loopback("http://localhost:11434") == "http://127.0.0.1:11434"
+
+
+def test_unreadable_proxy_config_leaves_url_alone(monkeypatch):
+    _clear_proxy_env(monkeypatch)
+
+    def boom(url, no_proxy=None):
+        raise OSError("registry unreadable")
+    monkeypatch.setattr(ai_client.requests.utils, "get_environ_proxies", boom)
+    assert _ipv4_loopback("http://localhost:11434") == "http://localhost:11434"
 
 
 def test_request_url_keeps_saved_setting():
@@ -85,8 +129,32 @@ def test_ollama_requests_go_to_ipv4(monkeypatch):
     client._chat(messages=[])
     client.list_models()
     client.is_available()
-    assert len(seen) >= 3
+    client.preload_model()
+    client.unload_models()        # GET /api/ps; no models listed, so nothing to stop
+    assert len(seen) >= 5
     assert all(u.startswith("http://127.0.0.1:11434/") for u in seen), seen
+
+
+def test_settings_model_list_goes_to_ipv4(monkeypatch):
+    import requests
+
+    from translator.widgets.settings_dialog import _ModelFetcher
+    seen = []
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"models": [{"name": "m"}]}
+
+    monkeypatch.setattr(requests, "get", lambda url, *a, **kw: seen.append(url) or _Resp())
+    got = []
+    f = _ModelFetcher(None, "http://localhost:11434")
+    f.done.connect(got.append)
+    f.run()                       # run in this thread; no event loop needed
+    assert seen == ["http://127.0.0.1:11434/api/tags"]
+    assert got == [["m"]]
 
 
 def test_unreachable_message_shows_typed_url(monkeypatch):

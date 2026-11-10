@@ -420,10 +420,17 @@ def _ipv4_loopback(url: str) -> str:
     on IPv4, so every request waited ~2 s for the refused ::1 attempt before
     falling back (measured: 2.05 s vs 0.001 s per connection, about a third
     of a 10-line batch). Other hosts, the port and the path are unchanged.
+
+    Left as typed when the rewrite could change behaviour: https (a
+    certificate issued for "localhost" would no longer match) and any proxy
+    setting that would catch 127.0.0.1 (proxy bypass lists such as
+    NO_PROXY=localhost or Windows' "<local>" match the name, not the IP).
     """
     from urllib.parse import urlsplit, urlunsplit
     try:
         parts = urlsplit(url)
+        if parts.scheme.lower() != "http":
+            return url
         if (parts.hostname or "").lower() != "localhost":
             return url
         netloc = "127.0.0.1" + (f":{parts.port}" if parts.port else "")
@@ -431,7 +438,19 @@ def _ipv4_loopback(url: str) -> str:
         return url
     if parts.username or parts.password:
         return url  # credentials in the URL: not ours to rewrite
-    return urlunsplit(parts._replace(netloc=netloc))
+    new = urlunsplit(parts._replace(netloc=netloc))
+    if _proxy_applies(new):
+        return url  # keep the old (slower) behaviour rather than route via a proxy
+    return new
+
+
+def _proxy_applies(url: str) -> bool:
+    """True when requests would send ``url`` through a proxy (environment
+    variables or the Windows proxy settings, with their bypass lists)."""
+    try:
+        return bool(requests.utils.get_environ_proxies(url))
+    except Exception:  # noqa: BLE001  # unreadable proxy config: report "proxied" so the URL is left as typed (safe side)
+        return True
 
 
 # Ollama restarts the model runner whenever num_ctx changes, so the sizes
