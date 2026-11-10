@@ -15,6 +15,7 @@ from ..ai_client import (
     PROVIDERS, PROVIDER_MODELS, PROMPT_PRESETS, DAZEDMTL_FULL_PROMPT,
     CLOUD_DEFAULT_WORKERS, LOCAL_DEFAULT_WORKERS,
     cloud_default_batch, engine_batch_workers, fetch_cloud_models,
+    _ipv4_loopback,
 )
 from ..rpgmaker_mv import RPGMakerMVParser
 from .model_suggestion_dialog import (
@@ -41,7 +42,7 @@ class _ModelFetcher(QThread):
         # Fetch models without mutating the shared client
         import requests as _req
         try:
-            r = _req.get(f"{self._url}/api/tags", timeout=10)
+            r = _req.get(f"{_ipv4_loopback(self._url)}/api/tags", timeout=10)
             r.raise_for_status()
             models = [m["name"] for m in r.json().get("models", []) if "name" in m]
         except Exception:
@@ -1115,14 +1116,14 @@ class SettingsDialog(QDialog):
         def check() -> bool:
             if provider == "Ollama (Local)":
                 import requests as _req
-                r = _req.get(f"{url}/api/tags", timeout=5)
+                r = _req.get(f"{_ipv4_loopback(url)}/api/tags", timeout=5)
                 return r.status_code == 200
             # Cloud provider — test with a lightweight models list call
             import openai
             from ..ai_client import PROVIDER_URLS
             base = PROVIDER_URLS.get(provider)
             if not base and provider == "Custom":
-                base = url
+                base = _ipv4_loopback(url)
             client = openai.OpenAI(api_key=api_key, base_url=base, timeout=10)
             client.models.list()
             return True

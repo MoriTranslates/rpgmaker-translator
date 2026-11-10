@@ -413,6 +413,27 @@ def _estimate_num_ctx(messages: list, num_predict: int, floor: int = 4096) -> in
     return min(NUM_CTX_CAP, max(floor, chars // 2 + num_predict))
 
 
+def _ipv4_loopback(url: str) -> str:
+    """``url`` with a ``localhost`` host replaced by ``127.0.0.1``.
+
+    On Windows "localhost" is tried as IPv6 ::1 first; Ollama only listens
+    on IPv4, so every request waited ~2 s for the refused ::1 attempt before
+    falling back (measured: 2.05 s vs 0.001 s per connection, about a third
+    of a 10-line batch). Other hosts, the port and the path are unchanged.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        parts = urlsplit(url)
+        if (parts.hostname or "").lower() != "localhost":
+            return url
+        netloc = "127.0.0.1" + (f":{parts.port}" if parts.port else "")
+    except ValueError:  # malformed URL: leave it for requests to report
+        return url
+    if parts.username or parts.password:
+        return url  # credentials in the URL: not ours to rewrite
+    return urlunsplit(parts._replace(netloc=netloc))
+
+
 # Ollama restarts the model runner whenever num_ctx changes, so the sizes
 # sent are rounded up to a few fixed steps (see AIClient._stable_num_ctx).
 NUM_CTX_CAP = 16384
@@ -903,13 +924,19 @@ class AIClient:
             f"Cost: ${cost:,.4f}"
         )
 
+    @property
+    def request_url(self) -> str:
+        """base_url as requests should use it (see _ipv4_loopback); the
+        saved setting and messages keep showing base_url as typed."""
+        return _ipv4_loopback(self.base_url)
+
     def _get_openai_base_url(self) -> str | None:
         """Get the base URL for the OpenAI SDK based on provider."""
         url = PROVIDER_URLS.get(self.provider)
         if url:
             return url
         if self.provider == "Custom":
-            return self.base_url
+            return self.request_url
         return None  # SDK default (OpenAI)
 
     def _chat(self, *, messages: list, stream: bool = False,
@@ -986,7 +1013,7 @@ class AIClient:
         }
         try:
             r = requests.post(
-                f"{self.base_url}/api/chat",
+                f"{self.request_url}/api/chat",
                 json=payload,
                 timeout=timeout,
             )
@@ -1017,12 +1044,13 @@ class AIClient:
     def _stable_num_ctx(self, model: str, wanted: int) -> int:
         """num_ctx to send for this model: the request's need rounded up to
         a fixed step, and never below this model's floor for the session
-        (a change of num_ctx makes Ollama reload the model). The floor grows
-        with requests but stops at NUM_CTX_FLOOR_CAP; a request needing more
-        gets its own bigger size without raising the floor."""
+        (a change of num_ctx makes Ollama reload the model). The floor starts
+        at NUM_CTX_FLOOR_CAP (8K), which every normal batch fits in, so the
+        first 8K batch no longer reloads a model loaded at 4K; a request
+        needing more gets its own bigger size without raising the floor."""
         size = _ctx_bucket(wanted)
         with self._num_ctx_lock:
-            floor = self._num_ctx_high.get(model, 0)
+            floor = self._num_ctx_high.get(model, NUM_CTX_FLOOR_CAP)
             if size <= floor:
                 return floor
             self._num_ctx_high[model] = max(floor, min(size, NUM_CTX_FLOOR_CAP))
@@ -1038,11 +1066,13 @@ class AIClient:
             return True  # Cloud APIs don't need preloading
         try:
             r = requests.post(
-                f"{self.base_url}/api/chat",
+                f"{self.request_url}/api/chat",
                 json={
                     "model": self.model,
                     "messages": [],
                     "keep_alive": -1,
+                    # Same size batches will send, or the first batch reloads.
+                    "options": {"num_ctx": self._stable_num_ctx(self.model, 0)},
                 },
                 timeout=120,  # Model load can take a while
             )
@@ -1060,7 +1090,7 @@ class AIClient:
         if self.is_cloud:
             return 0
         try:
-            r = requests.get(f"{self.base_url}/api/ps", timeout=10)
+            r = requests.get(f"{self.request_url}/api/ps", timeout=10)
             if r.status_code != 200:
                 return 0
             models = r.json().get("models", [])
@@ -1082,7 +1112,7 @@ class AIClient:
                     # Fallback to API method
                     try:
                         requests.post(
-                            f"{self.base_url}/api/generate",
+                            f"{self.request_url}/api/generate",
                             json={"model": name, "keep_alive": 0},
                             timeout=10,
                         )
@@ -1326,7 +1356,7 @@ class AIClient:
                 "options": {"temperature": 0, "num_predict": 4096},
             }
             r = requests.post(
-                f"{self.base_url}/api/chat",
+                f"{self.request_url}/api/chat",
                 json=payload,
                 timeout=timeout,
             )
@@ -1350,7 +1380,7 @@ class AIClient:
         if self.is_cloud:
             return self._is_available_cloud()
         try:
-            r = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            r = requests.get(f"{self.request_url}/api/tags", timeout=5)
             return r.status_code == 200
         except (requests.RequestException, ValueError, OSError):
             return False
@@ -1555,7 +1585,7 @@ class AIClient:
         if self.is_cloud:
             return list(PROVIDER_MODELS.get(self.provider, []))
         try:
-            r = requests.get(f"{self.base_url}/api/tags", timeout=10)
+            r = requests.get(f"{self.request_url}/api/tags", timeout=10)
             r.raise_for_status()
             data = r.json()
             return [m["name"] for m in data.get("models", [])]

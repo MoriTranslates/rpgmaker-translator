@@ -93,7 +93,22 @@ def test_num_ctx_is_tracked_per_model(sent):
     big = _ctx(sent[-1])
     c.model = "other-model:7b"
     c.translate("おはよう")
-    assert _ctx(sent[-1]) == 4096 < big
+    assert _ctx(sent[-1]) == 8192 < big
+
+
+def test_first_small_request_already_gets_8k(sent):
+    # Starting at 4K made the first normal (~6K) batch reload the model.
+    c = AIClient()
+    c.translate("おはよう")
+    c.translate_batch(_batch(5, 700))
+    assert [_ctx(p) for p in sent] == [8192, 8192]
+
+
+def test_preload_uses_the_size_batches_will_send(sent):
+    c = AIClient()
+    c.preload_model()
+    c.translate_batch(_batch(5, 700))
+    assert _ctx(sent[0]) == _ctx(sent[1]) == 8192
 
 
 def test_one_big_request_does_not_raise_the_floor_above_8k(sent):
