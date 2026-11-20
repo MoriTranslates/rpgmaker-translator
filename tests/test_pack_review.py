@@ -157,6 +157,35 @@ def test_real_install_then_uninstall_leaves_the_game_as_it_was(
     assert after == before
 
 
+@pytest.mark.skipif(os.name != "nt", reason="needs cmd.exe")
+def test_failed_backup_leaves_the_players_file_alone(tmp_path, mv_game,
+                                                     parser):
+    game, _content = _make_game(tmp_path, mv_game, "mz")
+    zp = _export(parser, game, tmp_path, "install", show_splash=True,
+                 inject_wordwrap=True)
+    player = tmp_path / "player"
+    shutil.copytree(game, player)
+    own = player / "js/plugins/TranslatorWordWrap.js"
+    own.write_text("// the player's own", encoding="utf-8")
+    with zipfile.ZipFile(zp) as zf:
+        zf.extractall(player)
+    bat = player / "install.bat"
+    text = bat.read_bytes().decode("utf-8")
+    target = 'copy /Y "js\\plugins\\TranslatorWordWrap.js" ' \
+             '"js\\plugins\\TranslatorWordWrap.js.rmt_bak" >nul'
+    assert target in text
+    # simulate a backup that fails (disk full, permissions)
+    bat.write_bytes(text.replace(target, "cmd /c exit 1").encode("utf-8"))
+    r = subprocess.run(["cmd", "/c", str(bat)], cwd=player,
+                       stdin=subprocess.DEVNULL, capture_output=True,
+                       timeout=60)
+    out = r.stdout.decode("utf-8", "replace")
+    assert "Could not back up" in out, out
+    assert own.read_text(encoding="utf-8") == "// the player's own"
+    # the files that could be installed safely still were
+    assert (player / "js/plugins/TranslationSplash.js").is_file()
+
+
 # ── 2. every enabled plugin's .js ships or is in the original game ───
 
 def _clean_files(content):

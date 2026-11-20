@@ -84,6 +84,16 @@ def inject_splash(game_dir: str) -> bool:
     return _inject_plugin_entry(plugins_path)
 
 
+def splash_can_ship(game_dir: str) -> bool:
+    """False when the game has encrypted images but no readable key, so
+    the encrypted splash image can't be made (the game would fail to load
+    it)."""
+    root = _content_root(game_dir)
+    if not root or not _has_encrypted_images(root):
+        return True
+    return bool(read_encryption_key(game_dir))
+
+
 def splash_payload(game_dir: str) -> list[tuple[str, bytes]]:
     """Every file the splash adds to a game, as (path, bytes), read-only.
 

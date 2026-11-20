@@ -150,16 +150,30 @@ def test_zip_ships_encrypted_splash_copy(tmp_path, mv_game, parser, layout,
         not in _names(zp)
 
 
+def test_encrypted_game_without_key_ships_without_the_splash(
+        tmp_path, mv_game, parser):
+    # 1.2.2 made a working package here; the splash setting mustn't stop it
+    game, content = _make_game(tmp_path, mv_game, "mv_root", encrypted=True)
+    _set_system(content, encryptionKey="")
+    zp = _export(parser, game, tmp_path, "install", show_splash=True)
+    assert "TranslationSplash" not in _enabled_plugins(
+        zp, "_translation/js/plugins.js")
+    assert not any("TranslationSplash" in n for n in _names(zp))
+
+
 def test_encrypted_game_without_key_fails_instead_of_half_a_package(
         tmp_path, mv_game, parser):
+    # plugins.js already enables the splash, but its image can't be made
     game, content = _make_game(tmp_path, mv_game, "mv_root", encrypted=True)
+    _set_system(content, encryptionKey="00112233445566778899aabbccddeeff")
+    assert splash_generator.inject_splash(game)
     _set_system(content, encryptionKey="")
     zp = str(tmp_path / "keep.zip")
     with open(zp, "wb") as f:
         f.write(b"previous good zip")
     with pytest.raises(RuntimeError):
         parser.export_patch_zip(game, parser.load_project(game), zp,
-                                show_splash=True)
+                                inject_wordwrap=True)
     with open(zp, "rb") as f:
         assert f.read() == b"previous good zip"      # atomic: untouched
     assert not os.path.exists(zp + ".rmt-tmp")

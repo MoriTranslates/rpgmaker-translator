@@ -916,6 +916,10 @@ class RPGMakerMVParser:
         when translations were left out because the game text at their
         place changed or no longer exists.
         """
+        if show_splash is True:
+            from .splash_generator import splash_can_ship
+            if not splash_can_ship(project_dir):
+                show_splash = False  # no key: package without the splash
         data_dir = self._find_data_dir(project_dir)
         if not data_dir:
             raise FileNotFoundError(
@@ -1469,7 +1473,8 @@ class RPGMakerMVParser:
 
         # Every other file the package carries.  A file that was not in the
         # game is listed in rmt_added_files.txt (uninstall.bat deletes only
-        # those); one that was is copied to <name>.rmt_bak first.
+        # those); one that was is copied to <name>.rmt_bak first.  If that
+        # backup didn't happen, the player's file is left alone.
         for rel in extra_files:
             q = _bat_package_path(rel)
             d = q.rpartition("\\")[0]
@@ -1482,16 +1487,24 @@ class RPGMakerMVParser:
                 f'        >>"{_BAT_ADDED_LIST}" echo {q}',
                 "    )",
                 ")",
-            ]
-            if d:
-                lines.append(f'if not exist "{d}\\" mkdir "{d}"')
-            lines += [
-                f'copy /Y "_translation\\{q}" "{q}" >nul',
-                "if errorlevel 1 (",
-                f'    echo   ERROR: Failed to install {q}',
+                "set RMT_SKIP=",
+                f'findstr /X /L /C:"{q}" "{_BAT_ADDED_LIST}" >nul 2>&1',
+                f'if errorlevel 1 if exist "{q}" if not exist "{q}.rmt_bak" set RMT_SKIP=1',
+                "if defined RMT_SKIP (",
+                f"    echo   ERROR: Could not back up {q}, left it unchanged",
                 "    set FAIL=1",
                 ") else (",
-                f"    echo   Installed {q}",
+            ]
+            if d:
+                lines.append(f'    if not exist "{d}\\" mkdir "{d}"')
+            lines += [
+                f'    copy /Y "_translation\\{q}" "{q}" >nul',
+                "    if errorlevel 1 (",
+                f'        echo   ERROR: Failed to install {q}',
+                "        set FAIL=1",
+                "    ) else (",
+                f"        echo   Installed {q}",
+                "    )",
                 ")",
             ]
 
