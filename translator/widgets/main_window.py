@@ -6099,8 +6099,8 @@ class MainWindow(QMainWindow):
                     f"Saved to:\n{path}\n\n"
                     f"{len(translated)} translated entries.\n"
                     f"Files are laid out at the game's real paths.\n\n"
-                    f"End users: back up the game's data first, then extract "
-                    f"into the game folder and replace files (see README.txt)."
+                    f"End users: back up the files README.txt lists, then extract "
+                    f"into the game folder and replace files."
                 )
             else:
                 QMessageBox.information(
@@ -6202,8 +6202,8 @@ class MainWindow(QMainWindow):
                     "translated files (as expected)."
                 )
             if layout == "dropin":
-                msg += ("\n\nEnd users: back up the game's data first, "
-                        "then extract into the game folder (see README.txt).")
+                msg += ("\n\nEnd users: back up the files README.txt lists, "
+                        "then extract into the game folder.")
             else:
                 msg += (
                     "\n\nEnd users: extract into the game folder and run install.bat."

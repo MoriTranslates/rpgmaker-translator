@@ -118,6 +118,20 @@ def _cmd_escape(text: str) -> str:
     return text.replace("%", "%%")
 
 
+_BAT_ADDED_LIST = "rmt_added_files.txt"
+_BAT_PATH_OK_RE = re.compile(r"^[A-Za-z0-9._ -]+(/[A-Za-z0-9._ -]+)*$")
+
+
+def _bat_package_path(rel: str) -> str:
+    """A package file's game-relative path as a backslash path for the .bat
+    scripts.  Only plain names are allowed (the package's own files are
+    fixed names); anything else would need shell escaping, so it is refused
+    instead of being put in a command."""
+    if not _BAT_PATH_OK_RE.match(rel) or ".." in rel.split("/"):
+        raise ValueError(f"package path not safe for a .bat script: {rel!r}")
+    return rel.replace("/", "\\")
+
+
 # A package file name that must never go into an uninstall.bat command:
 # empty, a path part (\ / : or ..), a character Windows forbids in names
 # (* ? " < > | and control characters), or a trailing dot or space
@@ -363,11 +377,28 @@ class _PackageWriter:
             raise ValueError(f"unknown patch layout: {layout!r}")
         self._zf = zf
         self.layout = layout
+        # Game-relative paths of every package file written so far (not the
+        # scripts / README): the one list the .bat scripts and the README
+        # are generated from.
+        self.files: list[str] = []
 
     def writestr(self, name: str, data):
-        if self.layout == "install" and name not in self.ROOT_FILES:
-            name = "_translation/" + name
+        if name in self.files:
+            return   # same file asked for twice (e.g. word wrap): keep one
+        if name not in self.ROOT_FILES:
+            self.files.append(name)
+            if self.layout == "install":
+                name = "_translation/" + name
         self._zf.writestr(name, data)
+
+    def extra_files(self, data_rel: str, js_rel) -> list[str]:
+        """Package files beyond the data folder's files, plugins.js and
+        gamefont.css (which have their own backup handling in the scripts)."""
+        skip = {f"{js_rel}/plugins.js" if js_rel else "",
+                f"{posixpath.join(posixpath.dirname(js_rel), 'fonts').lstrip('/')}"
+                "/gamefont.css" if js_rel else ""}
+        return [n for n in self.files
+                if not n.startswith(data_rel + "/") and n not in skip]
 
 
 class RPGMakerMVParser:
@@ -1007,7 +1038,8 @@ class RPGMakerMVParser:
                     os.path.dirname(plugins_path), "plugins")
                 self._plugin_meta_cache = {}
                 try:
-                    plugins = self._load_plugins_js(ps)
+                    plugins = self._load_plugins_js_strict(ps)
+                    self._match_live_wrap_space(plugins, plugins_path, ps)
                     self._apply_plugin_translations(plugins, plugin_entries)
                     if self.plugin_unplaced:
                         skipped_lines["plugins.js"] = self.plugin_unplaced
@@ -1036,11 +1068,18 @@ class RPGMakerMVParser:
                     # Every file the enabled plugins need that the export
                     # itself added to the game (the splash) must ship, or a
                     # fresh install fails to load the plugin.
-                    self._put_added_plugin_files(zf, project_dir, plugins)
+                    self._put_added_plugin_files(zf, project_dir, plugins,
+                                                 js_rel)
                     zf.writestr(f"{js_rel}/plugins.js", js_content)
                     has_plugins = True
-                except (json.JSONDecodeError, OSError):
-                    pass
+                except (ValueError, OSError) as exc:
+                    # A zip without plugins.js would silently lose the
+                    # translated plugin text, word wrap and splash.
+                    raise RuntimeError(
+                        f"Could not read the game's plugin list "
+                        f"({os.path.basename(ps)}): {exc}\n\nNo package was "
+                        f"written. Fix or restore that file and try again."
+                    ) from exc
 
             # Include word wrap JS plugin file
             if inject_wordwrap and js_rel:
@@ -1126,10 +1165,14 @@ class RPGMakerMVParser:
                     plugins_content = f.read()
                 # The game's plugins.js may enable the splash this app added
                 try:
-                    plugins = self._load_plugins_js(plugins_path)
-                except (json.JSONDecodeError, OSError):
-                    plugins = []
-                self._put_added_plugin_files(zf, game_path, plugins)
+                    plugins = self._load_plugins_js_strict(plugins_path)
+                except (ValueError, OSError) as exc:
+                    raise RuntimeError(
+                        f"Could not read the game's plugin list "
+                        f"({os.path.basename(plugins_path)}): {exc}\n\n"
+                        f"No package was written. Fix or restore that file "
+                        f"and try again.") from exc
+                self._put_added_plugin_files(zf, game_path, plugins, js_rel)
                 zf.writestr(f"{js_rel}/plugins.js", plugins_content)
                 has_plugins = True
 
@@ -1164,18 +1207,64 @@ class RPGMakerMVParser:
             raise
 
     @staticmethod
-    def _put_added_plugin_files(zf, game_dir: str, plugins: list):
-        """Ship the files this app adds to a game for an enabled plugin.
+    def _put_added_plugin_files(zf, game_dir: str, plugins: list, js_rel):
+        """Ship the files this app adds to a game for each plugin that the
+        packaged plugins.js enables: the splash (plugin .js, images, the
+        encrypted copy for encrypted games) and the word wrap plugin.
 
-        Today that is the translation splash: its plugin .js and its
-        images (plus the encrypted copy for encrypted games).  Nothing is
-        written into the game folder.
+        This is the one place that decides these files, for every zip type,
+        so a plugins.js entry never points at a .js the package leaves out.
+        Nothing is written into the game folder.
         """
-        if any(p.get("name") == "TranslationSplash" and p.get("status")
-               for p in plugins if isinstance(p, dict)):
+        enabled = {p.get("name") for p in plugins
+                   if isinstance(p, dict) and p.get("status")}
+        if "TranslationSplash" in enabled:
             from .splash_generator import splash_payload
             for rel, data in splash_payload(game_dir):
                 zf.writestr(rel, data)
+        if "TranslatorWordWrap" in enabled and js_rel:
+            from .text_processor import WORDWRAP_PLUGIN_JS
+            zf.writestr(f"{js_rel}/plugins/TranslatorWordWrap.js",
+                        WORDWRAP_PLUGIN_JS.strip() + "\n")
+
+    @classmethod
+    def _load_plugins_js_strict(cls, path: str) -> list:
+        """Like _load_plugins_js, but a file with no plugin array at all is
+        an error (not an empty list that would wipe the game's plugins)."""
+        plugins = cls._load_plugins_js(path)
+        if not plugins:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                text = f.read()
+            if not re.search(r'\[\s*\]', text):
+                raise ValueError("no plugin list found in the file")
+        return plugins
+
+    def _match_live_wrap_space(self, plugins: list, live_path: str,
+                               source_path: str):
+        """Make the packaged YEP_MessageCore "Word Wrap Space" equal the
+        live game's current value (the user may have turned it on after the
+        backup, which the export is rebuilt from).  An unreadable live
+        plugins.js changes nothing."""
+        if os.path.abspath(live_path) == os.path.abspath(source_path):
+            return
+        try:
+            live = self._load_plugins_js(live_path)
+        except (ValueError, OSError):
+            return   # keep the backup's value: nothing known about the live one
+        key = self.YEP_WRAP_SPACE_PARAM
+        live_val = None
+        for p in live:
+            if (isinstance(p, dict) and p.get("name") == self.YEP_MESSAGE_CORE
+                    and isinstance(p.get("parameters"), dict)
+                    and key in p["parameters"]):
+                live_val = p["parameters"][key]
+                break
+        if live_val is None:
+            return
+        for p in plugins:
+            if (isinstance(p, dict) and p.get("name") == self.YEP_MESSAGE_CORE
+                    and isinstance(p.get("parameters"), dict)):
+                p["parameters"][key] = live_val
 
     @staticmethod
     def _find_game_exe(game_dir: str) -> Optional[str]:
@@ -1205,28 +1294,39 @@ class RPGMakerMVParser:
                 f"{extra_line}\n")
         if zf.layout == "dropin":
             exe = self._find_game_exe(game_dir)
-            folder = "www" if data_rel.split("/")[0] == "www" else data_rel
+            # Exactly what extracting will overwrite, from the zip's own list
+            data_prefix = data_rel + "/"
+            backup = [f'  - "{data_rel.replace("/", chr(92))}" (the whole '
+                      f'folder)']
+            backup += [f'  - "{n.replace("/", chr(92))}"'
+                       for n in zf.files if not n.startswith(data_prefix)]
             launch = (f"4. Start the game with {exe}\n" if exe else
                       "4. Start the game the way you always do\n"
                       "   (its .exe in the game folder)\n")
             zf.writestr("README.txt", head + (
                 "HOW TO INSTALL:\n"
-                f'1. Make a copy of the "{folder}" folder in the game\n'
-                "   folder first. That copy is your way back to the original.\n"
+                "1. In the game folder (the folder with the game's .exe), make\n"
+                "   a copy of these first. The copies are your way back to\n"
+                "   the original:\n"
+                + "\n".join(backup) + "\n"
                 "2. Extract this zip into the game folder (the folder with the\n"
                 "   game's .exe). The files are already laid out at their\n"
                 "   real places.\n"
                 "3. When asked to replace files, say Yes.\n"
                 + launch +
                 "\nTO REVERT:\n"
-                f'  Delete the "{folder}" folder and put your copy back.\n'))
+                "  Put your copies of the files and folders above back, over\n"
+                "  the translated ones (replace the data folder's files).\n"))
             return
+        extra = zf.extra_files(data_rel, js_rel)
         zf.writestr("install.bat", self._build_install_bat(
             data_rel, js_rel, n_files, has_plugins, game_title,
-            inject_wordwrap=inject_wordwrap, font_name=font_name))
+            inject_wordwrap=inject_wordwrap, font_name=font_name,
+            extra_files=extra))
         zf.writestr("uninstall.bat", self._build_uninstall_bat(
             data_rel, js_rel, has_plugins, game_title,
-            inject_wordwrap=inject_wordwrap, package_files=shipped))
+            inject_wordwrap=inject_wordwrap, package_files=shipped,
+            extra_files=extra))
         zf.writestr("README.txt", head + (
             "HOW TO INSTALL:\n"
             "1. Extract this zip into the game folder\n"
@@ -1241,8 +1341,14 @@ class RPGMakerMVParser:
                            n_files: int, has_plugins: bool,
                            game_title: str,
                            inject_wordwrap: bool = False,
-                           font_name: Optional[str] = "Consolas") -> str:
-        """Generate install.bat: copy originals aside, copy translations over (never removes a game file)."""
+                           font_name: Optional[str] = "Consolas",
+                           extra_files=()) -> str:
+        """Generate install.bat: copy originals aside, copy translations over (never removes a game file).
+
+        *extra_files*: game-relative paths of every other file the package
+        carries (splash, word wrap plugin, images...), taken from the same
+        list the zip is built from; install.bat copies each one.
+        """
         dr = data_rel.replace("/", "\\")
         dr_base = os.path.basename(data_rel)     # e.g. "data"
         tr = f"_translation\\{dr}"                # e.g. "_translation\\data"
@@ -1375,14 +1481,31 @@ class RPGMakerMVParser:
                 ")",
             ]
 
-        if inject_wordwrap and js_rel:
-            jr = js_rel.replace("/", "\\")
-            tjr = f"_translation\\{jr}"
+        # Every other file the package carries.  A file that was not in the
+        # game is listed in rmt_added_files.txt (uninstall.bat deletes only
+        # those); one that was is copied to <name>.rmt_bak first.
+        for rel in extra_files:
+            q = _bat_package_path(rel)
+            d = q.rpartition("\\")[0]
             lines += [
-                f'if exist "{tjr}\\plugins\\TranslatorWordWrap.js" (',
-                f'    if not exist "{jr}\\plugins\\" mkdir "{jr}\\plugins"',
-                f'    copy /Y "{tjr}\\plugins\\TranslatorWordWrap.js" "{jr}\\plugins\\TranslatorWordWrap.js" >nul',
-                f"    echo   Installed word wrap plugin",
+                f'findstr /X /L /C:"{q}" "{_BAT_ADDED_LIST}" >nul 2>&1',
+                "if errorlevel 1 (",
+                f'    if exist "{q}" (',
+                f'        if not exist "{q}.rmt_bak" copy /Y "{q}" "{q}.rmt_bak" >nul',
+                "    ) else (",
+                f'        >>"{_BAT_ADDED_LIST}" echo {q}',
+                "    )",
+                ")",
+            ]
+            if d:
+                lines.append(f'if not exist "{d}\\" mkdir "{d}"')
+            lines += [
+                f'copy /Y "_translation\\{q}" "{q}" >nul',
+                "if errorlevel 1 (",
+                f'    echo   ERROR: Failed to install {q}',
+                "    set FAIL=1",
+                ") else (",
+                f"    echo   Installed {q}",
                 ")",
             ]
 
@@ -1425,12 +1548,15 @@ class RPGMakerMVParser:
     def _build_uninstall_bat(data_rel: str, js_rel: str,
                              has_plugins: bool, game_title: str,
                              inject_wordwrap: bool = False,
-                             package_files=()) -> str:
+                             package_files=(), extra_files=()) -> str:
         """Generate uninstall.bat: remove the files the package added, copy
         the originals back over data/, then drop the backup.
 
         *package_files*: data file names the package installs; any of them
         the original game did not have is deleted again.
+        *extra_files*: the other files the package installs (same list as
+        install.bat): one install.bat backed up is put back, one it added
+        (listed in rmt_added_files.txt) is deleted, any other is left.
         """
         dr = data_rel.replace("/", "\\")
         # Names go into the script inside double quotes, where cmd takes
@@ -1513,15 +1639,30 @@ class RPGMakerMVParser:
                 ")",
             ]
 
-        if inject_wordwrap and js_rel:
-            jr = js_rel.replace("/", "\\")
+        for rel in extra_files:
+            q = _bat_package_path(rel)
             lines += [
                 "",
-                f'if exist "{jr}\\plugins\\TranslatorWordWrap.js" (',
-                f'    del "{jr}\\plugins\\TranslatorWordWrap.js"',
-                "    echo   Removed word wrap plugin.",
+                f'if exist "{q}.rmt_bak" (',
+                f'    copy /Y "{q}.rmt_bak" "{q}" >nul',
+                "    if errorlevel 1 (",
+                f'        echo   ERROR: Failed to restore {q}',
+                "        set FAIL=1",
+                "    ) else (",
+                f'        del /F /Q "{q}.rmt_bak"',
+                "    )",
+                ") else (",
+                f'    findstr /X /L /C:"{q}" "{_BAT_ADDED_LIST}" >nul 2>&1',
+                f'    if not errorlevel 1 if exist "{q}" del /F /Q "{q}"',
+                f'    if exist "{q}" (',
+                f'        findstr /X /L /C:"{q}" "{_BAT_ADDED_LIST}" >nul 2>&1',
+                f'        if not errorlevel 1 echo   Could not remove {q} & set FAIL=1',
+                "    )",
                 ")",
             ]
+        if extra_files:
+            lines.append(f'if %FAIL%==0 if exist "{_BAT_ADDED_LIST}" '
+                         f'del /F /Q "{_BAT_ADDED_LIST}"')
 
         # Always restore original font if backed up
         if js_rel:

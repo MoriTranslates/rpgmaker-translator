@@ -56,7 +56,7 @@ def read_encryption_key(project_dir: str) -> str:
     ):
         if os.path.isfile(candidate):
             try:
-                with open(candidate, "r", encoding="utf-8") as f:
+                with open(candidate, "r", encoding="utf-8-sig") as f:
                     system = json.load(f)
                 key = system.get("encryptionKey", "")
                 if key:

@@ -243,7 +243,7 @@ def test_dropin_readme_names_the_real_exe(tmp_path, mv_game, parser):
     readme = _read(zp, "README.txt").decode("utf-8")
     assert "Hanabi no Mori.exe" in readme
     assert "Game.exe" not in readme
-    assert '"www"' in readme and "replace" in readme.lower()
+    assert '"www\\data"' in readme and "replace" in readme.lower()
 
 
 @pytest.mark.parametrize("exes", [[], ["A.exe", "B.exe"]])
@@ -259,7 +259,8 @@ def test_dropin_readme_generic_when_exe_unknown(tmp_path, mv_game, parser,
     assert ".exe" in readme
     for n in exes + ["Game.exe"]:
         assert n not in readme
-    assert '"data"' in readme       # MZ / root layout: the data folder
+    assert '"data"' in readme       # root layout: the data folder
+    assert '"js\\plugins.js"' in readme    # and the other files it replaces
 
 
 def test_exports_never_write_into_the_game_folder(tmp_path, mv_game, parser):

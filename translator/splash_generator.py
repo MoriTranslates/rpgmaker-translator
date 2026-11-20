@@ -34,7 +34,7 @@ def _has_encrypted_images(root: str) -> bool:
         path = os.path.join(root, data, "System.json")
         if os.path.isfile(path):
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, "r", encoding="utf-8-sig") as f:
                     return bool(json.load(f).get("hasEncryptedImages"))
             except (json.JSONDecodeError, OSError):
                 return False
