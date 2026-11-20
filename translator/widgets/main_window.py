@@ -3234,6 +3234,27 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(
                     f"Word wrap applied to {count} entries.", 5000)
 
+        # YEP_MessageCore with "Word Wrap Space" off glues English words
+        # across wrapped lines.  Never changed silently: the user chooses.
+        fix_yep_wrap = False
+        if (self.handler.has_plugin_system
+                and hasattr(self.parser, "yep_word_wrap_space_off")
+                and self.parser.yep_word_wrap_space_off(
+                    self.project.project_path)):
+            result = QMessageBox.warning(
+                self, "YEP Word Wrap Space Is Off",
+                self.parser.YEP_WRAP_SPACE_WARNING
+                + "\n\nTurn \"Word Wrap Space\" on in this export?\n"
+                "(plugins.js is backed up first; Restore Originals undoes "
+                "it.)",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+            )
+            if result == QMessageBox.StandardButton.Cancel:
+                return
+            fix_yep_wrap = result == QMessageBox.StandardButton.Yes
+
         # Confirmation dialog with checkbox
         dlg = QDialog(self)
         dlg.setWindowTitle("Apply Translation to Game")
@@ -3303,6 +3324,23 @@ class MainWindow(QMainWindow):
                 if self._disable_splash:
                     if self.parser.disable_splash_plugin(self.project.project_path):
                         plugin_msg += "\n'Made with RPG Maker' splash disabled."
+
+                if fix_yep_wrap:
+                    try:
+                        fixed = self.parser.enable_yep_word_wrap_space(
+                            self.project.project_path)
+                    except OSError as exc:
+                        log.warning("YEP Word Wrap Space fix failed: %s", exc)
+                        fixed = False
+                    if fixed:
+                        plugin_msg += ("\nYEP_MessageCore \"Word Wrap Space\" "
+                                       "turned on.")
+                    else:
+                        notes.append(
+                            "YEP_MessageCore \"Word Wrap Space\" could not be "
+                            "turned on (plugins.js unreadable or changed "
+                            "outside the translator). Set it to true in RPG "
+                            "Maker's Plugin Manager.")
 
                 # never written over a plugins.js changed outside the app
                 if self._show_translation_splash and "plugins.js" not in (

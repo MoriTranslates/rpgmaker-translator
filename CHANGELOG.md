@@ -9,6 +9,12 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+### Fixed
+- RPG Maker MV/MZ games using YEP_MessageCore that put the speaker's name box at the end of a message (`「…」\n<name>`) now get it treated like a name box at the start: the speaker shows in the table and the AI context, the name is translated with the other speaker names and written back at the end on export, and glossary checks no longer count the name as a term in the dialogue. Only the exact `\n<name>` code ending the message counts; tags like `<WordWrap>` or a code followed by more text are left in the text. Projects saved by earlier versions load and export exactly as before (their end-of-message names stay as they were); games opened fresh get the new handling.
+
+### Added
+- Export to Game warns when YEP_MessageCore has "Word Wrap Space" set to false, which glues English words together across wrapped lines ("SHINRYU,I got"). It explains the fix (set Word Wrap Space to true in YEP_MessageCore's parameters) and offers to turn it on for you during the export; plugins.js is backed up first and is never changed without asking. The translation wizard shows the same warning without changing anything.
+
 ## [1.2.2] - 2026-11-20
 
 ### Fixed

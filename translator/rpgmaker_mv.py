@@ -64,6 +64,36 @@ _ACTOR_CODE_RE = re.compile(r'\\[Nn]\[(\d+)\]')
 # the dialogue text.
 _BARE_NAMEBOX_RE = re.compile(
     r'\\[Nn]\[(\d+)\](?=[ \t\u3000]*(?:$|\n|[「『：:]))')
+# YEP_MessageCore also accepts the \N<name> namebox at the END of a message
+# ("「…」\n<name>"), on the last line or alone on its own line.  Only the
+# exact escape code, ending the whole message — never bare <tags> like
+# <WordWrap> or a code followed by more text.  Whitespace around it (also
+# the empty 401 lines games pad messages with) belongs to the suffix, so
+# the dialogue text stays clean and export rebuilds the game text as is.
+# group(1) = the code, group(2) = the name inside it.
+_END_NAMEBOX_RE = re.compile(
+    r'\s*(\\[Nn]<([^<>\r\n]+)>)\s*\Z')
+
+
+def _end_namebox_match(text: str):
+    """Match of a namebox code ending *text*, or None.
+
+    The name must not be blank and some dialogue must remain before it
+    (a message that is only a code is handled as a start-of-text namebox).
+    """
+    m = _END_NAMEBOX_RE.search(text)
+    if not m or not m.group(2).strip() or not text[:m.start()].strip():
+        return None
+    return m
+
+
+def _append_suffix(lines: list, suffix: str) -> list:
+    """Copy of *lines* with *suffix* (may contain line breaks) appended."""
+    parts = suffix.split("\n")
+    out = list(lines) if lines else [""]
+    out[-1] = out[-1] + parts[0]
+    out.extend(parts[1:])
+    return out
 
 
 def _has_japanese(text: str) -> bool:
@@ -1944,10 +1974,17 @@ class RPGMakerMVParser:
                 # Detect name prefix on first line:
                 #   \N<name> (Lunatlazur namebox plugin)
                 #   \n[N] / \N[N] (bare actor code at line start)
+                #   \N<name> at the very END (YEP_MessageCore), only when
+                #   the message has no start-of-text name of either kind
                 namebox = ""
+                namebox_end = ""
                 nb_match = _NAMEBOX_RE.match(full_text)
-                if nb_match:
-                    nb_name = nb_match.group(1)       # e.g. \n[1] or 村人1
+                end_match = None
+                if not nb_match and not _BARE_NAMEBOX_RE.match(full_text):
+                    end_match = _end_namebox_match(full_text)
+                if nb_match or end_match:
+                    nb_name = (nb_match.group(1) if nb_match   # e.g. \n[1]
+                               else end_match.group(2))        # or 村人1
                     # Resolve \n[N] to actor name for speaker context
                     actor_match = _ACTOR_CODE_RE.match(nb_name)
                     if actor_match:
@@ -1956,10 +1993,15 @@ class RPGMakerMVParser:
                             self, '_actor_names', {}).get(actor_id, nb_name)
                     else:
                         current_speaker = nb_name
-                    if self.speaker_processing:
+                    if self.speaker_processing and nb_match:
                         # Strip namebox from text, store for export restoration
                         namebox = nb_match.group(0)   # e.g. \N<\n[1]>
                         full_text = full_text[len(namebox):]
+                    elif self.speaker_processing:
+                        # Exact raw suffix (line break, code, trailing
+                        # spaces) so export rebuilds the game text as is
+                        namebox_end = full_text[end_match.start():]
+                        full_text = full_text[:end_match.start()]
                     # Literal JP name → create speaker_name entry for translation
                     if (not actor_match
                             and self._should_extract(nb_name)
@@ -2006,6 +2048,7 @@ class RPGMakerMVParser:
                     original=full_text,
                     context=ctx,
                     namebox=namebox,
+                    namebox_end=namebox_end,
                     status="untranslated" if extractable else "skipped",
                     has_face=current_has_face,
                 ))
@@ -2633,6 +2676,19 @@ class RPGMakerMVParser:
         slash_n = namebox[0:2]  # e.g. \N or \n
         return f"{slash_n}<{translated}>"
 
+    @classmethod
+    def _translate_namebox_end(cls, suffix: str, speaker_lookup: dict) -> str:
+        """Translate the name in an end-of-message namebox suffix.
+
+        Only the code itself changes; the line break before it and any
+        trailing spaces are kept exactly.
+        """
+        m = _END_NAMEBOX_RE.search(suffix)
+        if not m:
+            return suffix
+        code = cls._translate_namebox(m.group(1), speaker_lookup)
+        return suffix[:m.start(1)] + code + suffix[m.end(1):]
+
     def _apply_translations_fast(self, data, entries: list,
                                 global_speakers: dict = None):
         """Apply all translations for a file in a single pass.
@@ -2739,6 +2795,25 @@ class RPGMakerMVParser:
                             and trans_lines[0][0].isalpha()):
                         sep = " "
                     trans_lines[0] = nb_translated + sep + trans_lines[0]
+                end = getattr(entry, "namebox_end", "") or ""
+                if end:
+                    # Re-append the end-of-message name box (YEP), name
+                    # translated; the key gets the raw code back.  A
+                    # translation that already ends in a name code (typed
+                    # by the user) is written as it is, never doubled.
+                    orig_lines = _append_suffix(orig_lines, end)
+                    if not _end_namebox_match("\n".join(trans_lines)):
+                        trans_lines = _append_suffix(
+                            trans_lines,
+                            self._translate_namebox_end(end, speaker_lookup))
+                        # The suffix's padding lines (empty 401s after the
+                        # code) never push a longer translation past the
+                        # game's line count — the box would overflow.
+                        m = _END_NAMEBOX_RE.search(end)
+                        pad = end[m.end(1):].count("\n") if m else 0
+                        drop = min(pad, len(trans_lines) - len(orig_lines))
+                        if drop > 0:
+                            trans_lines = trans_lines[:-drop]
                 payload = (orig_lines, trans_lines)
             else:
                 payload = (entry.original, entry.translation)
@@ -4030,6 +4105,93 @@ class RPGMakerMVParser:
             log.info("disable_splash_plugin: disabled splash in %s", plugins_path)
             self.note_own_files(project_dir, blocked)   # our own change
         return disabled
+
+    # ── YEP_MessageCore "Word Wrap Space" ─────────────────────────
+
+    YEP_MESSAGE_CORE = "YEP_MessageCore"
+    YEP_WRAP_SPACE_PARAM = "Word Wrap Space"
+    YEP_WRAP_SPACE_WARNING = (
+        "This game uses YEP_MessageCore with \"Word Wrap Space\" turned "
+        "off. With word wrapping (<WordWrap> text), English words on "
+        "separate lines get glued together in-game (\"SHINRYU,I got\").\n\n"
+        "To fix it: in RPG Maker's Plugin Manager open YEP_MessageCore and "
+        "set \"Word Wrap Space\" to true (or let the translator turn it on "
+        "when exporting).")
+
+    @staticmethod
+    def _yep_wrap_space_off(plugins: list) -> bool:
+        """True if an enabled YEP_MessageCore has Word Wrap Space false."""
+        for p in plugins or ():
+            if not (isinstance(p, dict)
+                    and p.get("name") == RPGMakerMVParser.YEP_MESSAGE_CORE
+                    and p.get("status") is True):
+                continue
+            params = p.get("parameters")
+            if not isinstance(params, dict):
+                continue
+            val = params.get(RPGMakerMVParser.YEP_WRAP_SPACE_PARAM)
+            if isinstance(val, str) and val.strip().lower() == "false":
+                return True
+        return False
+
+    def yep_word_wrap_space_off(self, project_dir: str) -> bool:
+        """Will the exported game run YEP_MessageCore with Word Wrap Space
+        off?
+
+        Export rebuilds plugins.js from plugins_original.js once that
+        backup exists, so the backup decides; before the first export the
+        live file does.  Unreadable or missing plugins.js: False (nothing
+        known to warn about).
+        """
+        plugins_path = self._find_plugins_file(project_dir)
+        if not plugins_path:
+            return False
+        backup = os.path.join(
+            os.path.dirname(plugins_path),
+            os.path.basename(plugins_path).replace(
+                "plugins.", "plugins_original."))
+        source = backup if os.path.isfile(backup) else plugins_path
+        try:
+            return self._yep_wrap_space_off(self._load_plugins_js(source))
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            log.warning("YEP word wrap check: can't read %s: %s", source, exc)
+            return False
+
+    def enable_yep_word_wrap_space(self, project_dir: str) -> bool:
+        """Set YEP_MessageCore's Word Wrap Space to "true" in plugins.js.
+
+        A post-export step (like disable_splash_plugin): the user asked for
+        it, plugins.js was just regenerated by the export, the original is
+        backed up first, and a plugins.js changed outside the translator is
+        never touched.  Returns True if the parameter was changed.
+        """
+        plugins_path = self._find_plugins_file(project_dir)
+        if not plugins_path:
+            return False
+        blocked = self._blocked_extra_keys(project_dir)
+        if "plugins.js" in blocked:
+            log.warning("enable_yep_word_wrap_space: plugins.js was changed "
+                        "outside the translator; left alone")
+            return False
+        try:
+            plugins = self._load_plugins_js(plugins_path)
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            log.warning("enable_yep_word_wrap_space: can't read %s: %s",
+                        plugins_path, exc)
+            return False
+
+        changed = False
+        for p in plugins:
+            if self._yep_wrap_space_off([p]):
+                p["parameters"][self.YEP_WRAP_SPACE_PARAM] = "true"
+                changed = True
+        if changed:
+            self._backup_plugins_file(plugins_path)
+            self._write_plugins_js(plugins_path, plugins)
+            log.info("enable_yep_word_wrap_space: turned on in %s",
+                     plugins_path)
+            self.note_own_files(project_dir, blocked)   # our own change
+        return changed
 
     # ── Word wrap plugin injection ─────────────────────────────────
 
