@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 from .image_translator import encrypt_to_rpgmvp, read_encryption_key
@@ -81,6 +82,56 @@ def inject_splash(game_dir: str) -> bool:
 
     # Inject into plugins.js
     return _inject_plugin_entry(plugins_path)
+
+
+def splash_payload(game_dir: str) -> list[tuple[str, bytes]]:
+    """Every file the splash adds to a game, as (path, bytes), read-only.
+
+    Paths are relative to *game_dir*, with forward slashes (``www/js/...``
+    for deployed MV, ``js/...`` for MZ).  Nothing is written into the game
+    folder.  Raises ``RuntimeError`` when the splash assets are missing or
+    the game has encrypted images but no usable key: a package that enables
+    the splash without these files would fail to start.
+    """
+    if not os.path.isfile(_SPLASH_PNG) or not os.path.isfile(_PLUGIN_JS):
+        raise RuntimeError("The translation splash files are missing "
+                           "from this installation.")
+    root = _content_root(game_dir)
+    if not root:
+        raise RuntimeError("Could not find the game's data/ folder.")
+    rel = os.path.relpath(root, game_dir).replace("\\", "/")
+    prefix = "" if rel == "." else rel + "/"
+
+    with open(_PLUGIN_JS, "rb") as f:
+        plugin_bytes = f.read()
+    with open(_SPLASH_PNG, "rb") as f:
+        png_bytes = f.read()
+    out = [
+        (prefix + "js/plugins/TranslationSplash.js", plugin_bytes),
+        (prefix + "img/system/TranslationSplash.png", png_bytes),
+    ]
+    # Encrypted games only load the encrypted file (MV: .rpgmvp, MZ: .png_)
+    if _has_encrypted_images(root):
+        key = read_encryption_key(game_dir)
+        if not key:
+            raise RuntimeError("The game has encrypted images but no "
+                               "encryption key was found for the splash.")
+        is_mz = os.path.isfile(os.path.join(root, "js", "rmmz_core.js"))
+        ext = ".png_" if is_mz else ".rpgmvp"
+        with tempfile.TemporaryDirectory() as tmp:
+            enc = os.path.join(tmp, "TranslationSplash" + ext)
+            encrypt_to_rpgmvp(_SPLASH_PNG, enc, key)
+            with open(enc, "rb") as f:
+                out.append((prefix + "img/system/TranslationSplash" + ext,
+                            f.read()))
+    return out
+
+
+def splash_plugin_entry() -> dict:
+    """The plugins.js entry that enables the splash."""
+    return {"name": "TranslationSplash", "status": True,
+            "description": "Translation splash screen",
+            "parameters": {"FadeIn": "40", "Wait": "180", "FadeOut": "30"}}
 
 
 def _inject_plugin_entry(plugins_js_path: str) -> bool:

@@ -4,6 +4,7 @@ Handles extraction of translatable strings from RPG Maker MV/MZ data files
 and writing translations back into the original JSON structure.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -318,6 +319,25 @@ def _detect_gender(profile: str, note: str, nickname: str) -> str:
     if male_score > female_score:
         return "male"
     return ""
+
+
+class _PackageWriter:
+    """Writes patch-zip members, putting them under ``_translation/`` for the
+    install layout (install.bat moves them) or at the game's real paths for
+    the drop-in layout.  Scripts and README are always at the zip root."""
+
+    ROOT_FILES = ("install.bat", "uninstall.bat", "README.txt")
+
+    def __init__(self, zf, layout: str):
+        if layout not in ("install", "dropin"):
+            raise ValueError(f"unknown patch layout: {layout!r}")
+        self._zf = zf
+        self.layout = layout
+
+    def writestr(self, name: str, data):
+        if self.layout == "install" and name not in self.ROOT_FILES:
+            name = "_translation/" + name
+        self._zf.writestr(name, data)
 
 
 class RPGMakerMVParser:
@@ -807,8 +827,18 @@ class RPGMakerMVParser:
 
     def export_patch_zip(self, project_dir: str, entries: list,
                          zip_path: str, game_title: str = "",
-                         inject_wordwrap: bool = False):
+                         inject_wordwrap: bool = False,
+                         layout: str = "install",
+                         show_splash: Optional[bool] = None):
         """Export a complete translated game folder as a ready-to-install zip.
+
+        *layout* ``"install"`` (default) is the layout below.  ``"dropin"``
+        puts the same files at the game's real paths (``www/data/...``),
+        with a README and no .bat scripts: extract over the game folder.
+        *show_splash*: True makes sure the translation splash is enabled in
+        the packaged plugins.js, False removes it, None keeps what the
+        plugins.js says.  Whenever the packaged plugins.js enables the
+        splash, the splash's own files ship too.
 
         Zip layout::
 
@@ -865,7 +895,8 @@ class RPGMakerMVParser:
                 os.path.dirname(plugins_path), project_dir
             ).replace("\\", "/")
 
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        with self._atomic_zip(zip_path) as raw_zf:
+            zf = _PackageWriter(raw_zf, layout)
             # Include ALL data files — apply translations where we have them
             # Stored under _translation/ so extracting the zip doesn't
             # immediately overwrite game files — install.bat handles the swap
@@ -911,7 +942,7 @@ class RPGMakerMVParser:
                     if isinstance(loc, str) and loc.startswith("ja"):
                         data["locale"] = ""
 
-                arc_path = f"_translation/{data_rel}/{filename}"
+                arc_path = f"{data_rel}/{filename}"
                 zf.writestr(arc_path,
                             json.dumps(data, ensure_ascii=False, indent=2))
                 data_file_count += 1
@@ -932,7 +963,8 @@ class RPGMakerMVParser:
                 and e.status in ("translated", "reviewed")
             ]
             has_plugins = False
-            need_plugins_js = plugin_entries or inject_wordwrap
+            need_plugins_js = (plugin_entries or inject_wordwrap
+                               or (show_splash is True and plugins_path))
             if need_plugins_js and plugins_path:
                 plugins_backup = os.path.join(
                     os.path.dirname(plugins_path),
@@ -960,9 +992,22 @@ class RPGMakerMVParser:
                                 "parameters": {},
                             })
 
+                    if show_splash is False:
+                        plugins = [p for p in plugins if p.get("name")
+                                   != "TranslationSplash"]
+                    elif show_splash is True and not any(
+                            p.get("name") == "TranslationSplash"
+                            for p in plugins):
+                        from .splash_generator import splash_plugin_entry
+                        plugins.insert(0, splash_plugin_entry())
+
                     js_content = "var $plugins =\n" + json.dumps(
                         plugins, ensure_ascii=False, indent=2) + ";\n"
-                    zf.writestr(f"_translation/{js_rel}/plugins.js", js_content)
+                    # Every file the enabled plugins need that the export
+                    # itself added to the game (the splash) must ship, or a
+                    # fresh install fails to load the plugin.
+                    self._put_added_plugin_files(zf, project_dir, plugins)
+                    zf.writestr(f"{js_rel}/plugins.js", js_content)
                     has_plugins = True
                 except (json.JSONDecodeError, OSError):
                     pass
@@ -970,7 +1015,7 @@ class RPGMakerMVParser:
             # Include word wrap JS plugin file
             if inject_wordwrap and js_rel:
                 from .text_processor import WORDWRAP_PLUGIN_JS
-                arc = f"_translation/{js_rel}/plugins/{self.INJECTED_PLUGIN_NAME}.js"
+                arc = f"{js_rel}/plugins/{self.INJECTED_PLUGIN_NAME}.js"
                 zf.writestr(arc, WORDWRAP_PLUGIN_JS.strip() + "\n")
 
             # Include gamefont.css for English readability
@@ -979,7 +1024,7 @@ class RPGMakerMVParser:
                 fonts_rel = posixpath.join(
                     posixpath.dirname(js_rel), "fonts").lstrip("/")
                 fallback = "Courier New" if self.game_font != "Courier New" else "Consolas"
-                zf.writestr(f"_translation/{fonts_rel}/gamefont.css",
+                zf.writestr(f"{fonts_rel}/gamefont.css",
                     '@font-face {\n'
                     '    font-family: GameFont;\n'
                     f'    src: local("{self.game_font}"), local("{fallback}");\n'
@@ -988,40 +1033,18 @@ class RPGMakerMVParser:
 
             total_entries = sum(len(v) for v in by_file.values())
 
-            # install.bat
-            zf.writestr("install.bat", self._build_install_bat(
-                data_rel, js_rel, data_file_count, has_plugins, game_title,
-                inject_wordwrap=inject_wordwrap,
-                font_name=self.game_font))
-
-            # uninstall.bat
-            zf.writestr("uninstall.bat", self._build_uninstall_bat(
-                data_rel, js_rel, has_plugins, game_title,
-                inject_wordwrap=inject_wordwrap,
-                package_files=shipped))
-
-            # README.txt
-            readme = (
-                f"English Translation — {game_title or 'RPG Maker Game'}\n"
-                f"{'=' * 50}\n\n"
-                f"Files: {data_file_count} data file(s)"
-                f"{' + plugins.js' if has_plugins else ''}\n"
-                f"Entries: {total_entries} translated\n\n"
-                "HOW TO INSTALL:\n"
-                "1. Extract this zip into the game folder\n"
-                "   (the folder containing Game.exe)\n"
-                "2. Run install.bat\n"
-                "3. Play the game!\n\n"
-                "TO REVERT TO JAPANESE:\n"
-                "  Run uninstall.bat\n"
-            )
-            zf.writestr("README.txt", readme)
+            self._write_package_scripts(
+                zf, project_dir, data_rel, js_rel, data_file_count,
+                has_plugins, game_title, inject_wordwrap=inject_wordwrap,
+                font_name=self.game_font, shipped=shipped,
+                extra_line=f"Entries: {total_entries} translated\n")
         self.last_patch_skipped = skipped_lines
         game_io.raise_export_problems([], skipped_lines, outside=outside,
                                       manifest=manifest)
 
     def export_game_folder_as_patch(self, game_path: str, zip_path: str,
-                                    game_title: str = "") -> dict:
+                                    game_title: str = "",
+                                    layout: str = "install") -> dict:
         """Package a game folder's current data/ files into a distributable zip.
 
         Unlike export_patch_zip(), this does NOT apply translations from a
@@ -1049,7 +1072,8 @@ class RPGMakerMVParser:
                 os.path.dirname(plugins_path), game_path
             ).replace("\\", "/")
 
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        with self._atomic_zip(zip_path) as raw_zf:
+            zf = _PackageWriter(raw_zf, layout)
             # Copy all JSON files from data/ directly into zip
             data_file_count = 0
             shipped: list[str] = []
@@ -1061,7 +1085,7 @@ class RPGMakerMVParser:
                     continue
                 with open(src, "r", encoding="utf-8-sig") as f:
                     content = f.read()
-                zf.writestr(f"_translation/{data_rel}/{filename}", content)
+                zf.writestr(f"{data_rel}/{filename}", content)
                 data_file_count += 1
                 shipped.append(filename)
 
@@ -1070,37 +1094,117 @@ class RPGMakerMVParser:
             if plugins_path and os.path.isfile(plugins_path):
                 with open(plugins_path, "r", encoding="utf-8-sig") as f:
                     plugins_content = f.read()
-                zf.writestr(f"_translation/{js_rel}/plugins.js", plugins_content)
+                # The game's plugins.js may enable the splash this app added
+                try:
+                    plugins = self._load_plugins_js(plugins_path)
+                except (json.JSONDecodeError, OSError):
+                    plugins = []
+                self._put_added_plugin_files(zf, game_path, plugins)
+                zf.writestr(f"{js_rel}/plugins.js", plugins_content)
                 has_plugins = True
 
-            # Install / uninstall scripts (reuse existing builders)
-            zf.writestr("install.bat", self._build_install_bat(
-                data_rel, js_rel, data_file_count, has_plugins, game_title,
-                inject_wordwrap=False, font_name=None))
-            zf.writestr("uninstall.bat", self._build_uninstall_bat(
-                data_rel, js_rel, has_plugins, game_title,
-                inject_wordwrap=False, package_files=shipped))
-
-            readme = (
-                f"English Translation \u2014 {game_title or 'RPG Maker Game'}\n"
-                f"{'=' * 50}\n\n"
-                f"Files: {data_file_count} data file(s)"
-                f"{' + plugins.js' if has_plugins else ''}\n\n"
-                "HOW TO INSTALL:\n"
-                "1. Extract this zip into the game folder\n"
-                "   (the folder containing Game.exe)\n"
-                "2. Run install.bat\n"
-                "3. Play the game!\n\n"
-                "TO REVERT TO JAPANESE:\n"
-                "  Run uninstall.bat\n"
-            )
-            zf.writestr("README.txt", readme)
+            self._write_package_scripts(
+                zf, game_path, data_rel, js_rel, data_file_count,
+                has_plugins, game_title, inject_wordwrap=False,
+                font_name=None, shipped=shipped)
 
         return {
             "data_files": data_file_count,
             "has_plugins": has_plugins,
             "data_original_exists": data_original_exists,
         }
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _atomic_zip(zip_path: str):
+        """Yield a ZipFile written to a temp file next to *zip_path*, then
+        renamed over it.  A failure leaves any existing zip untouched."""
+        tmp = zip_path + ".rmt-tmp"
+        try:
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+                yield zf
+            os.replace(tmp, zip_path)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                # The temp file may never have been created; the original
+                # error is the one worth reporting.
+                pass
+            raise
+
+    @staticmethod
+    def _put_added_plugin_files(zf, game_dir: str, plugins: list):
+        """Ship the files this app adds to a game for an enabled plugin.
+
+        Today that is the translation splash: its plugin .js and its
+        images (plus the encrypted copy for encrypted games).  Nothing is
+        written into the game folder.
+        """
+        if any(p.get("name") == "TranslationSplash" and p.get("status")
+               for p in plugins if isinstance(p, dict)):
+            from .splash_generator import splash_payload
+            for rel, data in splash_payload(game_dir):
+                zf.writestr(rel, data)
+
+    @staticmethod
+    def _find_game_exe(game_dir: str) -> Optional[str]:
+        """The game's .exe name when there is exactly one plausible one."""
+        skip = re.compile(r"unins|setup|install|crash|redist|dxweb|updater",
+                          re.IGNORECASE)
+        try:
+            names = [n for n in os.listdir(game_dir)
+                     if n.lower().endswith(".exe") and not skip.search(n)
+                     and os.path.isfile(os.path.join(game_dir, n))]
+        except OSError:
+            return None
+        return names[0] if len(names) == 1 else None
+
+    def _write_package_scripts(self, zf, game_dir: str, data_rel: str,
+                               js_rel, n_files: int, has_plugins: bool,
+                               game_title: str, inject_wordwrap: bool,
+                               font_name, shipped: list,
+                               extra_line: str = ""):
+        """The layout-specific end of a patch zip: install.bat, uninstall.bat
+        and README (install layout), or just a README (drop-in)."""
+        title = game_title or "RPG Maker Game"
+        head = (f"English Translation - {title}\n"
+                f"{'=' * 50}\n\n"
+                f"Files: {n_files} data file(s)"
+                f"{' + plugins.js' if has_plugins else ''}\n"
+                f"{extra_line}\n")
+        if zf.layout == "dropin":
+            exe = self._find_game_exe(game_dir)
+            folder = "www" if data_rel.split("/")[0] == "www" else data_rel
+            launch = (f"4. Start the game with {exe}\n" if exe else
+                      "4. Start the game the way you always do\n"
+                      "   (its .exe in the game folder)\n")
+            zf.writestr("README.txt", head + (
+                "HOW TO INSTALL:\n"
+                f'1. Make a copy of the "{folder}" folder in the game\n'
+                "   folder first. That copy is your way back to the original.\n"
+                "2. Extract this zip into the game folder (the folder with the\n"
+                "   game's .exe). The files are already laid out at their\n"
+                "   real places.\n"
+                "3. When asked to replace files, say Yes.\n"
+                + launch +
+                "\nTO REVERT:\n"
+                f'  Delete the "{folder}" folder and put your copy back.\n'))
+            return
+        zf.writestr("install.bat", self._build_install_bat(
+            data_rel, js_rel, n_files, has_plugins, game_title,
+            inject_wordwrap=inject_wordwrap, font_name=font_name))
+        zf.writestr("uninstall.bat", self._build_uninstall_bat(
+            data_rel, js_rel, has_plugins, game_title,
+            inject_wordwrap=inject_wordwrap, package_files=shipped))
+        zf.writestr("README.txt", head + (
+            "HOW TO INSTALL:\n"
+            "1. Extract this zip into the game folder\n"
+            "   (the folder containing Game.exe)\n"
+            "2. Run install.bat\n"
+            "3. Play the game!\n\n"
+            "TO REVERT TO JAPANESE:\n"
+            "  Run uninstall.bat\n"))
 
     @staticmethod
     def _build_install_bat(data_rel: str, js_rel: str,

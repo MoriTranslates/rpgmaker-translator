@@ -364,6 +364,8 @@ class MainWindow(QMainWindow):
         "export_action": "gamepad-2", "restore_action": "history",
         "open_rpgmaker_action": "external-link",
         "txt_export_action": "file-text", "create_patch_action": "share-2",
+        "export_dropin_action": "package",
+        "export_folder_dropin_action": "folder-archive",
         "export_zip_action": "package",
         "export_folder_zip_action": "folder-archive",
     }
@@ -750,12 +752,23 @@ class MainWindow(QMainWindow):
         self.create_patch_action.setEnabled(False)
         game_menu.addAction(self.create_patch_action)
 
+        self.export_dropin_action = QAction("Create Drop-in Patch\u2026", self)
+        self.export_dropin_action.setToolTip(
+            "Export translated game files at the game's real paths as a zip "
+            "\u2014 end users extract it over the game folder (no install.bat)"
+        )
+        self.export_dropin_action.triggered.connect(
+            lambda: self._export_patch_zip(layout="dropin"))
+        self.export_dropin_action.setEnabled(False)
+        game_menu.addAction(self.export_dropin_action)
+
         self.export_zip_action = QAction("Create Install Package\u2026", self)
         self.export_zip_action.setToolTip(
             "Export translated game files + install.bat as a zip \u2014 "
             "end users just extract and run"
         )
-        self.export_zip_action.triggered.connect(self._export_patch_zip)
+        self.export_zip_action.triggered.connect(
+            lambda: self._export_patch_zip(layout="install"))
         self.export_zip_action.setEnabled(False)
         game_menu.addAction(self.export_zip_action)
 
@@ -767,9 +780,21 @@ class MainWindow(QMainWindow):
             "works without a project, includes all existing translations"
         )
         self.export_folder_zip_action.triggered.connect(
-            self._export_game_as_patch
+            lambda: self._export_game_as_patch(layout="install")
         )
         game_menu.addAction(self.export_folder_zip_action)
+
+        self.export_folder_dropin_action = QAction(
+            "Create Drop-in Patch from Game Folder\u2026", self
+        )
+        self.export_folder_dropin_action.setToolTip(
+            "Like the above, but as a drop-in zip: files at the game's real "
+            "paths, extracted over the game folder (no install.bat)"
+        )
+        self.export_folder_dropin_action.triggered.connect(
+            lambda: self._export_game_as_patch(layout="dropin")
+        )
+        game_menu.addAction(self.export_folder_dropin_action)
 
         # ── Settings (top-level action) ───────────────────────────
         self.settings_action = QAction("Settings", self)
@@ -1251,7 +1276,7 @@ class MainWindow(QMainWindow):
             # Game
             self.export_action, self.restore_action, self.open_rpgmaker_action,
             self.txt_export_action, self.create_patch_action,
-            self.export_zip_action,
+            self.export_dropin_action, self.export_zip_action,
         ]
 
     def _set_batch_running(self, running: bool):
@@ -2228,8 +2253,9 @@ class MainWindow(QMainWindow):
                        self.restore_action, self.open_rpgmaker_action):
             action.setEnabled(has_path)
         # Install package uses the MV/MZ exporter
-        self.export_zip_action.setEnabled(
-            bool(getattr(self.handler, "has_plugin_system", False)))
+        for action in (self.export_dropin_action, self.export_zip_action):
+            action.setEnabled(
+                bool(getattr(self.handler, "has_plugin_system", False)))
         self._set_batch_running(self.engine.is_running)
 
         # Reset pipeline bar for manual mode (wizard controls its own flow)
@@ -5902,8 +5928,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Patch Not Created",
                                 f"Failed to create the patch:\n{e}")
 
-    def _export_patch_zip(self):
-        """Export translated game files + install.bat as a distributable zip."""
+    def _export_patch_zip(self, layout: str = "install"):
+        """Export translated game files as a distributable zip.
+
+        layout "install": install.bat + uninstall.bat; "dropin": files at
+        the game's real paths, to be extracted over the game folder.
+        """
+        dropin = layout == "dropin"
         if not self.project.entries:
             return
         if not self.project.project_path or not os.path.isdir(self.project.project_path):
@@ -5986,7 +6017,8 @@ class MainWindow(QMainWindow):
             default_name = f"{safe_title} - ENG Translation Patch.zip"
 
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Patch Zip", default_name, "Zip Files (*.zip)"
+            self, "Export Drop-in Patch" if dropin else "Export Patch Zip",
+            default_name, "Zip Files (*.zip)"
         )
         if not path:
             return
@@ -6011,27 +6043,41 @@ class MainWindow(QMainWindow):
                 self.parser.export_patch_zip(
                     self.project.project_path, export_entries,
                     path, game_title=game_title,
-                    inject_wordwrap=self.plugin_analyzer.should_inject_plugin())
+                    inject_wordwrap=self.plugin_analyzer.should_inject_plugin(),
+                    layout=layout,
+                    show_splash=self._show_translation_splash)
             except PartialExportError as partial:
                 # The package was written, but without these lines
                 QMessageBox.warning(
-                    self, "Install Package Incomplete",
+                    self, "Drop-in Patch Incomplete" if dropin
+                    else "Install Package Incomplete",
                     f"Saved to:\n{path}\n\nSome translated lines were NOT "
                     f"included:\n\n{partial}\n\n"
                     + game_io.export_advice(partial))
                 return
-            QMessageBox.information(
-                self, "Install Package Created",
-                f"Saved to:\n{path}\n\n"
-                f"{len(translated)} translated entries.\n"
-                f"Includes complete data folder + install/uninstall scripts.\n\n"
-                f"End users: extract into the game folder and run install.bat."
-            )
+            if dropin:
+                QMessageBox.information(
+                    self, "Drop-in Patch Created",
+                    f"Saved to:\n{path}\n\n"
+                    f"{len(translated)} translated entries.\n"
+                    f"Files are laid out at the game's real paths.\n\n"
+                    f"End users: back up the game's data first, then extract "
+                    f"into the game folder and replace files (see README.txt)."
+                )
+            else:
+                QMessageBox.information(
+                    self, "Install Package Created",
+                    f"Saved to:\n{path}\n\n"
+                    f"{len(translated)} translated entries.\n"
+                    f"Includes complete data folder + install/uninstall scripts.\n\n"
+                    f"End users: extract into the game folder and run install.bat."
+                )
         except Exception as e:
+            kind = "drop-in patch" if dropin else "install package"
             QMessageBox.warning(self, "Package Not Created",
-                                f"Failed to create the install package:\n{e}")
+                                f"Failed to create the {kind}:\n{e}")
 
-    def _export_game_as_patch(self):
+    def _export_game_as_patch(self, layout: str = "install"):
         """Package a game folder's current files into a distributable zip.
 
         Works without an active project.  Useful when the game already has
@@ -6103,7 +6149,7 @@ class MainWindow(QMainWindow):
 
         try:
             stats = self.parser.export_game_folder_as_patch(
-                game_path, path, game_title=game_title
+                game_path, path, game_title=game_title, layout=layout
             )
             msg = (
                 f"Saved to:\n{path}\n\n"
@@ -6117,9 +6163,13 @@ class MainWindow(QMainWindow):
                     "\ndata_original/ detected \u2014 data/ contains "
                     "translated files (as expected)."
                 )
-            msg += (
-                "\n\nEnd users: extract into the game folder and run install.bat."
-            )
+            if layout == "dropin":
+                msg += ("\n\nEnd users: back up the game's data first, "
+                        "then extract into the game folder (see README.txt).")
+            else:
+                msg += (
+                    "\n\nEnd users: extract into the game folder and run install.bat."
+                )
             QMessageBox.information(self, "Patch Created", msg)
         except Exception as e:
             QMessageBox.warning(

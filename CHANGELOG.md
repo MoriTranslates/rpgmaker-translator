@@ -9,6 +9,12 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+### Added
+- "Create Drop-in Patch" (Game menu, now the first patch option): a zip with the translated files already at the game's real paths (for example `www/data`), plus a README. Players back up the game's data folder, extract the zip over the game folder and say yes to replace. There are no install or uninstall scripts. The README names the game's real .exe. There is also a drop-in version of "Create Patch from Game Folder". "Create Install Package" is still there.
+
+### Fixed
+- Install packages and patches made from a game folder turned the translation splash on but left out the splash's files, so a fresh install failed with "Failed to load: js/plugins/TranslationSplash.js". The zip now includes the splash plugin and its images (and the encrypted copy for games with encrypted images). With the splash turned off in Settings, the zip no longer enables it. Zips are also written to a temporary file first, so a failed export no longer replaces an earlier zip.
+
 ## [1.2.2] - 2026-11-20
 
 ### Fixed
