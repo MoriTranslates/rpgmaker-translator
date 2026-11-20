@@ -243,6 +243,7 @@ All providers use the OpenAI SDK as a universal abstraction. Switch in Settings 
 
 1. **Batch DB** (`Ctrl+D`) — Translates database entries: item names, skill names, enemy names, system terms. These become glossary entries.
 2. **Review DB names** — Fix any mistranslations in the table. Corrections auto-update the glossary.
+   **Then add the main characters to the project glossary yourself.** Names that only appear in dialogue (not in the database) aren't picked up automatically, and the model may spell them differently from line to line. Fixing them before Batch Dialogue is much easier than after.
 3. **Batch Dialogue** (`Ctrl+T`) — Translates dialogue, events, and plugin text using the glossary built in step 1.
 
 This prevents inconsistencies like an NPC saying "Take the Holy Sword" when the inventory calls it "Sacred Blade".

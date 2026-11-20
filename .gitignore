@@ -44,3 +44,7 @@ benchmark/
 
 # Local utility scripts
 fix_mojibake.py
+
+# Patches and backups made from real games (contain game data, never commit)
+/*.zip
+/_settings.backup-*.json
