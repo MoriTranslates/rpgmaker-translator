@@ -46,6 +46,30 @@ class TranslationEntry:
     context: str = ""      # Surrounding text for LLM context
     namebox: str = ""      # \N<name> prefix stripped during parse, restored on export
     has_face: bool = False # True when 101 header has a face graphic (narrower text area)
+    # \N<name> SUFFIX (YEP_MessageCore end-of-message name box), stripped
+    # during parse and re-appended on export.  Saves made before it existed
+    # load with "" and keep the code inside ``original``, exporting as before.
+    namebox_end: str = ""
+
+
+def fold_legacy_end_namebox(old, new) -> bool:
+    """Put an end-of-message namebox back into *new*'s text for *old*.
+
+    *old* (a save or patch from before end nameboxes were split off) holds
+    the code inside its original, and its translation was written for that
+    text.  When *new* is the same game text split into ``original`` +
+    ``namebox_end``, the code goes back into ``new.original`` so the old
+    translation is used — and exported — exactly as before.  Returns True
+    when *new* was changed.
+    """
+    end = getattr(new, "namebox_end", "") or ""
+    if (end and not (getattr(old, "namebox_end", "") or "")
+            and (old.namebox or "") == (new.namebox or "")
+            and old.original == new.original + end):
+        new.original = old.original
+        new.namebox_end = ""
+        return True
+    return False
 
 
 def _read_id_scheme(data: dict) -> int:
@@ -230,14 +254,20 @@ class TranslationProject:
 
             # Strategy 1: exact ID match
             old = old_by_id.get(entry.id)
-            if old and old.original == entry.original:
+            if old and (old.original == entry.original
+                        or fold_legacy_end_namebox(old, entry)):
                 entry.translation = old.translation
                 entry.status = old.status
                 stats["by_id"] += 1
                 continue
 
-            # Strategy 2: same original text (first match)
+            # Strategy 2: same original text (first match).  An old save
+            # may still hold an end-of-message namebox inside its text.
             candidates = old_by_text.get(entry.original, [])
+            if not candidates and getattr(entry, "namebox_end", ""):
+                legacy = old_by_text.get(entry.original + entry.namebox_end, [])
+                if legacy and fold_legacy_end_namebox(legacy[0], entry):
+                    candidates = legacy
             if candidates:
                 entry.translation = candidates[0].translation
                 entry.status = candidates[0].status

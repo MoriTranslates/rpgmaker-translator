@@ -867,6 +867,12 @@ class TranslationWizard(QDialog):
                 disable_splash = getattr(self.mw, '_disable_splash', False)
                 if disable_splash:
                     handler.parser.disable_splash_plugin(project_path)
+                # Warning only: the wizard never changes plugin settings
+                # the user wasn't asked about (Export to Game offers a fix)
+                check = getattr(handler.parser, "yep_word_wrap_space_off",
+                                None)
+                if check and check(project_path):
+                    notes.append(handler.parser.YEP_WRAP_SPACE_WARNING)
                 # our post-export plugins.js / gamefont.css are recorded
                 notes += handler.parser.note_own_files(project_path)
 

@@ -11,9 +11,11 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ### Added
 - "Create Drop-in Patch" (Game menu, now the first patch option): a zip with the translated files already at the game's real paths (for example `www/data`), plus a README. Players back up the game's data folder, extract the zip over the game folder and say yes to replace. There are no install or uninstall scripts. The README names the game's real .exe. There is also a drop-in version of "Create Patch from Game Folder". "Create Install Package" is still there.
+- Export to Game warns when YEP_MessageCore has "Word Wrap Space" set to false, which glues English words together across wrapped lines ("SHINRYU,I got"). It explains the fix (set Word Wrap Space to true in YEP_MessageCore's parameters) and offers to turn it on for you during the export; plugins.js is backed up first and is never changed without asking. The translation wizard shows the same warning without changing anything.
 
 ### Fixed
 - Install packages and patches made from a game folder turned the translation splash on but left out the splash's files, so a fresh install failed with "Failed to load: js/plugins/TranslationSplash.js". The zip now includes the splash plugin and its images (and the encrypted copy for games with encrypted images). With the splash turned off in Settings, the zip no longer enables it. Zips are also written to a temporary file first, so a failed export no longer replaces an earlier zip.
+- RPG Maker MV/MZ games using YEP_MessageCore that put the speaker's name box at the end of a message (`「…」\n<name>`) now get it treated like a name box at the start: the speaker shows in the table and the AI context, the name is translated with the other speaker names and written back at the end on export, and glossary checks no longer count the name as a term in the dialogue. Only the exact `\n<name>` code ending the message counts; tags like `<WordWrap>` or a code followed by more text are left in the text. Projects saved by earlier versions load and export exactly as before (their end-of-message names stay as they were); games opened fresh get the new handling.
 
 ## [1.2.2] - 2026-11-20
 

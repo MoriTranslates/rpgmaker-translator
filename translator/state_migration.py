@@ -38,7 +38,9 @@ import shutil
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 
-from .project_model import ID_SCHEME, TranslationProject, ids_outdated
+from .project_model import (
+    ID_SCHEME, TranslationProject, fold_legacy_end_namebox, ids_outdated,
+)
 
 log = logging.getLogger(__name__)
 
@@ -127,8 +129,9 @@ def _group_key(entry, engine):
 
 
 def _raw_text(entry) -> str:
-    """Source text exactly as in the game file (namebox re-attached)."""
-    return (entry.namebox or "") + (entry.original or "")
+    """Source text exactly as in the game file (nameboxes re-attached)."""
+    return ((entry.namebox or "") + (entry.original or "")
+            + (getattr(entry, "namebox_end", "") or ""))
 
 
 def _has_user_data(entry) -> bool:
@@ -204,6 +207,9 @@ def transfer_entry(old, new, keep_context: bool = True) -> bool:
     """
     merged = False
     translation = old.translation
+    # Saved before end-of-message nameboxes were split off: keep the code
+    # in the text, so the old translation exports exactly as before.
+    fold_legacy_end_namebox(old, new)
     if (old.namebox and not new.namebox
             and new.original == old.namebox + old.original):
         merged = True
