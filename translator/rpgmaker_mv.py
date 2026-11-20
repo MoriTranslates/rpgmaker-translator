@@ -5,6 +5,7 @@ and writing translations back into the original JSON structure.
 """
 
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -76,14 +77,19 @@ _END_NAMEBOX_RE = re.compile(
     r'\s*(\\[Nn]<([^<>\r\n]+)>)\s*\Z')
 
 
-def _end_namebox_match(text: str):
+def _end_namebox_match(text: str, need_text: bool = True):
     """Match of a namebox code ending *text*, or None.
 
-    The name must not be blank and some dialogue must remain before it
-    (a message that is only a code is handled as a start-of-text namebox).
+    The name must not be blank.  With *need_text* (parsing game text),
+    some dialogue must remain before it: a message that is only a code is
+    handled as a start-of-text namebox.  A translation is checked with
+    ``need_text=False``: one that is only the code was still typed by the
+    user and must not get a second one appended.
     """
     m = _END_NAMEBOX_RE.search(text)
-    if not m or not m.group(2).strip() or not text[:m.start()].strip():
+    if not m or not m.group(2).strip():
+        return None
+    if need_text and not text[:m.start()].strip():
         return None
     return m
 
@@ -663,17 +669,7 @@ class RPGMakerMVParser:
         self.image_names_kept = 0
 
         # Build global speaker name lookup (one translation applies to all files)
-        global_speakers = {}
-        by_file = {}
-        for e in entries:
-            if not (e.translation and e.status in ("translated", "reviewed")):
-                continue
-            if e.field == "speaker_name":
-                name = self._sanitize_speaker_name(e.translation, e.original)
-                if name:
-                    global_speakers[e.original] = name
-            else:
-                by_file.setdefault(e.file, []).append(e)
+        global_speakers, by_file = self._group_export_entries(entries)
 
         # Rewrite every file the parser reads — not only files that have
         # translated entries — so a file whose translations were all
@@ -905,17 +901,7 @@ class RPGMakerMVParser:
         data_rel = os.path.relpath(data_dir, project_dir).replace("\\", "/")
 
         # Build global speaker lookup + group entries by file
-        global_speakers = {}
-        by_file = {}
-        for e in entries:
-            if not (e.translation and e.status in ("translated", "reviewed")):
-                continue
-            if e.field == "speaker_name":
-                name = self._sanitize_speaker_name(e.translation, e.original)
-                if name:
-                    global_speakers[e.original] = name
-            else:
-                by_file.setdefault(e.file, []).append(e)
+        global_speakers, by_file = self._group_export_entries(entries)
 
         # Determine js/ relative path for plugins
         js_rel = None
@@ -2759,6 +2745,33 @@ class RPGMakerMVParser:
             return ""
         return translated
 
+    def _group_export_entries(self, entries: list) -> tuple[dict, dict]:
+        """``(global_speakers, by_file)`` for an export.
+
+        Translated / reviewed entries are exported as they are.  A skipped
+        dialogue whose text was split from an end-of-message name box
+        (YEP "「……」\\n<name>": nothing left to translate) is exported
+        with its text unchanged, so its name box still gets the
+        translated speaker name.  It is a copy: the project entry is
+        never changed by an export.
+        """
+        global_speakers: dict = {}
+        by_file: dict = {}
+        for e in entries:
+            if not (e.translation and e.status in ("translated", "reviewed")):
+                if (e.status == "skipped" and e.field == "dialog"
+                        and getattr(e, "namebox_end", "")):
+                    by_file.setdefault(e.file, []).append(
+                        dataclasses.replace(e, translation=e.original))
+                continue
+            if e.field == "speaker_name":
+                name = self._sanitize_speaker_name(e.translation, e.original)
+                if name:
+                    global_speakers[e.original] = name
+            else:
+                by_file.setdefault(e.file, []).append(e)
+        return global_speakers, by_file
+
     @staticmethod
     def _translate_namebox(namebox: str, speaker_lookup: dict) -> str:
         """Translate the name inside a \\N<name> prefix for export.
@@ -2904,9 +2917,11 @@ class RPGMakerMVParser:
                     # Re-append the end-of-message name box (YEP), name
                     # translated; the key gets the raw code back.  A
                     # translation that already ends in a name code (typed
-                    # by the user) is written as it is, never doubled.
+                    # by the user) is written as it is, never doubled —
+                    # also when the translation is only that code.
                     orig_lines = _append_suffix(orig_lines, end)
-                    if not _end_namebox_match("\n".join(trans_lines)):
+                    if not _end_namebox_match("\n".join(trans_lines),
+                                              need_text=False):
                         trans_lines = _append_suffix(
                             trans_lines,
                             self._translate_namebox_end(end, speaker_lookup))
@@ -2918,6 +2933,11 @@ class RPGMakerMVParser:
                         drop = min(pad, len(trans_lines) - len(orig_lines))
                         if drop > 0:
                             trans_lines = trans_lines[:-drop]
+                    elif len(trans_lines) < len(orig_lines):
+                        # Typed code, shorter than the game's block (the
+                        # code's own line / padding lines): blank the rest
+                        trans_lines = trans_lines + [""] * (
+                            len(orig_lines) - len(trans_lines))
                 payload = (orig_lines, trans_lines)
             else:
                 payload = (entry.original, entry.translation)
