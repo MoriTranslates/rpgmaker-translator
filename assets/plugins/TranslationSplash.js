@@ -89,7 +89,8 @@
             this.startFadeOut(FADE_OUT, false);
         }
 
-        if (this._done && !this.isFading()) {
+        // isBusy, not isFading: MV's Scene_Base has no isFading (MZ only).
+        if (this._done && !this.isBusy()) {
             _splashDone = true;
             SceneManager.goto(Scene_Title);
         }

@@ -9,6 +9,9 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+### Fixed
+- RPG Maker MV games exported with the translation splash crashed ("undefined is not a function") when the splash ended. The splash called a function only RPG Maker MZ has. To fix a game you already exported, export it again with this version and the splash still on. That replaces the broken plugin file.
+
 ## [1.2.1] - 2026-11-09
 
 ### Fixed
