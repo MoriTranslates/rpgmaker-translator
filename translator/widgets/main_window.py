@@ -3261,25 +3261,35 @@ class MainWindow(QMainWindow):
                     f"Word wrap applied to {count} entries.", 5000)
 
         # YEP_MessageCore with "Word Wrap Space" off glues English words
-        # across wrapped lines.  Never changed silently: the user chooses.
+        # across wrapped lines.  Never changed silently: the user chooses,
+        # once per project.  Every export rebuilds plugins.js from the
+        # original, so a "Yes" is re-applied on each export (asking again
+        # would let a later "No" quietly undo it); a "No" is not asked again.
         fix_yep_wrap = False
+        new_yep_choice = ""
         if (self.handler.has_plugin_system
                 and hasattr(self.parser, "yep_word_wrap_space_off")
                 and self.parser.yep_word_wrap_space_off(
                     self.project.project_path)):
-            result = QMessageBox.warning(
-                self, "YEP Word Wrap Space Is Off",
-                self.parser.YEP_WRAP_SPACE_WARNING
-                + "\n\nTurn \"Word Wrap Space\" on in this export?\n"
-                "(plugins.js is backed up first; Restore Originals undoes "
-                "it.)",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No
-                | QMessageBox.StandardButton.Cancel,
-            )
-            if result == QMessageBox.StandardButton.Cancel:
-                return
-            fix_yep_wrap = result == QMessageBox.StandardButton.Yes
+            choice = getattr(self.project, "yep_wrap_space", "")
+            if choice not in ("on", "off"):
+                result = QMessageBox.warning(
+                    self, "YEP Word Wrap Space Is Off",
+                    self.parser.YEP_WRAP_SPACE_WARNING
+                    + "\n\nTurn \"Word Wrap Space\" on when exporting?\n"
+                    "(plugins.js is backed up first; Restore Originals "
+                    "undoes it.) Your answer is remembered for this "
+                    "project.",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No
+                    | QMessageBox.StandardButton.Cancel,
+                )
+                if result == QMessageBox.StandardButton.Cancel:
+                    return
+                choice = new_yep_choice = (
+                    "on" if result == QMessageBox.StandardButton.Yes
+                    else "off")
+            fix_yep_wrap = choice == "on"
 
         # Confirmation dialog with checkbox
         dlg = QDialog(self)
@@ -3306,6 +3316,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(buttons)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+        if new_yep_choice:
+            # Remembered once the export really goes ahead (saved with the
+            # project, so the next export neither asks nor reverts it)
+            self.project.yep_wrap_space = new_yep_choice
+            self._autosave()
 
         try:
             # Sync font setting to parser before export

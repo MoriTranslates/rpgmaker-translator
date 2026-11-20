@@ -94,6 +94,10 @@ class TranslationProject:
     # Translated entries from a pre-migration state that no longer match
     # any entry of the game (kept as dicts so nothing is silently lost).
     migration_orphans: list = field(default_factory=list)
+    # Export to Game answer to "turn YEP_MessageCore Word Wrap Space on?":
+    # "on" = fix it on every export without asking, "off" = leave it and
+    # don't ask again, "" = not answered yet (ask).
+    yep_wrap_space: str = ""
 
     @property
     def total(self) -> int:
@@ -162,6 +166,8 @@ class TranslationProject:
         }
         if self.migration_orphans:
             data["migration_orphans"] = self.migration_orphans
+        if self.yep_wrap_space:
+            data["yep_wrap_space"] = self.yep_wrap_space
         dir_name = os.path.dirname(path) if os.path.dirname(path) else "."
         os.makedirs(dir_name, exist_ok=True)
         # Atomic write: write to temp file then rename to prevent corruption
@@ -202,6 +208,9 @@ class TranslationProject:
         project.id_scheme = _read_id_scheme(data)
         orphans = data.get("migration_orphans", [])
         project.migration_orphans = orphans if isinstance(orphans, list) else []
+        # Missing or unknown value = never answered: ask again
+        wrap = data.get("yep_wrap_space", "")
+        project.yep_wrap_space = wrap if wrap in ("on", "off") else ""
         project._build_index()
         return project
 
@@ -240,7 +249,15 @@ class TranslationProject:
                 list(old_by_id.values()), self.entries, self.project_type)
 
         for entry in self.entries:
-            if entry.status != "untranslated":
+            # A dialogue with nothing left to translate once its end
+            # namebox was split off ("「……」" + "\n<name>") starts as
+            # skipped, but an old save translated the whole text: that
+            # translation is still restored, exactly as before the split.
+            # Only from the same line (ID / structure / full raw text),
+            # never from another line that merely shares the dialogue.
+            split_skip = (entry.status == "skipped" and not entry.translation
+                          and bool(getattr(entry, "namebox_end", "")))
+            if entry.status != "untranslated" and not split_skip:
                 stats["skipped"] += 1
                 continue
 
@@ -263,7 +280,8 @@ class TranslationProject:
 
             # Strategy 2: same original text (first match).  An old save
             # may still hold an end-of-message namebox inside its text.
-            candidates = old_by_text.get(entry.original, [])
+            candidates = ([] if split_skip
+                          else old_by_text.get(entry.original, []))
             if not candidates and getattr(entry, "namebox_end", ""):
                 legacy = old_by_text.get(entry.original + entry.namebox_end, [])
                 if legacy and fold_legacy_end_namebox(legacy[0], entry):
@@ -274,7 +292,7 @@ class TranslationProject:
                 stats["by_text"] += 1
                 continue
 
-            stats["new"] += 1
+            stats["skipped" if split_skip else "new"] += 1
 
         return stats
 
