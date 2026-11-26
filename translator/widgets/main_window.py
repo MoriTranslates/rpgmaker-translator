@@ -60,6 +60,7 @@ from ..narration import narration_pov, suggest_narrators
 from .. import review as review_mod
 from ..suspects import find_suspects
 from .review_dialog import ReviewDialog
+from .button_redraw_dialog import ButtonRedrawDialog
 from .suspect_dialog import SuspectDialog
 from ..speakers import collect_speakers, lookup_speaker_gender
 from .variant_dialog import VariantDialog
@@ -368,7 +369,7 @@ class MainWindow(QMainWindow):
         "strip_actor_codes_action": "eraser", "polish_action": "spell-check",
         "consistency_action": "list-checks", "reset_all_action": "rotate-ccw",
         "suspects_action": "search", "ai_review_action": "spell-check",
-        "translate_images_action": "image",
+        "translate_images_action": "image", "redraw_buttons_action": "image",
         "edit_glossary_action": "book-open", "load_vocab_action": "file-down",
         "speaker_genders_action": "user-round",
         "export_vocab_action": "file-up", "scan_glossary_action": "scan-search",
@@ -671,6 +672,14 @@ class MainWindow(QMainWindow):
         self.translate_images_action.triggered.connect(self._translate_images)
         self.translate_images_action.setEnabled(False)
         translate_menu.addAction(self.translate_images_action)
+
+        self.redraw_buttons_action = QAction("Redraw Buttons…", self)
+        self.redraw_buttons_action.setToolTip(
+            "Make new English buttons for text drawn into button images "
+            "(picture choices, menu buttons)")
+        self.redraw_buttons_action.triggered.connect(self._redraw_buttons)
+        self.redraw_buttons_action.setEnabled(False)
+        translate_menu.addAction(self.redraw_buttons_action)
 
         # ── Glossary menu ─────────────────────────────────────────
         glossary_menu = menubar.addMenu("Glossary")
@@ -1308,7 +1317,7 @@ class MainWindow(QMainWindow):
             self.strip_actor_codes_action, self.polish_action,
             self.consistency_action, self.reset_all_action,
             self.suspects_action, self.ai_review_action,
-            self.translate_images_action,
+            self.translate_images_action, self.redraw_buttons_action,
             # Glossary
             self.load_vocab_action, self.export_vocab_action,
             self.speaker_genders_action,
@@ -6724,6 +6733,27 @@ class MainWindow(QMainWindow):
 
         self.image_panel.set_project(self.project.project_path, self.client)
         self.tabs.setCurrentWidget(self.image_panel)
+
+    def _redraw_buttons(self):
+        """Translate > Redraw Buttons: new English buttons for image text."""
+        from ..image_translator import ImageTranslator, read_encryption_key
+        path = self.project.project_path if self.project else ""
+        img_dir = ImageTranslator.find_img_dir(path) if path else None
+        if not img_dir:
+            QMessageBox.information(self, "Redraw Buttons",
+                                    "This game has no img/ folder.")
+            return
+        dlg = ButtonRedrawDialog(img_dir, read_encryption_key(path), self.client,
+                                 saved=self.project.button_labels, parent=self)
+        self._busy = True
+        try:
+            dlg.exec()
+        finally:
+            self._busy = False
+        labels = dlg.labels()
+        if labels != self.project.button_labels:
+            self.project.button_labels = labels
+            self._autosave()
 
     # ── Window close cleanup ──────────────────────────────────────
 

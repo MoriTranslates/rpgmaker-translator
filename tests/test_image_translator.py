@@ -63,6 +63,40 @@ def test_parse_null_text_skipped():
     assert [r.text for r in regions] == ["ロード"]
 
 
+def _button_with_text(w=533, h=80, box=(109, 18, 423, 63)):
+    """Flat button with dense 'text' strokes inside ``box``."""
+    from PIL import ImageDraw
+    im = Image.new("RGB", (w, h), (20, 40, 150))
+    d = ImageDraw.Draw(im)
+    for x in range(box[0], box[2], 6):
+        d.rectangle((x, box[1], x + 2, box[3]), fill=(255, 255, 255))
+    return im
+
+
+def test_parse_mixed_scale_reply_from_qwen35():
+    # Real qwen3.5:9b reply for a 533x80 game-2 choice button: x on the
+    # 0-999 scale, y in pixels. Read as 0-999 on both axes, the box was
+    # 4 px tall and dropped, so the button was never translated.
+    raw = '```json\n[{"text": "いいえ", "bbox": [205, 18, 794, 63]}]\n```'
+    regions = ImageTranslator._parse_ocr_response(
+        raw, 533, 80, img=_button_with_text())
+    assert regions[0].bbox == (109, 18, 423, 63)
+
+
+def test_parse_ambiguous_axis_prefers_the_reading_with_text():
+    # Both axes fit either scale; the pixels decide (here: 0-999 is right)
+    raw = json.dumps([{"text": "はい", "bbox": [200, 200, 800, 800]}])
+    regions = ImageTranslator._parse_ocr_response(
+        raw, 500, 300, img=_button_with_text(500, 300, (100, 60, 400, 240)))
+    assert regions[0].bbox == (100, 60, 400, 240)
+
+
+def test_parse_ambiguous_axis_without_image_uses_prompt_scale():
+    raw = json.dumps([{"text": "はい", "bbox": [200, 18, 400, 63]}])
+    regions = ImageTranslator._parse_ocr_response(raw, 533, 80)
+    assert regions[0].bbox == (106, 1, 213, 5)
+
+
 def test_parse_garbage_returns_empty():
     assert ImageTranslator._parse_ocr_response("no json here", 100, 100) == []
 

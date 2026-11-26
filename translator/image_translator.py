@@ -209,6 +209,41 @@ def _extract_json(raw: str, opener: str):
     return None
 
 
+def _axis_scale(values: list[float], size: int) -> float | None:
+    """Pixel scale for one bbox axis: 1.0 (pixels), size/999 (0-999), or None.
+
+    None means both readings fit and the caller must decide.
+    """
+    top = max(values)
+    if top > 1000:
+        return 1.0                 # can't be on the 0-999 scale
+    if top > size:
+        return size / 999.0        # can't be pixels
+    return None
+
+
+def _edge_mask(img: Image.Image, w: int, h: int) -> Image.Image:
+    """Binary map of strong edges (text strokes) in ``img`` at ``w`` x ``h``."""
+    from PIL import ImageFilter
+    gray = img.convert("L")
+    if gray.size != (w, h):
+        gray = gray.resize((w, h))
+    return gray.filter(ImageFilter.FIND_EDGES).point(lambda v: 255 if v > 60 else 0)
+
+
+def _edge_hits(edges: Image.Image, regions: list, sx: float, sy: float) -> int:
+    """How many edge pixels the regions cover when scaled by (sx, sy)."""
+    total = 0
+    w, h = edges.size
+    for r in regions:
+        x1, y1, x2, y2 = r.bbox
+        box = (max(0, int(x1 * sx)), max(0, int(y1 * sy)),
+               min(w, int(x2 * sx)), min(h, int(y2 * sy)))
+        if box[2] > box[0] and box[3] > box[1]:
+            total += edges.crop(box).histogram()[255]
+    return total
+
+
 # Verify prompt for rendered image QA
 _VERIFY_SYSTEM = "You are a QA checker for translated game images. Be thorough but concise."
 
@@ -396,7 +431,7 @@ class ImageTranslator:
         raw = self.client.vision_chat(b64, prompt, system=_OCR_SYSTEM)
 
         # Parse response — normalized coords map onto the image the model saw
-        regions = self._parse_ocr_response(raw, send_w, send_h)
+        regions = self._parse_ocr_response(raw, send_w, send_h, img=send_img)
 
         # Scale bounding boxes back to original image dimensions
         img_w, img_h = send_w, send_h
@@ -731,13 +766,19 @@ class ImageTranslator:
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
     @staticmethod
-    def _parse_ocr_response(raw: str, img_w: int = 0, img_h: int = 0) -> list[TextRegion]:
+    def _parse_ocr_response(raw: str, img_w: int = 0, img_h: int = 0,
+                            img: Image.Image | None = None) -> list[TextRegion]:
         """Parse vision model JSON output into TextRegion list.
 
         Handles both standard {"bbox": [x1,y1,x2,y2]} format and
         Qwen's {"bbox_2d": [x1,y1,x2,y2]} normalized coordinate format.
-        Coordinates within [0, 1000] are treated as normalized (the prompt asks
-        for 0-999); anything larger is taken as pixels.
+
+        Each axis is read on its own: the prompt asks for a 0-999 scale, but
+        Qwen 3.5 often answers x on that scale and y in pixels (a 533x80
+        button came back as [205, 18, 794, 63]). An axis with values above
+        the image size can't be pixels; one above 1000 can't be 0-999. When
+        both fit, ``img`` decides: the reading whose boxes hold more text
+        edges wins. Without ``img`` the scale the prompt asked for is used.
         """
         data = _extract_json(raw, "[")
         if data is None:
@@ -758,27 +799,30 @@ class ImageTranslator:
                 continue
             regions.append(TextRegion(text=t, bbox=coords))
 
-        # Normalize coordinates from [0, 999] to pixel space
-        # Qwen always returns normalized coords regardless of prompt instructions
         if regions and img_w > 0 and img_h > 0:
-            max_x = max(max(r.bbox[0], r.bbox[2]) for r in regions)
-            max_y = max(max(r.bbox[1], r.bbox[3]) for r in regions)
-
-            # The prompt requests 0-999 normalized coords; only values
-            # above 1000 can be pixel coordinates
-            is_normalized = max_x <= 1000 and max_y <= 1000
-            if is_normalized:
-                # Qwen uses [0, 999] scale (1000 divisions)
-                sx = img_w / 999.0
-                sy = img_h / 999.0
-                for r in regions:
-                    x1, y1, x2, y2 = r.bbox
-                    r.bbox = (
-                        int(x1 * sx), int(y1 * sy),
-                        int(x2 * sx), int(y2 * sy),
-                    )
-                log.debug("OCR coords normalized from [0,999] to [0,%dx%d]",
-                          img_w, img_h)
+            sx = _axis_scale([v for r in regions for v in (r.bbox[0], r.bbox[2])], img_w)
+            sy = _axis_scale([v for r in regions for v in (r.bbox[1], r.bbox[3])], img_h)
+            # One axis plainly in pixels (above 1000): the model answered in
+            # pixels, so read the other axis the same way.
+            if sx == 1.0 and sy is None:
+                sy = 1.0
+            elif sy == 1.0 and sx is None:
+                sx = 1.0
+            if sx is None or sy is None:
+                # Ambiguous axis: try both readings against the pixels
+                xs = [sx] if sx is not None else [img_w / 999.0, 1.0]
+                ys = [sy] if sy is not None else [img_h / 999.0, 1.0]
+                if img is not None:
+                    edges = _edge_mask(img, img_w, img_h)
+                    sx, sy = max(((a, b) for a in xs for b in ys),
+                                 key=lambda s: _edge_hits(edges, regions, *s))
+                else:
+                    sx, sy = xs[0], ys[0]
+            for r in regions:
+                x1, y1, x2, y2 = r.bbox
+                r.bbox = (x1 * sx, y1 * sy, x2 * sx, y2 * sy)
+            log.debug("OCR coords scaled by x%.3f y%.3f to %dx%d",
+                      sx, sy, img_w, img_h)
 
         # Convert any remaining float coords to int
         for r in regions:

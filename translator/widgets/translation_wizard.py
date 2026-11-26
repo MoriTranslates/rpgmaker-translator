@@ -66,6 +66,28 @@ class TranslationWizard(QDialog):
 
     # ── UI ──────────────────────────────────────────────────────────
 
+    def _add_buttons_notice(self, layout):
+        """'Buttons detected' line: text drawn into images isn't in the
+        dialogue, so the wizard can't translate it; Redraw Buttons can."""
+        from ..button_redraw import describe_detected, detect_buttons
+        from ..image_translator import ImageTranslator
+        project = self.mw.project
+        path = project.project_path if project else ""
+        img_dir = ImageTranslator.find_img_dir(path) if path else None
+        found = detect_buttons(img_dir) if img_dir else []
+        self.buttons_found = found
+        if not found:
+            return
+        row = QHBoxLayout()
+        note = QLabel("<b>Buttons detected:</b> " + describe_detected(found)
+                      + ". The wizard doesn't change images; use Redraw Buttons.")
+        note.setWordWrap(True)
+        row.addWidget(note, 1)
+        btn = QPushButton("Redraw Buttons…")
+        btn.clicked.connect(self.mw._redraw_buttons)
+        row.addWidget(btn)
+        layout.addLayout(row)
+
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
@@ -86,6 +108,8 @@ class TranslationWizard(QDialog):
             note.setAlignment(Qt.AlignmentFlag.AlignCenter)
             note.setWordWrap(True)
             layout.addWidget(note)
+
+        self._add_buttons_notice(layout)
 
         layout.addSpacing(10)
 
@@ -997,6 +1021,11 @@ class TranslationWizard(QDialog):
         if remaining:
             parts.append(f"{remaining} remaining")
         summary = " | ".join(parts)
+        found = getattr(self, "buttons_found", None)
+        if found:
+            from ..button_redraw import describe_detected
+            summary += ("\n\nNext: " + describe_detected(found)
+                        + ". Translate > Redraw Buttons makes English ones.")
         if problems:
             summary += "\n\n" + "\n\n".join(problems)
         self.detail_label.setText(summary)

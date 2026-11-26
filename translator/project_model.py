@@ -9,6 +9,7 @@ from datetime import date
 from typing import Optional
 from .narration import clean_narrators
 from .speakers import clean_speaker_genders
+from .button_redraw import clean_button_labels
 
 # Version of the entry-ID numbering written into saved states / patches.
 #   1 (or missing) — legacy: MV/MZ event IDs used one counter shared by all
@@ -96,6 +97,9 @@ class TranslationProject:
     # Whose first-person view narration is in: [main, optional second]
     # (see narration.py). Older saves load with [].
     narrators: list = field(default_factory=list)
+    # Redraw Buttons: "choices/C_はい.rpgmvp" -> [japanese, english].
+    # Older saves load with {}.
+    button_labels: dict = field(default_factory=dict)
     # Entry-ID scheme of ``entries`` (see ID_SCHEME).  Fresh parses are
     # current; load_state() reports what the file was written with.
     id_scheme: int = ID_SCHEME
@@ -176,6 +180,8 @@ class TranslationProject:
             data["speaker_genders"] = self.speaker_genders
         if self.narrators:
             data["narrators"] = self.narrators
+        if self.button_labels:
+            data["button_labels"] = self.button_labels
         if self.migration_orphans:
             data["migration_orphans"] = self.migration_orphans
         if self.yep_wrap_space:
@@ -219,6 +225,7 @@ class TranslationProject:
         project.speaker_genders = clean_speaker_genders(
             data.get("speaker_genders", {}))
         project.narrators = clean_narrators(data.get("narrators", []))
+        project.button_labels = clean_button_labels(data.get("button_labels", {}))
         # Missing key = written before ID schemes existed (legacy scheme 1)
         project.id_scheme = _read_id_scheme(data)
         orphans = data.get("migration_orphans", [])
@@ -431,6 +438,8 @@ class TranslationProject:
             patch_data["speaker_genders"] = self.speaker_genders
         if self.narrators:
             patch_data["narrators"] = self.narrators
+        if self.button_labels:
+            patch_data["button_labels"] = self.button_labels
 
         # metadata.json — human-readable info
         metadata = {
@@ -509,6 +518,7 @@ class TranslationProject:
         project.speaker_genders = clean_speaker_genders(
             data.get("speaker_genders", {}))
         project.narrators = clean_narrators(data.get("narrators", []))
+        project.button_labels = clean_button_labels(data.get("button_labels", {}))
         # Patches made before ID schemes existed carry legacy IDs —
         # import_translations() remaps them onto the current scheme.
         project.id_scheme = _read_id_scheme(data)
