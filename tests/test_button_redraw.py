@@ -365,10 +365,11 @@ def test_dialog_ocr_fills_english_hint_and_unticks_english_only(qapp, tmp_path,
 
 # ── Button prompt, model choice, button detection ────────────────
 
-def test_translate_label_asks_for_a_short_button_label():
+def test_translate_label_asks_for_an_accurate_translation_first():
     c = _Client()
     assert BR.translate_label(c, "ボタン0") == "Button zero"
-    assert "short button label" in c.contexts[0]
+    assert "accurately" in c.contexts[0] and "button" in c.contexts[0]
+    assert "2 to 6 words" not in c.contexts[0]       # shortening is step 2
 
 
 @pytest.mark.parametrize("models, pick", [
@@ -429,11 +430,11 @@ def test_dialog_read_and_translate_runs_ocr_then_translation(qapp, tmp_path,
     dlg = ButtonRedrawDialog(img_dir, KEY, _Client())
     try:
         dlg._run_all()
-        for _ in range(50):
+        for _ in range(100):                 # until every phase has finished
             if dlg._worker:
                 dlg._worker.wait(5000)
             qapp.processEvents()
-            if all(dlg.table.item(r, COL_EN).text() for r in range(dlg.table.rowCount())):
+            if not dlg._phases and not (dlg._worker and dlg._worker.isRunning()):
                 break
         assert len(seen) == 4
         rows = {dlg.table.item(r, COL_FILE).text(): r for r in range(4)}
@@ -561,7 +562,7 @@ def test_translate_label_sends_scene_and_player():
     scene = BR.ChoiceScene("忘れない間に送ろうか？", ["送っておく", "後でいいだろう"])
     BR.translate_label(c, "送っておく", scene, "Mamoru")
     ctx = c.contexts[-1]
-    assert "short button label" in ctx and "Mamoru" in ctx
+    assert "accurately" in ctx and "Mamoru" in ctx
     assert "送っておく / 後でいいだろう" in ctx and "忘れない間に送ろうか？" in ctx
     BR.translate_label(c, "はい")                      # no scene: hint only
     assert "lines just before" not in c.contexts[-1]
@@ -580,5 +581,100 @@ def test_dialog_sends_the_scene_for_each_button(qapp, tmp_path):
         qapp.processEvents()
         assert any("前の台詞" in x and "Mamoru" in x for x in c.contexts)
         assert all(dlg.table.item(r, COL_EN).text() for r in range(4))
+    finally:
+        dispose(dlg)
+
+
+# ── Two steps: full translation, then shorten only long labels ───
+
+class _ChatClient(_Client):
+    """translate() for step 1, _chat() for step 2 (shortening)."""
+
+    def __init__(self, short="Keep Helping Me", model="m"):
+        super().__init__()
+        self.short = short
+        self.model = model
+        self.chats = 0
+        self.unloads = 0
+
+    def _base_options(self, **k):
+        return k
+
+    def _chat(self, messages, **k):
+        self.chats += 1
+        return {"message": {"content": self.short}}
+
+    def _strip_thinking(self, s):
+        return s
+
+    def unload_models(self):
+        self.unloads += 1
+        return 1
+
+
+@pytest.mark.parametrize("reply, english, out", [
+    ("Keep Helping Me", "I want you to keep helping me from now on.", "Keep helping me"),
+    ("Talk To Yukiko", "I would like to talk to Yukiko about it.", "Talk to Yukiko"),
+    ("", "Long English text here.", "Long English text here."),
+    ("これ", "Long English text here.", "Long English text here."),
+    ("Much longer than the original English", "Short.", "Short."),
+])
+def test_shorten_label(reply, english, out):
+    assert BR.shorten_label(_ChatClient(reply), "協力して", english) == out
+
+
+def test_fits_only_flags_long_text():
+    blank = BR.build_blank([_button(i) for i in range(6)])
+    assert BR.fits(blank, "Yes", FONT)
+    assert not BR.fits(blank, "I want the two of you to keep loving each other "
+                              "much more than before, always", FONT)
+
+
+def test_read_and_translate_runs_phases_and_shortens_only_long(qapp, tmp_path,
+                                                               monkeypatch):
+    from translator.image_translator import ImageTranslator, TextRegion
+    from translator.widgets.button_redraw_dialog import (COL_EN, COL_FILE,
+                                                         ButtonRedrawDialog)
+    img_dir, names = _game(tmp_path)
+    monkeypatch.setattr(ImageTranslator, "ocr_image",
+                        lambda self, p: [TextRegion("ボタン", (0, 0, 1, 1))])
+    main = _ChatClient()
+    main.translate = lambda text, context="", field="": (
+        "Yes" if text == "ボタン0" else
+        "I want you to keep helping me from now on, always and forever")
+    dlg = ButtonRedrawDialog(img_dir, KEY, main)
+    try:
+        dlg._run_all()
+        for _ in range(100):
+            if dlg._worker:
+                dlg._worker.wait(5000)
+            qapp.processEvents()
+            if not dlg._phases and not dlg._worker.isRunning():
+                break
+        rows = {dlg.table.item(r, COL_FILE).text(): r for r in range(4)}
+        assert dlg.table.item(rows[names[0]], COL_EN).text() == "Yes"     # fits: kept
+        assert dlg.table.item(rows[names[1]], COL_EN).text() == "Keep helping me"
+        assert main.chats == 3                       # only the 3 long ones
+    finally:
+        dispose(dlg)
+
+
+def test_models_are_swapped_not_stacked(qapp, tmp_path, monkeypatch):
+    """Image model and main model differ: unload before each switch."""
+    from translator.widgets.button_redraw_dialog import ButtonRedrawDialog
+    img_dir, _ = _game(tmp_path)
+    main = _ChatClient(model="sugoi")
+    main.provider = "Ollama (Local)"
+    dlg = ButtonRedrawDialog(img_dir, KEY, main)
+    try:
+        image = _ChatClient(model="qwen")
+        dlg._ai = image
+        dlg._only(image)
+        dlg._only(image)                 # same model again: no extra unload
+        dlg._only(main)
+        assert main.unloads == 2
+        dlg._ai = main                   # one model for both: never unload
+        dlg._only(main)
+        assert main.unloads == 2
     finally:
         dispose(dlg)

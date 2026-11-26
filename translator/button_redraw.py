@@ -192,15 +192,16 @@ def _file_bytes(path: str) -> bytes:
 
 # ── Translating and models ───────────────────────────────────────
 
-# Sent as context with every label. Without it Qwen answered with full
-# sentences ("I want you to continue cooperating with me from now on.") and
-# lost who a choice is about (二人 -> "us" instead of "you two").
+# Two steps (tested on game 2's ten hardest buttons): asking for a short
+# label in one go made models drop meaning (その提案はのめない -> "I can't
+# make that proposal"). So step 1 translates fully and accurately (the main
+# model, e.g. Sugoi), and step 2 shortens only labels too long for the
+# button (the image model, e.g. Qwen).
 BUTTON_HINT = (
-    "This text is printed on a small game button: a choice the player picks "
-    "or a menu command. Translate it as a short button label of about 2 to 6 "
-    "words, not a long sentence. Keep the meaning, any negation, and who it "
-    "is about: a choice is the player character speaking or acting, and "
-    "二人 means 'you two'.")
+    "This text is printed on a game button: a choice the player picks or a "
+    "menu command. Translate it accurately and naturally. Keep the meaning, "
+    "any negation, and who it is about: a choice is the player character "
+    "speaking or acting, and 二人 means 'you two'.")
 
 
 @dataclass
@@ -247,7 +248,7 @@ def choice_scenes(entries) -> dict[str, ChoiceScene]:
 
 def translate_label(client, japanese: str, scene: ChoiceScene | None = None,
                     player: str = "") -> str:
-    """English for one button label, asked for as a short label.
+    """Step 1: a full, accurate English translation of one button label.
 
     ``scene`` (from choice_scenes) and ``player`` (the protagonist's name)
     tell the model who is choosing and what about: alone, 送っておく came
@@ -261,6 +262,42 @@ def translate_label(client, japanese: str, scene: ChoiceScene | None = None,
     if scene and scene.before:
         hint += "\nThe lines just before this choice:\n" + scene.before
     return client.translate(japanese, context=hint, field="choice").strip()
+
+
+_SHORTEN_SYSTEM = "You turn translated game choices into short button labels."
+_SHORTEN_USER = (
+    "Japanese: {jp}\nFull English: {en}\n\n"
+    "Rewrite the English as a short button label of 2 to 6 words with exactly "
+    "the same meaning: keep any negation and who does what to whom. Use "
+    "normal capitalisation (only the first word and names). Reply with the "
+    "label only.")
+
+
+def shorten_label(client, japanese: str, english: str) -> str:
+    """Step 2: a shorter label with the same meaning, for buttons it overflows.
+
+    Falls back to ``english`` if the reply is empty or no shorter. Words the
+    model capitalised that weren't capitalised in ``english`` are lowered
+    (Qwen title-cased whole labels: "Keep Working Together").
+    """
+    msgs = [{"role": "system", "content": _SHORTEN_SYSTEM},
+            {"role": "user", "content": _SHORTEN_USER.format(jp=japanese, en=english)}]
+    data = client._chat(messages=msgs,
+                        options=client._base_options(num_predict=64, num_ctx=2048))
+    raw = client._strip_thinking((data.get("message", {}) or {}).get("content", ""))
+    lines = [ln.strip().strip('"').strip() for ln in (raw or "").splitlines() if ln.strip()]
+    if not lines or JAPANESE_RE.search(lines[0]) or len(lines[0]) >= len(english):
+        return english
+    known = set(english.split())
+    words = lines[0].split()
+    fixed = [words[0]] + [w if w in known or not w[:1].isupper() else w[:1].lower() + w[1:]
+                          for w in words[1:]]
+    return " ".join(fixed)
+
+
+def fits(blank: "Blank", text: str, font_path: str | None = None) -> bool:
+    """True if ``text`` fits the button at its normal size (no shrink/wrap)."""
+    return not render_button(blank, text, font_path)[1]
 
 
 IMAGE_MODEL = "qwen3.5:9b"     # recommended: reads stylised game text well

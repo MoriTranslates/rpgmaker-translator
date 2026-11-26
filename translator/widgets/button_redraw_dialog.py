@@ -1,14 +1,14 @@
 """Redraw Buttons: new English buttons for games with text drawn in images.
 
-Steps, top to bottom in the dialog:
-1. Pick the folder (img/choices for picture choices).
-2. Japanese labels come from the file names; "Read text (OCR)" fills the
-   ones whose name has none. Labels can be saved to / loaded from a CSV.
-3. "Translate empty" fills the English column with the AI; any cell can be
-   edited by hand.
-4. Each style (same size and look) gets one new button design; the
-   preview shows the selected row. "Write ticked buttons" puts them in the
-   game, keeping the originals in img_original/.
+1. Read and translate, in phases with one model loaded at a time: the
+   image model (Qwen) reads the buttons, the main model (e.g. Sugoi)
+   translates them fully with the lines before each choice, and the image
+   model shortens only the English too long for its button.
+2. The translator checks each row (original button, Japanese, English,
+   new button) and edits anything. Nothing is written yet.
+3. Continue: make buttons writes the ticked ones, one new button design
+   per style, keeping the originals in img_original/.
+Labels can also be saved to / loaded from a CSV.
 """
 
 from __future__ import annotations
@@ -37,9 +37,13 @@ class LabelWorker(QThread):
     row_failed = pyqtSignal(int, str)      # row, error
     progress = pyqtSignal(int, int)
 
-    def __init__(self, fn, jobs, parent=None):
-        """``fn(payload) -> str``; ``jobs`` = [(row, payload)]."""
+    def __init__(self, fn, jobs, parent=None, prepare=None):
+        """``fn(payload) -> str``; ``jobs`` = [(row, payload)].
+
+        ``prepare`` runs first in the thread (unloading the other model).
+        """
         super().__init__(parent)
+        self._prepare = prepare
         self._fn = fn
         self._jobs = jobs
         self._stop = False
@@ -48,6 +52,8 @@ class LabelWorker(QThread):
         self._stop = True
 
     def run(self):
+        if self._prepare:
+            self._prepare()
         for i, (row, payload) in enumerate(self._jobs):
             if self._stop:
                 break
@@ -76,7 +82,7 @@ class ButtonRedrawDialog(QDialog):
         self._key = key
         self._client = client
         self._ai = client          # replaced by the image model picked below
-        self._chain = False        # Read and translate: OCR, then translate
+        self._phases: list = []    # Read and translate: the phases still to run
         self._stopped = False
         self._has_models = False
         self._saved = dict(saved or {})
@@ -167,9 +173,9 @@ class ButtonRedrawDialog(QDialog):
                                  "English, then translate the empty English")
         self.auto_btn.clicked.connect(self._run_all)
         self.ocr_btn = QPushButton("Read text (OCR)")
-        self.ocr_btn.clicked.connect(self._run_ocr)
+        self.ocr_btn.clicked.connect(lambda: self._run_one(self._run_ocr))
         self.tr_btn = QPushButton("Translate empty")
-        self.tr_btn.clicked.connect(self._run_translate)
+        self.tr_btn.clicked.connect(lambda: self._run_one(self._run_translate))
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.clicked.connect(self._stop_worker)
         self.stop_btn.setEnabled(False)
@@ -339,19 +345,22 @@ class ButtonRedrawDialog(QDialog):
             self._refresh_new()
             self._preview()
 
-    # ── OCR / translate ─────────────────────────────────────────────
-    def _start(self, fn, jobs, col):
+    # ── OCR / translate / shorten ───────────────────────────────────
+    def _start(self, fn, jobs, col, model) -> bool:
+        """Run ``fn`` over ``jobs`` in a worker; False if there was nothing to do.
+
+        ``model`` is the client this phase uses: any other model is unloaded
+        first, so the 12 GB card never holds two at once.
+        """
         if not jobs:
-            self.status.setText("Nothing to do: every row already has text there.")
-            return
-        self._worker = LabelWorker(fn, jobs, self)
-        if col is None:
-            self._worker.row_done.connect(self._ocr_result)
-        else:
-            self._worker.row_done.connect(lambda r, t: self._set_cell(r, col, t))
-        self._worker.row_failed.connect(
-            lambda r, e: self.table.item(r, COL_NOTE).setText(f"failed: {e}"))
-        self._worker.progress.connect(lambda d, t: (self.bar.setMaximum(t), self.bar.setValue(d)))
+            return False
+        self._worker = LabelWorker(fn, jobs, self, prepare=lambda: self._only(model))
+        # Bound methods, not lambdas: Qt drops them if the dialog is gone
+        # before a queued signal arrives (a lambda would touch a deleted table)
+        self._phase_col = col
+        self._worker.row_done.connect(self._row_done)
+        self._worker.row_failed.connect(self._row_failed)
+        self._worker.progress.connect(self._progress)
         self._worker.finished.connect(self._worker_done)
         for b in (self.auto_btn, self.ocr_btn, self.tr_btn, self.write_btn,
                   self.folder, self.style, self.model):
@@ -360,6 +369,35 @@ class ButtonRedrawDialog(QDialog):
         self.bar.setValue(0)
         self.bar.show()
         self._worker.start()
+        return True
+
+    def _only(self, model):
+        """Unload Ollama models before a phase that uses a different model.
+
+        Runs in the worker thread (unloading can take seconds). Only for
+        local Ollama, and only when the image model differs from the main
+        one; a failed unload is logged by the client and the phase still runs.
+        """
+        if (self._ai is self._client
+                or getattr(self._client, "provider", "") != "Ollama (Local)"):
+            return
+        if getattr(self, "_loaded", None) is not model:
+            self._client.unload_models()
+            self._loaded = model
+
+    def _row_done(self, row: int, text: str):
+        if self._phase_col is None:
+            self._ocr_result(row, text)
+        else:
+            self._set_cell(row, self._phase_col, text)
+
+    def _row_failed(self, row: int, error: str):
+        if row < self.table.rowCount():
+            self.table.item(row, COL_NOTE).setText(f"failed: {error}")
+
+    def _progress(self, done: int, total: int):
+        self.bar.setMaximum(total)
+        self.bar.setValue(done)
 
     def _set_cell(self, row, col, text):
         if row < self.table.rowCount():
@@ -372,25 +410,33 @@ class ButtonRedrawDialog(QDialog):
         self.model.setEnabled(self._has_models)
         self.stop_btn.setEnabled(False)
         self.bar.hide()
-
-        if self._chain:
-            self._chain = False
-            if not self._stopped:
-                self._run_translate()
+        self._next_phase()
 
     def _stop_worker(self):
         self._stopped = True
+        self._phases = []
         if self._worker:
             self._worker.stop()
 
     def _run_all(self):
-        """Step 1: OCR where needed, then translate the empty English."""
-        self._chain = True
+        """Step 1, in phases: read (image model), translate fully (main
+        model), then shorten only the labels too long for their button
+        (image model)."""
         self._stopped = False
-        self._run_ocr()
+        self._phases = [self._run_ocr, self._run_translate, self._run_shorten]
+        self._next_phase()
+
+    def _run_one(self, phase):
+        self._stopped = False
+        self._phases = [phase]
+        self._next_phase()
+
+    def _next_phase(self):
+        while self._phases and not self._stopped:
+            if self._phases.pop(0)():
+                return                     # a worker is running this phase
         if not (self._worker and self._worker.isRunning()):
-            self._chain = False            # nothing to read: go on now
-            self._run_translate()
+            self.status.setText("Done. Check the English, then Continue: make buttons.")
 
     def _fill_models(self):
         """Image-capable Ollama models; qwen3.5:9b preferred."""
@@ -445,7 +491,7 @@ class ButtonRedrawDialog(QDialog):
         def read(path):
             regions = tr.ocr_image(path)
             return " ".join(x.text for x in regions)
-        self._start(read, jobs, None)
+        return self._start(read, jobs, None, self._ai)
 
     def _ocr_result(self, row: int, text: str):
         if row >= self.table.rowCount():
@@ -471,9 +517,30 @@ class ButtonRedrawDialog(QDialog):
 
         def tr(job):
             jp, stem = job
-            return BR.translate_label(self._ai, jp, self._scenes.get(stem),
+            # The main model (e.g. Sugoi) translates: it reads the grammar
+            # of short choices better than the image model.
+            return BR.translate_label(self._client, jp, self._scenes.get(stem),
                                       self._player)
-        self._start(tr, jobs, COL_EN)
+        return self._start(tr, jobs, COL_EN, self._client)
+
+    def _run_shorten(self):
+        """Shorten English that doesn't fit its button at normal size."""
+        try:
+            blank = self._blank()
+        except ValueError:
+            return False
+        if blank is None:
+            return False
+        jobs = []
+        for r in range(self.table.rowCount()):
+            jp = self.table.item(r, COL_JP).text().strip()
+            en = self.table.item(r, COL_EN).text().strip()
+            if jp and en and not BR.fits(blank, en, self._font):
+                jobs.append((r, (jp, en)))
+
+        def short(job):
+            return BR.shorten_label(self._ai, *job)
+        return self._start(short, jobs, COL_EN, self._ai)
 
     # ── CSV ─────────────────────────────────────────────────────────
     def _save_csv(self):
