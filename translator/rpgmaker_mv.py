@@ -283,6 +283,26 @@ _IMAGE_NAME_NOTE = ("Image file name used by a plugin: kept in Japanese so the "
                     "picture still loads. Set to Reviewed to translate it anyway.")
 
 
+_PICTURE_CHOICE_NOTE = ("Picture choice: this text is the file name of a button "
+                        "image (picture-choice plugin), so it stays as is or the "
+                        "game cannot load the button. Translate the image "
+                        "instead, or set to Reviewed to translate it anyway.")
+
+
+def _is_picture_choice(value: str, stems: frozenset) -> bool:
+    """True if a Show Choices option is really an image file name.
+
+    Picture-choice plugins (kz_PictureChoices and similar) read the option
+    text as ``<image name>|x|y``: ``C_はい|350|200`` shows
+    img/choices/C_はい.png.  Translating it makes the game fail with
+    "Failed to load: img/choices/C_Yes.png".  Only an exact file name
+    counts, so ordinary choices that happen to share a prefix with a
+    picture stay translatable.
+    """
+    stem = value.split("|", 1)[0].strip()
+    return bool(stem) and stem in stems
+
+
 def _is_image_ref(value: str, stems: frozenset) -> bool:
     """True if *value* names an image: exactly, or as the prefix of numbered
     frames (``<baseName:ルキウス騎乗待機>`` -> ルキウス騎乗待機1.png ...).
@@ -2307,14 +2327,18 @@ class RPGMakerMVParser:
                 ctx = "\n---\n".join(recent_ctx) if recent_ctx else ""
                 for ci, choice in enumerate(choices):
                     if isinstance(choice, str) and self._should_extract(choice):
+                        is_pic = _is_picture_choice(
+                            choice, getattr(self, "_image_names", frozenset()))
                         entries.append(TranslationEntry(
                             id=f"{filename}/{prefix}/choice_{counters['choice']}_{ci}",
                             file=filename,
                             field="choice",
                             original=choice,
-                            context=ctx,
+                            context=_PICTURE_CHOICE_NOTE if is_pic else ctx,
+                            status="skipped" if is_pic else "untranslated",
                         ))
-                        recent_ctx.append(choice)
+                        if not is_pic:
+                            recent_ctx.append(choice)
 
             # Scrolling Text
             if code == CODE_SCROLL_TEXT:
@@ -3017,6 +3041,21 @@ class RPGMakerMVParser:
         scan_entries = []
         speaker_lookup = dict(global_speakers) if global_speakers else {}
         for entry in entries:
+            if (entry.field == "choice" and entry.status != "reviewed"
+                    and _is_picture_choice(
+                        entry.original,
+                        getattr(self, "_image_names", frozenset()))):
+                # Picture-choice file name (kz_PictureChoices & co.).
+                # Projects made before these were skipped may hold a machine
+                # translation: keep the name so the button still loads.
+                # Reviewed = the user's call, so it is written.
+                if entry.translation and entry.translation != entry.original:
+                    self.image_names_kept = getattr(
+                        self, "image_names_kept", 0) + 1
+                    log.info("Export kept picture-choice name %r in %s "
+                             "(set it to Reviewed to translate it)",
+                             entry.original, entry.id)
+                continue
             if entry.field in ("dialog", "scroll_text", "choice", "comment"):
                 scan_entries.append(entry)
             elif entry.field == "speaker_name":
