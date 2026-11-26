@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import wordninja
 
 from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
-from .output_checks import (MESSAGE_FIELDS, VN_ENGINES, normalise_fullwidth,
+from .output_checks import (is_message_field, VN_ENGINES, normalise_fullwidth,
                             restore_speech_quotes, romanised_sfx,
                             strip_prompt_leaks)
 
@@ -478,7 +478,7 @@ def _fix_prompt_leak(entry, retranslate_ids: list) -> bool:
 
 def _fix_missing_speech_quotes(entry) -> bool:
     """Put back "..." on a 「...」 line whose translation lost its quotes."""
-    if entry.field not in MESSAGE_FIELDS:
+    if not is_message_field(entry.field):
         return False
     fixed = restore_speech_quotes(entry.original or "", entry.translation)
     if fixed == entry.translation:

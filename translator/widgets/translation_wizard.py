@@ -1021,9 +1021,14 @@ class TranslationWizard(QDialog):
         if remaining:
             parts.append(f"{remaining} remaining")
         summary = " | ".join(parts)
-        found = getattr(self, "buttons_found", None)
+        found = None
+        if getattr(self, "buttons_found", None):
+            # Checked again: buttons redrawn meanwhile no longer count
+            from ..button_redraw import describe_detected, detect_buttons
+            from ..image_translator import ImageTranslator
+            img_dir = ImageTranslator.find_img_dir(self.mw.project.project_path or "")
+            found = detect_buttons(img_dir) if img_dir else []
         if found:
-            from ..button_redraw import describe_detected
             summary += ("\n\nNext: " + describe_detected(found)
                         + ". Translate > Redraw Buttons makes English ones.")
         if problems:

@@ -217,6 +217,25 @@ def _bad_char(c: str) -> bool:
     return unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp", "Cn")
 
 
+def _odd_chars(new: str, old: str) -> bool:
+    """Invisible or unusual characters a fix brings in that the line lacked.
+
+    Private-use characters, the ideographic space and combining marks not
+    sitting on a letter (a variation selector, a stray accent) are refused
+    unless the current English already has them: an accent on a letter
+    (Café written with a combining mark) is fine.
+    """
+    for i, c in enumerate(new):
+        if c in old:
+            continue
+        cat = unicodedata.category(c)
+        if cat == "Co" or c == chr(0x3000):
+            return True
+        if cat in ("Mn", "Me") and not (i and new[i - 1].isalpha()):
+            return True
+    return False
+
+
 def _quoted(text: str) -> tuple[bool, bool]:
     body = _LEAD_TAGS_RE.sub("", text or "").rstrip()
     return body.startswith(('"', chr(0x201C))), body.endswith(('"', chr(0x201D)))
@@ -234,12 +253,18 @@ def validate(p: Proposal, entry) -> str:
         return "the English was edited since the review"
     if entry.status == "reviewed":
         return "line is marked Reviewed"
+    # apply() only changes translated lines of the review fields: say so
+    # here instead of dropping the fix without a word.
+    if entry.status != "translated":
+        return f"line is {entry.status}, not translated"
+    if entry.field not in REVIEW_FIELDS:
+        return f"'{entry.field}' lines aren't changed by the review"
     new = p.new
     if not new.strip():
         return "empty fix"
     if new == p.old:
         return "no change"
-    if any(_bad_char(c) for c in new):
+    if any(_bad_char(c) for c in new) or _odd_chars(new, p.old):
         return "fix contains control or invisible characters"
     if JAPANESE_RE.search(CONTROL_CODE_RE.sub("", new).translate(_NO_BRACKETS)):
         return "fix contains Japanese"

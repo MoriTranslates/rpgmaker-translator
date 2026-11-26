@@ -2212,7 +2212,7 @@ class AIClient:
             result = parts[0] + '\n' + '\n'.join(
                 line.lstrip() for line in parts[1:])
         if (original and self.target_language != "Pig Latin"
-                and field in output_checks.MESSAGE_FIELDS
+                and output_checks.is_message_field(field)
                 and self.project_type not in _VN_ENGINES):
             result = output_checks.restore_speech_quotes(original, result)
         return result

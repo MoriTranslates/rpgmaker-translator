@@ -6737,6 +6737,10 @@ class MainWindow(QMainWindow):
     def _redraw_buttons(self):
         """Translate > Redraw Buttons: new English buttons for image text."""
         from ..image_translator import ImageTranslator, read_encryption_key
+        # The tool translates on the shared client and unloads Ollama
+        # models between phases: never while a batch or other step runs.
+        if not self._check_engine_idle():
+            return
         path = self.project.project_path if self.project else ""
         img_dir = ImageTranslator.find_img_dir(path) if path else None
         if not img_dir:
@@ -6751,11 +6755,12 @@ class MainWindow(QMainWindow):
                                  saved=self.project.button_labels, parent=self,
                                  scenes=choice_scenes(self.project.entries),
                                  player=player if isinstance(player, str) else "")
+        was_busy = self._busy
         self._busy = True
         try:
             dlg.exec()
         finally:
-            self._busy = False
+            self._busy = was_busy
         labels = dlg.labels()
         if labels != self.project.button_labels:
             self.project.button_labels = labels

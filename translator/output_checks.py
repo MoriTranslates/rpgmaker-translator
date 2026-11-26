@@ -133,18 +133,31 @@ def normalise_fullwidth(output: str, target_language: str = "English") -> str:
         return output
     out = []
     for piece, is_code in _split_codes(output):
-        out.append(piece if is_code else _convert_fullwidth(piece))
+        prev = out[-1][-1:] if out else ""
+        out.append(piece if is_code else _convert_fullwidth(piece, prev))
     return "".join(out)
 
 
-def _convert_fullwidth(text: str) -> str:
+# Line-start syntax in VN scripts (TyranoScript/KiriKiri): label, tag,
+# comment, speaker. Their full-width forms stay full-width at a line start.
+_LINE_START_SYNTAX = frozenset("*@;#")
+
+
+def _convert_fullwidth(text: str, prev: str = "") -> str:
     """Convert one code-free piece; a space is added only after a converted
-    mark glued to a letter ("Yes、that" -> "Yes, that"), never elsewhere."""
+    mark glued to a letter ("Yes、that" -> "Yes, that"), never elsewhere.
+
+    ``prev`` is the character before the piece. A mark right after a
+    backslash is kept (backslash + ！ would become the wait code), and so
+    is ＊＠；＃ at the start of a line (it would become VN script syntax).
+    """
     out = []
     n = len(text)
     for i, ch in enumerate(text):
         rep = _FULLWIDTH_MAP.get(ord(ch))
-        if rep is None:
+        before = text[i - 1] if i else prev
+        if (rep is None or before == "\\"
+                or (rep in _LINE_START_SYNTAX and before in ("", "\n"))):
             out.append(ch)
             continue
         if rep == " " and out and out[-1] == " ":
@@ -156,8 +169,10 @@ def _convert_fullwidth(text: str) -> str:
     return "".join(out)
 
 
+# A backslash code typed with full-width brackets (\C［２］) is kept whole:
+# converting part of it gives a half-code like \C［2］.
 _PROTECTED_RE = re.compile(
-    r"«CODE\d+»|(?:" + CONTROL_CODE_RE.pattern + ")")
+    r"«CODE\d+»|\\[A-Za-z]+［[^］\n]*］|(?:" + CONTROL_CODE_RE.pattern + ")")
 
 
 def _split_codes(text: str) -> list[tuple[str, bool]]:
@@ -334,6 +349,14 @@ VN_ENGINES = frozenset({"tyranoscript", "kirikiri", "crowd", "renpy"})
 # name, a database text or a script string must never gain quotes (a
 # quoted script string breaks the game's JavaScript).
 MESSAGE_FIELDS = frozenset({"dialog", "dialogue", "scroll_text", "choice"})
+# Wolf RPG names its message and choice fields by position (Ev1/p0/msg3,
+# CE5/choice2_0); /strN (script strings) and database fields aren't messages.
+_WOLF_MESSAGE_RE = re.compile(r"(?:^|/)(?:msg\d+|choice\d+_\d+)$")
+
+
+def is_message_field(field: str) -> bool:
+    """True if ``field`` holds text shown as a message (quotes may be restored)."""
+    return field in MESSAGE_FIELDS or bool(_WOLF_MESSAGE_RE.search(field or ""))
 
 _JP_SPEECH_OPEN = chr(0x300C)    # 「
 _JP_SPEECH_CLOSE = chr(0x300D)   # 」

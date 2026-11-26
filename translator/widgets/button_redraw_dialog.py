@@ -52,6 +52,8 @@ class LabelWorker(QThread):
         self._stop = True
 
     def run(self):
+        if self._stop:
+            return
         if self._prepare:
             self._prepare()
         for i, (row, payload) in enumerate(self._jobs):
@@ -84,7 +86,9 @@ class ButtonRedrawDialog(QDialog):
         self._ai = client          # replaced by the image model picked below
         self._phases: list = []    # Read and translate: the phases still to run
         self._stopped = False
+        self._closing = False
         self._has_models = False
+        self._ticks: dict[str, bool] = {}   # rel -> ticked, kept across styles
         self._saved = dict(saved or {})
         self._buttons: list[BR.ButtonFile] = []
         self._style_of: dict[str, int] = {}     # rel -> style index
@@ -115,8 +119,16 @@ class ButtonRedrawDialog(QDialog):
         subdirs = sorted(d for d in os.listdir(self._img_dir)
                          if os.path.isdir(os.path.join(self._img_dir, d)))
         self.folder.addItems(subdirs)
-        if "choices" in subdirs:
+        # Open on the folder with detected buttons; never scan a random
+        # folder (animations, pictures with hundreds of CGs) unasked.
+        found = BR.detect_buttons(self._img_dir)
+        if found:
+            self.folder.setCurrentText(found[0].subdir)
+        elif "choices" in subdirs:
             self.folder.setCurrentText("choices")
+        else:
+            self.folder.insertItem(0, "")
+            self.folder.setCurrentIndex(0)
         self.folder.currentTextChanged.connect(self._load_folder)
         top.addWidget(self.folder)
         top.addWidget(QLabel("Style:"))
@@ -150,6 +162,7 @@ class ButtonRedrawDialog(QDialog):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.itemSelectionChanged.connect(self._preview)
         self.table.itemChanged.connect(self._cell_changed)
+        self._edit_triggers = self.table.editTriggers()
         lay.addWidget(self.table, 1)
 
         prev = QHBoxLayout()
@@ -181,7 +194,7 @@ class ButtonRedrawDialog(QDialog):
         self.stop_btn.setEnabled(False)
         save_csv = QPushButton("Save CSV…")
         save_csv.clicked.connect(self._save_csv)
-        load_csv = QPushButton("Load CSV…")
+        load_csv = self.load_csv_btn = QPushButton("Load CSV…")
         load_csv.clicked.connect(self._load_csv)
         self.write_btn = QPushButton("Continue: make buttons")
         self.write_btn.setToolTip("Write the ticked buttons into the game")
@@ -236,9 +249,11 @@ class ButtonRedrawDialog(QDialog):
             self.table.insertRow(r)
             tick = QTableWidgetItem()
             tick.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-            # Already-replaced files start unticked: they may hold hand work
-            tick.setCheckState(Qt.CheckState.Unchecked if b.replaced or not is_buttons
-                               else Qt.CheckState.Checked)
+            # Already-replaced files start unticked: they may hold hand work.
+            # A tick the user (or OCR) changed is kept when styles switch.
+            ticked = self._ticks.get(b.rel, not (b.replaced or not is_buttons))
+            tick.setCheckState(Qt.CheckState.Checked if ticked
+                               else Qt.CheckState.Unchecked)
             self.table.setItem(r, COL_TICK, tick)
             f = QTableWidgetItem(os.path.basename(b.rel))
             f.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
@@ -256,7 +271,8 @@ class ButtonRedrawDialog(QDialog):
             self.table.item(r, COL_ORIG).setData(
                 Qt.ItemDataRole.DecorationRole, self._thumb(b.image))
         self.table.blockSignals(False)
-        self._refresh_new()
+        if is_buttons:
+            self._refresh_new()
         self.table.resizeRowsToContents()
         if self.table.rowCount():
             self.table.selectRow(0)
@@ -265,6 +281,10 @@ class ButtonRedrawDialog(QDialog):
         return self.table.item(row, COL_FILE).data(Qt.ItemDataRole.UserRole)
 
     def _cell_changed(self, item):
+        if item.column() == COL_TICK:
+            self._ticks[self._rel(item.row())] = (
+                item.checkState() == Qt.CheckState.Checked)
+            return
         if item.column() in (COL_JP, COL_EN):
             r = item.row()
             self._saved[self._rel(r)] = [self.table.item(r, COL_JP).text().strip(),
@@ -293,6 +313,11 @@ class ButtonRedrawDialog(QDialog):
             return
         b = next(x for x in self._buttons if x.rel == self._rel(r))
         self._show(self.before, b.image)
+        style = self._current_style()
+        if not BR.looks_like_buttons(style) and self.style.currentIndex() not in self._blanks:
+            self.after.setText("These don't look like buttons, so no new button is drawn "
+                               "here. Tick rows and press Continue to draw them anyway.")
+            return
         try:
             blank = self._blank()
         except ValueError as e:
@@ -363,8 +388,10 @@ class ButtonRedrawDialog(QDialog):
         self._worker.progress.connect(self._progress)
         self._worker.finished.connect(self._worker_done)
         for b in (self.auto_btn, self.ocr_btn, self.tr_btn, self.write_btn,
-                  self.folder, self.style, self.model):
+                  self.folder, self.style, self.model, self.load_csv_btn):
             b.setEnabled(False)
+        # No typing while results arrive: a reply would overwrite the edit
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.stop_btn.setEnabled(True)
         self.bar.setValue(0)
         self.bar.show()
@@ -405,8 +432,11 @@ class ButtonRedrawDialog(QDialog):
 
     def _worker_done(self):
         for b in (self.auto_btn, self.ocr_btn, self.tr_btn, self.write_btn,
-                  self.folder, self.style):
+                  self.folder, self.style, self.load_csv_btn):
             b.setEnabled(True)
+        self.table.setEditTriggers(self._edit_triggers)
+        if self._closing:
+            return
         self.model.setEnabled(self._has_models)
         self.stop_btn.setEnabled(False)
         self.bar.hide()
@@ -432,6 +462,9 @@ class ButtonRedrawDialog(QDialog):
         self._next_phase()
 
     def _next_phase(self):
+        if self._closing:
+            self._phases = []
+            return
         while self._phases and not self._stopped:
             if self._phases.pop(0)():
                 return                     # a worker is running this phase
@@ -571,8 +604,11 @@ class ButtonRedrawDialog(QDialog):
         for r in range(self.table.rowCount()):
             row = data.get(self._rel(r))
             if row:
-                self.table.item(r, COL_JP).setText(row[0])
-                self.table.item(r, COL_EN).setText(row[1])
+                # A blank cell in the file never wipes text already here
+                if row[0]:
+                    self.table.item(r, COL_JP).setText(row[0])
+                if row[1]:
+                    self.table.item(r, COL_EN).setText(row[1])
                 hit += 1
         self.status.setText(f"Loaded {hit} of {len(data)} labels for this style.")
 
@@ -587,17 +623,23 @@ class ButtonRedrawDialog(QDialog):
             return
         if not rows:
             return
-        if QMessageBox.question(
-                self, "Make buttons",
-                f"Make {len(rows)} new buttons and write them into the game?\n\n"
-                "The originals are kept in img_original/.") != QMessageBox.StandardButton.Yes:
+        bak = BR.backup_root(self._img_dir)
+        first = sum(1 for r in rows
+                    if not os.path.isfile(os.path.join(bak, self._rel(r))))
+        text = (f"Make {len(rows)} new buttons and write them into the game?\n\n"
+                "The originals are kept in img_original/.")
+        if first:
+            text += (f"\n\n{first} of them have no backup yet: the image in the game "
+                     "now is kept as the original. If you changed any of those by "
+                     "hand before, untick them first.")
+        if QMessageBox.question(self, "Make buttons", text) != QMessageBox.StandardButton.Yes:
             return
         try:
             blank = self._blank()
         except ValueError as e:
             QMessageBox.warning(self, "Can't make buttons", str(e))
             return
-        done, failed = 0, []
+        done, failed, overflow = 0, [], []
         for r in rows:
             rel = self._rel(r)
             im, note = BR.render_button(blank, self.table.item(r, COL_EN).text(), self._font)
@@ -609,13 +651,23 @@ class ButtonRedrawDialog(QDialog):
                 continue
             done += 1
             self.table.item(r, COL_NOTE).setText("written" + (f" ({note})" if note else ""))
+            if note.startswith("too long"):
+                overflow.append(os.path.basename(rel))
         msg = f"Wrote {done} of {len(rows)} buttons. Originals are in img_original/."
         if failed:
             msg += f"\n\n{len(failed)} failed:\n" + "\n".join(failed[:8])
-        (QMessageBox.warning if failed else QMessageBox.information)(
+        if overflow:
+            msg += (f"\n\n{len(overflow)} have text running past the button edges; "
+                    "shorten their English and make them again:\n" + "\n".join(overflow[:8]))
+        (QMessageBox.warning if failed or overflow else QMessageBox.information)(
             self, "Redraw Buttons", msg)
 
     def done(self, result):
+        """Close: stop the run for good. No later phase may start, unload
+        the main model or change labels the main window already saved."""
+        self._closing = True
+        self._stopped = True
+        self._phases = []
         if self._worker and self._worker.isRunning():
             self._worker.stop()
             self._worker.wait(30000)

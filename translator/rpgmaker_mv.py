@@ -144,10 +144,75 @@ def _js_escape_in(line: str, at: int, text: str) -> str:
         i -= 1
     if not quote:
         return text
-    # Backslashes are left as they are: script strings carry message codes
-    # already written in JS form (\\C[2]), which must not be doubled.
-    text = text.replace("\n", "\\n")
-    return re.sub(r"(?<!\\)" + re.escape(quote), "\\\\" + quote, text)
+    return _js_body(text, quote)
+
+
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def _js_body(text: str, quote: str) -> str:
+    """``text`` made safe as the body of a JS string literal quoted by ``quote``.
+
+    Script strings carry message codes already in JS form (``\\\\C[2]``), so
+    a valid escape pair is copied as it is and never doubled. Everything
+    that would end or break the literal is escaped: the quote itself, CR
+    and LF, a backslash at the very end, a ``\\x``/``\\u`` without its hex
+    digits, a backslash before a line break, and ``${`` in a template
+    literal (which would run code). Node accepts every result.
+    """
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            nxt = text[i + 1] if i + 1 < n else ""
+            if nxt == "x" and len(text[i + 2:i + 4]) == 2 and set(text[i + 2:i + 4]) <= _HEX:
+                out.append(text[i:i + 4])
+                i += 4
+            elif nxt == "u" and len(text[i + 2:i + 6]) == 4 and set(text[i + 2:i + 6]) <= _HEX:
+                out.append(text[i:i + 6])
+                i += 6
+            elif nxt in ("", "x", "u", "\r", "\n") or nxt.isdigit():
+                out.append("\\\\")          # a literal backslash
+                i += 1
+            else:
+                out.append(c + nxt)         # an existing escape: \\ \' \n \C ...
+                i += 2
+            continue
+        if c == quote:
+            out.append("\\" + c)
+        elif c == "\r":
+            out.append("\\r")
+        elif c == "\n":
+            out.append("\\n")
+        elif quote == "`" and c == "$" and text[i + 1:i + 2] == "{":
+            out.append("\\$")
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _replace_script_literal(line: str, original: str, translation: str) -> str | None:
+    """``line`` with the string literal holding ``original`` translated.
+
+    The literal itself is matched (quote + original + same quote), so a
+    longer string that merely contains ``original`` ("勇者さま" vs '勇者') is
+    never changed by mistake. Falls back to the first plain match when no
+    whole literal matches; None if ``original`` isn't in the line.
+    """
+    best = -1
+    for q in "'\"`":
+        k = line.find(q + original + q)
+        if k >= 0 and (best < 0 or k < best):
+            best = k
+    if best >= 0:
+        at = best + 1
+    elif original in line:
+        at = line.index(original)
+    else:
+        return None
+    return line[:at] + _js_escape_in(line, at, translation) + line[at + len(original):]
 
 
 def _images_left_out_note(paths: list[str]) -> str:
@@ -3887,11 +3952,9 @@ class RPGMakerMVParser:
                 for sc in script_cmds:
                     p = sc.get("parameters", [""])
                     line = p[0] if p and isinstance(p[0], str) else ""
-                    if original in line:
-                        at = line.index(original)
-                        p[0] = (line[:at]
-                                + _js_escape_in(line, at, translation)
-                                + line[at + len(original):])
+                    new = _replace_script_literal(line, original, translation)
+                    if new is not None:
+                        p[0] = new
                         return True
                 i = j
             return False

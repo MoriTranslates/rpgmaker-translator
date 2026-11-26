@@ -41,6 +41,8 @@ log = logging.getLogger(__name__)
 
 # A style needs this many buttons to rebuild its background from the others.
 MIN_GROUP = 3
+# At most this many buttons feed one blank (time grows with the count).
+MAX_BLANK_SOURCES = 40
 BUTTON_EXTS = (".png",) + ENCRYPTED_EXTS
 CSV_COLUMNS = ("file", "japanese", "english")
 
@@ -59,13 +61,22 @@ def label_from_filename(filename: str) -> str:
     ``C_H02_二人のセックスを見たい。.rpgmvp`` -> ``二人のセックスを見たい。``
     ``Button01朝_02会話.rpgmvp`` -> ``会話`` (last part with Japanese, minus
     a leading number or code).
+    ``C_二人の_セックス.png`` -> ``二人の_セックス``: parts with no ASCII
+    letters or digits before the last one belong to the label too.
     """
     stem = os.path.splitext(os.path.basename(filename))[0]
-    parts = [p for p in stem.split("_") if JAPANESE_RE.search(p)]
-    if not parts:
+    parts = stem.split("_")
+    last = max((i for i, p in enumerate(parts) if JAPANESE_RE.search(p)), default=-1)
+    if last < 0:
         return ""
-    label = _LEADING_CODE_RE.sub("", parts[-1]).strip()
-    return label if JAPANESE_RE.search(label) else parts[-1].strip()
+    first = last
+    while first > 0 and JAPANESE_RE.search(parts[first - 1]) and not re.search(
+            r"[A-Za-z0-9]", parts[first - 1]):
+        first -= 1
+    head = _LEADING_CODE_RE.sub("", parts[first]).strip()
+    if not JAPANESE_RE.search(head):
+        head = parts[first].strip()
+    return "_".join([head] + parts[first + 1:last + 1]).strip()
 
 
 _LATIN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z']*")
@@ -146,9 +157,19 @@ def load_image(path: str, key: str = "") -> Image.Image:
             raise ValueError("encrypted image but the game has no key")
         raw = decrypt_rpgmvp(path, key)
         with Image.open(BytesIO(raw)) as im:
-            return im.convert("RGBA")
+            return _to_rgba(im)
     with Image.open(path) as im:
-        return im.convert("RGBA")
+        return _to_rgba(im)
+
+
+def _to_rgba(im: Image.Image) -> Image.Image:
+    """RGBA copy; 16-bit and float greyscale are scaled down first
+    (a plain convert clips them, so a mid grey came out pure white)."""
+    if im.mode in ("I;16", "I;16B", "I;16L", "I"):
+        im = im.convert("I").point(lambda v: v * (1 / 256)).convert("L")
+    elif im.mode == "F":
+        im = im.point(lambda v: v * 255).convert("L")
+    return im.convert("RGBA")
 
 
 @dataclass
@@ -177,7 +198,9 @@ def scan_folder(img_dir: str, subdir: str, key: str = "") -> tuple[list[ButtonFi
         try:
             image = load_image(bak if has_bak else path, key)
             replaced = has_bak and _file_bytes(bak) != _file_bytes(path)
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, Image.DecompressionBombError) as e:
+            # Reported per file; one bad or oversized image doesn't stop
+            # the rest of the folder from loading.
             problems.append(f"{name}: {e}")
             continue
         out.append(ButtonFile(f"{subdir}/{name}", image,
@@ -285,7 +308,8 @@ def shorten_label(client, japanese: str, english: str) -> str:
     data = client._chat(messages=msgs,
                         options=client._base_options(num_predict=64, num_ctx=2048))
     raw = client._strip_thinking((data.get("message", {}) or {}).get("content", ""))
-    lines = [ln.strip().strip('"').strip() for ln in (raw or "").splitlines() if ln.strip()]
+    lines = [ln.strip().strip('"').strip() for ln in (raw or "").splitlines()]
+    lines = [ln for ln in lines if ln]        # a reply of just "" is empty
     if not lines or JAPANESE_RE.search(lines[0]) or len(lines[0]) >= len(english):
         return english
     known = set(english.split())
@@ -612,6 +636,10 @@ def build_blank(images: list[Image.Image]) -> Blank:
     size = images[0].size
     if any(im.size != size for im in images):
         raise ValueError("buttons in one style must be the same size")
+    if len(images) > MAX_BLANK_SOURCES:
+        # Enough for a clean median; more only costs time (pure Python)
+        step = len(images) / MAX_BLANK_SOURCES
+        images = [images[int(i * step)] for i in range(MAX_BLANK_SOURCES)]
     w, h = size
     images = [im.convert("RGBA") for im in images]
     n = len(images)

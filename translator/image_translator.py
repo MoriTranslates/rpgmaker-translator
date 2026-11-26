@@ -21,6 +21,7 @@ import base64
 import functools
 import json
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -231,17 +232,44 @@ def _edge_mask(img: Image.Image, w: int, h: int) -> Image.Image:
     return gray.filter(ImageFilter.FIND_EDGES).point(lambda v: 255 if v > 60 else 0)
 
 
-def _edge_hits(edges: Image.Image, regions: list, sx: float, sy: float) -> int:
-    """How many edge pixels the regions cover when scaled by (sx, sy)."""
-    total = 0
+def _edge_density(edges: Image.Image, regions: list, sx: float, sy: float) -> float | None:
+    """Share of edge pixels inside the regions scaled by (sx, sy).
+
+    None if that reading leaves any box 5 px or smaller (the OCR step drops
+    such boxes, so the reading would lose the text). Density, not a count:
+    a bigger box always holds more edges on a busy background, which made
+    correct 0-999 replies on CGs read as pixels.
+    """
+    hits = area = 0
     w, h = edges.size
     for r in regions:
         x1, y1, x2, y2 = r.bbox
         box = (max(0, int(x1 * sx)), max(0, int(y1 * sy)),
                min(w, int(x2 * sx)), min(h, int(y2 * sy)))
-        if box[2] > box[0] and box[3] > box[1]:
-            total += edges.crop(box).histogram()[255]
-    return total
+        if box[2] - box[0] <= 5 or box[3] - box[1] <= 5:
+            return None
+        hits += edges.crop(box).histogram()[255]
+        area += (box[2] - box[0]) * (box[3] - box[1])
+    return hits / area if area else None
+
+
+def _pick_scale(edges: Image.Image, regions: list, xs: list, ys: list):
+    """The reading to use when an axis fits both scales.
+
+    The first candidates (0-999, the scale the prompt asks for) win unless
+    they lose the text (boxes collapse) or another reading holds clearly
+    denser text edges (at least 1.5 times).
+    """
+    readings = [(a, b) for a in xs for b in ys]
+    dens = {s: _edge_density(edges, regions, *s) for s in readings}
+    default = readings[0]
+    valid = [s for s in readings if dens[s] is not None]
+    if not valid:
+        return default
+    if dens[default] is None:
+        return max(valid, key=lambda s: dens[s])
+    best = max(valid, key=lambda s: dens[s])
+    return best if dens[best] >= 1.5 * dens[default] and dens[best] > 0 else default
 
 
 # Verify prompt for rendered image QA
@@ -797,6 +825,8 @@ class ImageTranslator:
                 coords = tuple(float(v) for v in bbox)
             except (ValueError, TypeError):
                 continue
+            if not all(math.isfinite(v) for v in coords):
+                continue          # NaN / Infinity (json and float() accept them)
             regions.append(TextRegion(text=t, bbox=coords))
 
         if regions and img_w > 0 and img_h > 0:
@@ -813,9 +843,8 @@ class ImageTranslator:
                 xs = [sx] if sx is not None else [img_w / 999.0, 1.0]
                 ys = [sy] if sy is not None else [img_h / 999.0, 1.0]
                 if img is not None:
-                    edges = _edge_mask(img, img_w, img_h)
-                    sx, sy = max(((a, b) for a in xs for b in ys),
-                                 key=lambda s: _edge_hits(edges, regions, *s))
+                    sx, sy = _pick_scale(_edge_mask(img, img_w, img_h),
+                                         regions, xs, ys)
                 else:
                     sx, sy = xs[0], ys[0]
             for r in regions:
