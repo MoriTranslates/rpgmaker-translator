@@ -23,7 +23,7 @@ from .prompts import (  # noqa: F401
     batch_instructions, build_system_prompt, is_sugoi_model, migrate_saved_prompt,
 )
 from . import prompts  # noqa: F401
-from . import output_checks
+from . import output_checks, speakers
 from .output_checks import is_builtin_glossary_pair, ruby_to_base
 
 # Hides the console window of child processes on Windows; the flag doesn't
@@ -844,6 +844,9 @@ class AIClient:
         self.actor_genders = {}  # {actor_id(int): "male"/"female"/"unknown"}
         self.actor_names = {}    # {actor_id(int): "name string"}
         self.actor_names_en = {}  # {actor_id(int): "English name"} — matches translated [Speaker: X]
+        # {speaker name: "male"/"female"/"unknown"} for [Speaker: X] that
+        # aren't actors (project setting, see translator/speakers.py)
+        self.speaker_genders = {}
         self.glossary = {}       # JP term -> EN translation forced mappings
         self.dazed_mode = False  # DazedMTL mode toggle (batch 30, DazedMTL prompt)
         self.project_type = "rpgmaker_mv"  # "rpgmaker_mv" | "rpgmaker_mz" | "tyranoscript" | "srpgstudio"
@@ -1934,39 +1937,52 @@ class AIClient:
         headers.  Cross-referencing with actor data lets us tell the LLM
         the speaker's gender so first-person voice and pronoun references
         are accurate.
+
+        Speakers that aren't actors (most VN-style games name speakers only
+        in the message header) use the project's ``speaker_genders`` map.
+        A costume tag after the name (``守人 私服``) matches the base name.
         """
-        if not context or not self.actor_genders:
-            return ""
-        m = re.search(r'\[Speaker:\s*(.+?)\]', context)
-        if not m:
-            return ""
-        speaker = m.group(1).strip()
+        speaker = speakers.speaker_of(context)
         if not speaker:
             return ""
         # Speaker names in context may already be translated to English
         # (_update_speaker_names), so match against both JP and EN names.
         # Snapshot the dicts — the GUI thread may mutate them mid-batch.
-        speaker_l = speaker.lower()
+        candidates = [speaker.lower()]
+        base = speakers.base_name(speaker)
+        if base:
+            candidates.append(base.lower())
+        genders = self.actor_genders.copy()
         names_jp = list(self.actor_names.copy().items())
         names_en = list(self.actor_names_en.copy().items())
-        for actor_id, raw_name in names_jp + names_en:
-            if not isinstance(raw_name, str) or raw_name.lower() != speaker_l:
-                continue
-            name = self._actor_display_name(actor_id)
-            gender = self.actor_genders.get(actor_id, "")
-            if gender == "female":
-                return (
-                    f"Speaker: {name} is FEMALE. "
-                    "Lines spoken by her use first-person I/me. "
-                    "Others referring to her use she/her.\n"
-                )
-            elif gender == "male":
-                return (
-                    f"Speaker: {name} is MALE. "
-                    "Lines spoken by him use first-person I/me. "
-                    "Others referring to him use he/him.\n"
-                )
+        for cand in candidates:
+            for actor_id, raw_name in names_jp + names_en:
+                if not isinstance(raw_name, str) or raw_name.lower() != cand:
+                    continue
+                gender = genders.get(actor_id, "")
+                if gender in ("female", "male"):
+                    return self._speaker_hint_text(
+                        self._actor_display_name(actor_id), gender)
+        gender = speakers.lookup_speaker_gender(
+            speaker, self.speaker_genders.copy(), self.glossary.copy())
+        if gender:
+            name = self.glossary.get(speaker) or speaker
+            return self._speaker_hint_text(name, gender)
         return ""
+
+    @staticmethod
+    def _speaker_hint_text(name: str, gender: str) -> str:
+        if gender == "female":
+            return (
+                f"Speaker: {name} is FEMALE. "
+                "Lines spoken by her use first-person I/me. "
+                "Others referring to her use she/her.\n"
+            )
+        return (
+            f"Speaker: {name} is MALE. "
+            "Lines spoken by him use first-person I/me. "
+            "Others referring to him use he/him.\n"
+        )
 
     def _batch_speaker_hints(self, entries) -> str:
         """Speaker hints for a batch, one per speaker, labelled by line.

@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from datetime import date
 from typing import Optional
+from .speakers import clean_speaker_genders
 
 # Version of the entry-ID numbering written into saved states / patches.
 #   1 (or missing) — legacy: MV/MZ event IDs used one counter shared by all
@@ -88,6 +89,9 @@ class TranslationProject:
     entries: list = field(default_factory=list)
     glossary: dict = field(default_factory=dict)  # JP -> EN forced mappings
     actor_genders: dict = field(default_factory=dict)  # actor_id -> gender
+    # [Speaker: X] name -> "male"/"female"/"unknown", for speakers that
+    # aren't actors (see speakers.py). Older saves load with {}.
+    speaker_genders: dict = field(default_factory=dict)
     # Entry-ID scheme of ``entries`` (see ID_SCHEME).  Fresh parses are
     # current; load_state() reports what the file was written with.
     id_scheme: int = ID_SCHEME
@@ -164,6 +168,8 @@ class TranslationProject:
             "actor_genders": self.actor_genders,
             "id_scheme": self.id_scheme,
         }
+        if self.speaker_genders:
+            data["speaker_genders"] = self.speaker_genders
         if self.migration_orphans:
             data["migration_orphans"] = self.migration_orphans
         if self.yep_wrap_space:
@@ -204,6 +210,8 @@ class TranslationProject:
             except (ValueError, TypeError):
                 pass  # Skip malformed keys (e.g. manually edited save files)
         project.actor_genders = actor_genders
+        project.speaker_genders = clean_speaker_genders(
+            data.get("speaker_genders", {}))
         # Missing key = written before ID schemes existed (legacy scheme 1)
         project.id_scheme = _read_id_scheme(data)
         orphans = data.get("migration_orphans", [])
@@ -412,6 +420,8 @@ class TranslationProject:
             "actor_genders": self.actor_genders,
             "id_scheme": self.id_scheme,
         }
+        if self.speaker_genders:
+            patch_data["speaker_genders"] = self.speaker_genders
 
         # metadata.json — human-readable info
         metadata = {
@@ -487,6 +497,8 @@ class TranslationProject:
             except (ValueError, TypeError):
                 pass
         project.actor_genders = actor_genders
+        project.speaker_genders = clean_speaker_genders(
+            data.get("speaker_genders", {}))
         # Patches made before ID schemes existed carry legacy IDs —
         # import_translations() remaps them onto the current scheme.
         project.id_scheme = _read_id_scheme(data)

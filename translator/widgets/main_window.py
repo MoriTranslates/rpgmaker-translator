@@ -52,6 +52,8 @@ from .translation_table import TranslationTable
 from .settings_dialog import SettingsDialog
 from .glossary_dialog import GlossaryDialog
 from .actor_gender_dialog import ActorGenderDialog
+from .speaker_gender_dialog import SpeakerGenderDialog
+from ..speakers import collect_speakers, lookup_speaker_gender
 from .variant_dialog import VariantDialog
 from .image_panel import ImagePanel
 from .gpu_monitor import GPUMonitorPanel
@@ -192,6 +194,7 @@ class MainWindow(QMainWindow):
         self._disable_splash = True
         self._show_translation_splash = True
         self._actors_ready = False  # True after actor gender dialog has been shown/skipped
+        self._speaker_offer_done = False  # Speaker Genders offered this session
         self._batch_start_time = 0
         self._batch_done_count = 0
         self._dupe_fill_count = 0
@@ -358,6 +361,7 @@ class MainWindow(QMainWindow):
         "consistency_action": "list-checks", "reset_all_action": "rotate-ccw",
         "translate_images_action": "image",
         "edit_glossary_action": "book-open", "load_vocab_action": "file-down",
+        "speaker_genders_action": "user-round",
         "export_vocab_action": "file-up", "scan_glossary_action": "scan-search",
         "scan_project_glossary_action": "scan-search",
         "apply_glossary_action": "wand-sparkles",
@@ -650,6 +654,14 @@ class MainWindow(QMainWindow):
             "Edit the general (all projects) and project glossaries")
         self.edit_glossary_action.triggered.connect(self._open_glossary)
         glossary_menu.addAction(self.edit_glossary_action)
+
+        self.speaker_genders_action = QAction("Speaker Genders…", self)
+        self.speaker_genders_action.setToolTip(
+            "Set he/she for speakers that aren't actors (name-box speakers), "
+            "with sample lines and a suggestion for each")
+        self.speaker_genders_action.triggered.connect(self._open_speaker_genders)
+        self.speaker_genders_action.setEnabled(False)
+        glossary_menu.addAction(self.speaker_genders_action)
 
         glossary_menu.addSeparator()
 
@@ -1271,6 +1283,7 @@ class MainWindow(QMainWindow):
             self.translate_images_action,
             # Glossary
             self.load_vocab_action, self.export_vocab_action,
+            self.speaker_genders_action,
             self.scan_glossary_action, self.scan_project_glossary_action,
             self.apply_glossary_action,
             # Game
@@ -1323,6 +1336,8 @@ class MainWindow(QMainWindow):
         self.client.actor_genders = {}
         self.client.actor_names = {}
         self.client.actor_names_en = {}
+        self.client.speaker_genders = {}
+        self._speaker_offer_done = False
         self.client.actor_context = ""
         self._batch_all_chained = False
         self._batch_dupe_map = {}
@@ -1610,15 +1625,51 @@ class MainWindow(QMainWindow):
         Returns True if ready to proceed, False if user cancelled or
         no project is open.
         """
-        if self._actors_ready:
-            return True
-        if self._busy:
-            return False
-        self._busy = True
-        try:
-            return self._run_actor_setup()
-        finally:
-            self._busy = False
+        if not self._actors_ready:
+            if self._busy:
+                return False
+            self._busy = True
+            try:
+                if not self._run_actor_setup():
+                    return False
+            finally:
+                self._busy = False
+        self._offer_speaker_genders_once()
+        return True
+
+    # Speakers with at least this many lines are worth a gender before a batch
+    _SPEAKER_OFFER_MIN_LINES = 10
+
+    def _speakers_without_gender(self) -> list[tuple[str, int]]:
+        """(speaker, lines) for frequent speakers the model gets no gender for."""
+        counts = collect_speakers(self.project.entries)
+        missing = [(sp, n) for sp, n in counts.items()
+                   if n >= self._SPEAKER_OFFER_MIN_LINES
+                   and not self.client._build_speaker_hint(f"[Speaker: {sp}]")]
+        return sorted(missing, key=lambda x: -x[1])
+
+    def _offer_speaker_genders_once(self):
+        """Before the first batch, offer the Speaker Genders dialog once when
+        frequent speakers have no gender and none were ever set."""
+        if self._speaker_offer_done or self.project.speaker_genders:
+            return
+        self._speaker_offer_done = True
+        missing = self._speakers_without_gender()
+        if not missing:
+            return
+        listed = ", ".join(f"{sp} ({n} lines)" for sp, n in missing[:5])
+        more = f" and {len(missing) - 5} more" if len(missing) > 5 else ""
+        reply = QMessageBox.question(
+            self, "Speaker Genders",
+            f"These speakers have no gender set: {listed}{more}.\n\n"
+            "Without one, the model guesses he/she and often gets it wrong "
+            "(\"Is he not home?\" about a woman). The dialog shows sample "
+            "lines and a suggestion for each speaker.\n\n"
+            "Set speaker genders now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._open_speaker_genders()
 
     @staticmethod
     def _add_protagonist_hint(actors_raw: list):
@@ -2192,6 +2243,8 @@ class MainWindow(QMainWindow):
         self._rebuild_glossary()
         self._update_spell_glossary()
 
+        self.client.speaker_genders = self.project.speaker_genders
+
         # Restore actor context from saved genders
         if self.handler.has_actors and self.project.actor_genders and self.project.project_path:
             actors_raw = self.handler.load_actors(self.project.project_path)
@@ -2577,6 +2630,11 @@ class MainWindow(QMainWindow):
                 self.project.glossary[jp] = en
                 imported_glossary += 1
         self._rebuild_glossary()
+        # Speaker genders: only fill speakers this project hasn't set
+        for name, gender in old_project.speaker_genders.items():
+            if name not in self.project.speaker_genders:
+                self.project.speaker_genders[name] = gender
+        self.client.speaker_genders = self.project.speaker_genders
 
         # Refresh UI
         self.trans_table.set_entries(self.project.entries)
@@ -3786,6 +3844,28 @@ class MainWindow(QMainWindow):
             # Cancelled: restore the active engine's model override
             self._apply_engine_settings(self._project_type)
 
+    def _open_speaker_genders(self):
+        """Set genders for [Speaker: X] names that aren't actors."""
+        if not self.project or not self.project.entries:
+            return
+        dlg = SpeakerGenderDialog(
+            self.project.entries, existing=self.project.speaker_genders,
+            actor_names=self.client.actor_names,
+            actor_genders=self.client.actor_genders,
+            glossary=self.client.glossary, parent=self)
+        if not dlg.exec():
+            return
+        # Keep choices for speakers not in the list (renamed contexts etc.);
+        # "unknown" means no hint, so it isn't stored.
+        merged = dict(self.project.speaker_genders)
+        merged.update(dlg.get_genders())
+        merged = {k: v for k, v in merged.items() if v in ("female", "male")}
+        self.project.speaker_genders = merged
+        self.client.speaker_genders = merged
+        self._autosave()
+        self.statusbar.showMessage(
+            f"Speaker genders saved ({len(merged)} set)", 4000)
+
     def _open_glossary(self):
         """Open the standalone glossary editor."""
         dlg = GlossaryDialog(self, self._general_glossary, self.project.glossary)
@@ -4711,12 +4791,12 @@ class MainWindow(QMainWindow):
         if not self._ensure_actors_ready():
             return
 
-        if not self.client.actor_genders:
+        if not self.client.actor_genders and not self.client.speaker_genders:
             QMessageBox.warning(
-                self, "No Actor Data",
-                "No actor gender data available.\n\n"
-                "Open a project first (or load a state) so the translator\n"
-                "knows which characters are male/female."
+                self, "No Gender Data",
+                "No actor or speaker gender data available.\n\n"
+                "Set genders in Glossary > Speaker Genders (or open a game\n"
+                "with actors) so the translator knows who is male/female."
             )
             return
 
@@ -4755,7 +4835,9 @@ class MainWindow(QMainWindow):
                 if m:
                     speaker = m.group(1).strip()
 
-            gender = name_to_gender.get(speaker, "")
+            gender = name_to_gender.get(speaker, "") or (
+                lookup_speaker_gender(speaker, self.client.speaker_genders,
+                                      self.client.glossary) if speaker else "")
             if gender == "female":
                 female_entries.append(entry)
             elif gender == "male":
