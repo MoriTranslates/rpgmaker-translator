@@ -235,8 +235,11 @@ def find_suspects(entries, *, glossary: dict | None = None,
 
     Only translated entries are checked (and reviewed ones when asked).
     """
-    glossary = glossary or {}
-    speaker_genders = speaker_genders or {}
+    # A hand-edited project file can hold non-string glossary entries
+    glossary = {k: v for k, v in (glossary or {}).items()
+                if isinstance(k, str) and isinstance(v, str)}
+    speaker_genders = {k: v for k, v in (speaker_genders or {}).items()
+                       if isinstance(k, str)}
     want = set(kinds) if kinds else set(KINDS)
     statuses = ("translated", "reviewed") if include_reviewed else ("translated",)
     names = _glossary_names(glossary)
@@ -256,7 +259,7 @@ def find_suspects(entries, *, glossary: dict | None = None,
         if e.status not in statuses or not e.translation:
             continue
         if e.field in ("dialog", "dialogue", "scroll_text", "choice"):
-            by_original.setdefault(e.original, {}).setdefault(
+            by_original.setdefault(e.original or "", {}).setdefault(
                 e.translation.strip(), []).append(e.id)
         speech_or_narr = e.field in ("dialog", "dialogue", "scroll_text")
         checks = []
@@ -288,7 +291,7 @@ def find_suspects(entries, *, glossary: dict | None = None,
                 report.add(Suspect(e.id, kind, why))
     if "inconsistent" in want:
         for original, variants in by_original.items():
-            if len(variants) < 2 or len(original.strip()) < 4:
+            if len(variants) < 2 or len((original or "").strip()) < 4:
                 continue
             for tr, ids in variants.items():
                 for i in ids:

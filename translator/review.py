@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections import Counter
+import unicodedata
 from dataclasses import dataclass, field
 
 from . import CONTROL_CODE_RE, JAPANESE_RE
@@ -203,8 +203,18 @@ _NO_BRACKETS = {0x300C: None, 0x300D: None, 0x300E: None, 0x300F: None}
 _LEAD_TAGS_RE = re.compile(r"^(?:\s|<[A-Za-z/][^<>\n]*>)*")
 
 
-def _codes(text: str) -> Counter:
-    return Counter(CONTROL_CODE_RE.findall(text or ""))
+def _codes(text: str) -> list:
+    """Control codes in order: a reordered colour code wraps other text."""
+    return CONTROL_CODE_RE.findall(text or "")
+
+
+def _bad_char(c: str) -> bool:
+    """Control (except LF) or format/invisible characters."""
+    if c == "\n":
+        return False
+    if 0xD800 <= ord(c) <= 0xDFFF or ord(c) in _INVISIBLE:
+        return True
+    return unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp", "Cn")
 
 
 def _quoted(text: str) -> tuple[bool, bool]:
@@ -229,8 +239,7 @@ def validate(p: Proposal, entry) -> str:
         return "empty fix"
     if new == p.old:
         return "no change"
-    if any(ord(c) in _INVISIBLE or 0xD800 <= ord(c) <= 0xDFFF for c in new
-           if c != "\n"):
+    if any(_bad_char(c) for c in new):
         return "fix contains control or invisible characters"
     if JAPANESE_RE.search(CONTROL_CODE_RE.sub("", new).translate(_NO_BRACKETS)):
         return "fix contains Japanese"
@@ -261,9 +270,9 @@ def apply(proposals: list[Proposal], entries) -> list[str]:
     """Apply valid proposals; returns the ids of every entry changed.
 
     Each proposal is validated again right before it is applied. The fix
-    also goes to duplicate copies (same Japanese, same old English, status
-    translated) so copies of a scene stay identical. Reviewed lines are
-    never changed.
+    also goes to duplicate copies (same Japanese, same old English, same
+    field and speaker, status translated) so copies of a scene stay
+    identical. Reviewed lines are never changed.
     """
     by_id = {e.id: e for e in entries}
     by_original: dict[str, list] = {}
@@ -274,8 +283,13 @@ def apply(proposals: list[Proposal], entries) -> list[str]:
         entry = by_id.get(p.entry_id)
         if validate(p, entry):
             continue
+        # Copies only: same field and same speaker (a he/she or "you" fix
+        # depends on who speaks), never system terms or database names.
+        speaker = speaker_of(entry.context or "")
         for e in by_original.get(p.original, []):
-            if e.status == "translated" and e.translation == p.old:
+            if (e.status == "translated" and e.translation == p.old
+                    and e.field == entry.field and e.field in REVIEW_FIELDS
+                    and speaker_of(e.context or "") == speaker):
                 e.translation = p.new
                 changed.append(e.id)
     return changed

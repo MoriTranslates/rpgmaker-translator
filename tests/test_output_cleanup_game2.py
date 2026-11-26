@@ -32,7 +32,7 @@ HEART = chr(0x2661)
     ("Hi! " + FW_SPACE + "there", "Hi! there"),           # no double space
     ("Mmm" + WAVE + HEART, "Mmm" + WAVE + HEART),          # ～ and ♡ kept
     ("「Hello」", '"Hello"'),
-    ("【Notice】", "[Notice]"),
+    ("【Notice】", "【Notice】"),            # [ ] would be a VN tag: left alone
     ("Price: " + "".join(chr(0xFF10 + d) for d in (1, 0, 0)) + "G", "Price: 100G"),
     ("Mmh......Chup" + FW_SPACE + "x", "Mmh......Chup x"),     # untouched elsewhere
     ("3.5 and 1,000" + FW_EXCL, "3.5 and 1,000!"),
@@ -118,10 +118,11 @@ def test_post_processing_fixes_existing_translations():
     r = run_post_processing(es, project_type="rpgmaker")
     assert es[0].translation == "No way!"
     assert es[1].translation == "Yes."
-    assert es[2].translation == "" and es[2].status == "untranslated"
-    assert "c" in r.retranslate_ids
+    # Only prompt-like text: kept (re-queuing could loop forever)
+    assert es[2].translation == "Content type: dialogue line"
+    assert es[2].status == "translated" and "c" not in r.retranslate_ids
     assert es[3].translation == "Yes" + FW_EXCL          # reviewed: untouched
-    assert r.fullwidth_punct == 1 and r.prompt_leaks == 2
+    assert r.fullwidth_punct == 1 and r.prompt_leaks == 1
     assert "full-width punctuation fixed" in str(r)
     again = run_post_processing(es, project_type="rpgmaker")
     assert again.fullwidth_punct == 0 and again.prompt_leaks == 0

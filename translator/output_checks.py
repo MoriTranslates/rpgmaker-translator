@@ -101,11 +101,15 @@ _FULLWIDTH_MAP = {
     0xFF61: ".",            # ｡ (half-width katakana full stop)
     0xFF64: ",",            # ､
     0x300C: '"', 0x300D: '"', 0x300E: '"', 0x300F: '"',   # 「」『』
-    0x3010: "[", 0x3011: "]",                             # 【】
 }
 # Full-width ASCII forms ！..｝ map to ASCII; ～ (U+FF5E) is not included.
+# Marks whose ASCII form is code syntax in some engine are left alone:
+# [ ] are TyranoScript/KiriKiri tags, < > and \ and % make RPG Maker codes
+# (<Tag>, \C[2], %1), { } are Ren'Py tags. 【】 stays for the same reason.
+_CODE_SYNTAX = "[]<>\\%{}"
 for _cp in range(0xFF01, 0xFF5E):
-    _FULLWIDTH_MAP[_cp] = chr(_cp - 0xFEE0)
+    if chr(_cp - 0xFEE0) not in _CODE_SYNTAX:
+        _FULLWIDTH_MAP[_cp] = chr(_cp - 0xFEE0)
 _FULLWIDTH_RE = re.compile("[" + "".join(re.escape(chr(c)) for c in _FULLWIDTH_MAP) + "]")
 _CJK_TARGETS = ("Chinese", "Japanese", "Korean")
 _NO_BRACKETS = str.maketrans({c: None for c in (0x300C, 0x300D, 0x300E, 0x300F)})
@@ -186,12 +190,18 @@ _PROMPT_LEAK_LINE_RE = re.compile(
     re.MULTILINE)
 
 
-def strip_prompt_leaks(output: str, source: str = "") -> str:
+def strip_prompt_leaks(output: str, source: str = "",
+                       keep_if_empty: bool = True) -> str:
     """Remove whole lines copied from our prompt scaffolding.
 
     A line is only removed when the source doesn't contain the same text, so
     a game that really says "Content type:" keeps it. Blank lines left behind
     at the start or end are trimmed; inner line structure is kept.
+
+    If nothing else is left, the reply comes back unchanged
+    (``keep_if_empty``, for stored translations: clearing and re-queuing a
+    line that may answer the same way could repeat forever) or as ""
+    (fresh replies, so the empty-answer retry handles it).
     """
     if not output or not _PROMPT_LEAK_LINE_RE.search(output):
         return output
@@ -209,7 +219,10 @@ def strip_prompt_leaks(output: str, source: str = "") -> str:
     # Keep blank lines the reply started with only if the source did too
     if lead and not (source or "").startswith("\n"):
         kept = kept[lead:]
-    return "\n".join(kept)
+    out = "\n".join(kept)
+    if not out.strip():
+        return output if keep_if_empty else ""
+    return out
 
 
 def restore_name_case(output: str, source: str, glossary: dict | None) -> str:
@@ -317,6 +330,10 @@ def restore_leading_blank_line(output: str, source: str) -> str:
 # VN engines display dialogue in speech boxes: their speech quotes are
 # dropped, not converted, and never restored.
 VN_ENGINES = frozenset({"tyranoscript", "kirikiri", "crowd", "renpy"})
+# Fields that are shown as message text. Quotes are only restored here: a
+# name, a database text or a script string must never gain quotes (a
+# quoted script string breaks the game's JavaScript).
+MESSAGE_FIELDS = frozenset({"dialog", "dialogue", "scroll_text", "choice"})
 
 _JP_SPEECH_OPEN = chr(0x300C)    # 「
 _JP_SPEECH_CLOSE = chr(0x300D)   # 」
@@ -372,7 +389,7 @@ def clean_output(source: str, output: str, *, glossary: dict | None = None,
     if not output:
         return output
     output = normalise_line_breaks(output)
-    output = strip_prompt_leaks(output, source)
+    output = strip_prompt_leaks(output, source, keep_if_empty=False)
     output = replace_jp_ellipsis(output, target_language)
     output = normalise_fullwidth(output, target_language)
     output = restore_name_case(output, source, glossary)

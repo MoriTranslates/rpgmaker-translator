@@ -128,6 +128,28 @@ _BAT_ADDED_LIST = "rmt_added_files.txt"
 _BAT_PATH_OK_RE = re.compile(r"^[A-Za-z0-9._ -]+(/[A-Za-z0-9._ -]+)*$")
 
 
+def _js_escape_in(line: str, at: int, text: str) -> str:
+    """``text`` escaped for the JS string literal that contains ``line[at]``.
+
+    The literal's quote is the nearest ' " or ` before ``at`` that isn't
+    escaped; an English apostrophe or quote in the translation would
+    otherwise end the string and break the script ("don't" in '...').
+    """
+    quote = ""
+    i = at - 1
+    while i >= 0:
+        if line[i] in "'\"`" and (i == 0 or line[i - 1] != "\\"):
+            quote = line[i]
+            break
+        i -= 1
+    if not quote:
+        return text
+    # Backslashes are left as they are: script strings carry message codes
+    # already written in JS form (\\C[2]), which must not be doubled.
+    text = text.replace("\n", "\\n")
+    return re.sub(r"(?<!\\)" + re.escape(quote), "\\\\" + quote, text)
+
+
 def _images_left_out_note(paths: list[str]) -> str:
     """README line for translated images an install package couldn't carry."""
     if not paths:
@@ -3866,7 +3888,10 @@ class RPGMakerMVParser:
                     p = sc.get("parameters", [""])
                     line = p[0] if p and isinstance(p[0], str) else ""
                     if original in line:
-                        p[0] = line.replace(original, translation, 1)
+                        at = line.index(original)
+                        p[0] = (line[:at]
+                                + _js_escape_in(line, at, translation)
+                                + line[at + len(original):])
                         return True
                 i = j
             return False

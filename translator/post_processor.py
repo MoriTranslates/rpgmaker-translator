@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import wordninja
 
 from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
-from .output_checks import (VN_ENGINES, normalise_fullwidth,
+from .output_checks import (MESSAGE_FIELDS, VN_ENGINES, normalise_fullwidth,
                             restore_speech_quotes, romanised_sfx,
                             strip_prompt_leaks)
 
@@ -466,22 +466,20 @@ def _fix_fullwidth(entry, target_language: str) -> bool:
 def _fix_prompt_leak(entry, retranslate_ids: list) -> bool:
     """Remove prompt lines the model copied ("Content type: dialogue line").
 
-    If nothing is left, the entry is cleared and queued for retranslation.
+    A translation that is nothing but such text is left as it is: clearing
+    and re-queuing it could repeat forever (the game may really say that).
     """
     fixed = strip_prompt_leaks(entry.translation, entry.original or "")
     if fixed == entry.translation:
         return False
-    if fixed.strip():
-        entry.translation = fixed
-    else:
-        entry.translation = ""
-        entry.status = "untranslated"
-        retranslate_ids.append(entry.id)
+    entry.translation = fixed
     return True
 
 
 def _fix_missing_speech_quotes(entry) -> bool:
     """Put back "..." on a 「...」 line whose translation lost its quotes."""
+    if entry.field not in MESSAGE_FIELDS:
+        return False
     fixed = restore_speech_quotes(entry.original or "", entry.translation)
     if fixed == entry.translation:
         return False
@@ -1187,9 +1185,6 @@ def run_post_processing(entries: list, verbose: bool = False,
         if _fix_prompt_leak(entry, result.retranslate_ids):
             result.prompt_leaks += 1
             entry_fixed = True
-            fixed_ids.add(entry.id)
-            if not entry.translation:
-                continue  # cleared and queued for retranslation
 
         # Tier 0: Corrupt speaker names (must run first — poisons context)
         if _fix_corrupt_speaker(entry, result.retranslate_ids):
