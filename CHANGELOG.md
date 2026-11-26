@@ -9,6 +9,8 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-26
+
 ### Changed
 - Default prompt v3, from the mistakes found in a full review of one game, where about 1 line in 5 was wrong even though every automatic check passed. New rules: keep every negation (ない, ではない, わけじゃない...), which models dropped at the end of long sentences and so reversed the meaning; keep comparisons ("bigger than mine"); させる (make or let) and られる (passive) keep who does what; in dialogue the listener is "you", never "he" or "she"; and a speaker's body is their own. Two batch examples now show a kept negation and a kept comparison. If you never edited your prompt, it updates to v3 automatically (for every language and engine); edited prompts are left alone.
 
