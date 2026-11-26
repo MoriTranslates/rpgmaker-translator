@@ -373,6 +373,9 @@ def test_open_dialog_saves_choices_and_drops_unknown(win, monkeypatch, tmp_path)
 
         def get_genders(self):
             return {"幸来": "female", "店員": "unknown"}
+
+        def get_narrators(self):
+            return []
     monkeypatch.setattr(mw, "SpeakerGenderDialog", FakeDialog)
     win._open_speaker_genders()
     assert win.project.speaker_genders == {"Old Name": "male", "幸来": "female"}

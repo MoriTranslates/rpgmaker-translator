@@ -53,6 +53,7 @@ from .settings_dialog import SettingsDialog
 from .glossary_dialog import GlossaryDialog
 from .actor_gender_dialog import ActorGenderDialog
 from .speaker_gender_dialog import SpeakerGenderDialog
+from ..narration import narration_pov, suggest_narrators
 from ..speakers import collect_speakers, lookup_speaker_gender
 from .variant_dialog import VariantDialog
 from .image_panel import ImagePanel
@@ -655,10 +656,11 @@ class MainWindow(QMainWindow):
         self.edit_glossary_action.triggered.connect(self._open_glossary)
         glossary_menu.addAction(self.edit_glossary_action)
 
-        self.speaker_genders_action = QAction("Speaker Genders…", self)
+        self.speaker_genders_action = QAction("Speakers and Narrator…", self)
         self.speaker_genders_action.setToolTip(
-            "Set he/she for speakers that aren't actors (name-box speakers), "
-            "with sample lines and a suggestion for each")
+            "Set he/she for speakers that aren't actors (name-box speakers) "
+            "and whose \"I\" the narration is, with sample lines and "
+            "suggestions")
         self.speaker_genders_action.triggered.connect(self._open_speaker_genders)
         self.speaker_genders_action.setEnabled(False)
         glossary_menu.addAction(self.speaker_genders_action)
@@ -1337,6 +1339,7 @@ class MainWindow(QMainWindow):
         self.client.actor_names = {}
         self.client.actor_names_en = {}
         self.client.speaker_genders = {}
+        self.client.narration_pov = {}
         self._speaker_offer_done = False
         self.client.actor_context = ""
         self._batch_all_chained = False
@@ -1635,6 +1638,9 @@ class MainWindow(QMainWindow):
             finally:
                 self._busy = False
         self._offer_speaker_genders_once()
+        # Speaker tags may have just been renamed to English: rebuild the
+        # (original, context) -> narrator lookup for this batch.
+        self._refresh_narration_pov()
         return True
 
     # Speakers with at least this many lines are worth a gender before a batch
@@ -1651,21 +1657,33 @@ class MainWindow(QMainWindow):
     def _offer_speaker_genders_once(self):
         """Before the first batch, offer the Speaker Genders dialog once when
         frequent speakers have no gender and none were ever set."""
-        if self._speaker_offer_done or self.project.speaker_genders:
+        if self._speaker_offer_done:
             return
         self._speaker_offer_done = True
-        missing = self._speakers_without_gender()
-        if not missing:
+        missing = ([] if self.project.speaker_genders
+                   else self._speakers_without_gender())
+        narr_picks = ([] if self.project.narrators else suggest_narrators(
+            self.project.entries,
+            set(collect_speakers(self.project.entries)))[0])
+        if not missing and not narr_picks:
             return
-        listed = ", ".join(f"{sp} ({n} lines)" for sp, n in missing[:5])
-        more = f" and {len(missing) - 5} more" if len(missing) > 5 else ""
+        parts = []
+        if missing:
+            listed = ", ".join(f"{sp} ({n} lines)" for sp, n in missing[:5])
+            more = f" and {len(missing) - 5} more" if len(missing) > 5 else ""
+            parts.append(
+                f"These speakers have no gender set: {listed}{more}. Without "
+                "one, the model guesses he/she and often gets it wrong "
+                "(\"Is he not home?\" about a woman).")
+        if narr_picks:
+            parts.append(
+                "Narration looks first-person (suggested narrator: "
+                f"{', then '.join(narr_picks)}), but no narrator is set, so "
+                "the model may write it as \"he/she\".")
         reply = QMessageBox.question(
-            self, "Speaker Genders",
-            f"These speakers have no gender set: {listed}{more}.\n\n"
-            "Without one, the model guesses he/she and often gets it wrong "
-            "(\"Is he not home?\" about a woman). The dialog shows sample "
-            "lines and a suggestion for each speaker.\n\n"
-            "Set speaker genders now?",
+            self, "Speakers and Narrator",
+            "\n\n".join(parts) + "\n\nThe dialog shows sample lines and a "
+            "suggestion for each. Set them now?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
@@ -2244,6 +2262,7 @@ class MainWindow(QMainWindow):
         self._update_spell_glossary()
 
         self.client.speaker_genders = self.project.speaker_genders
+        self._refresh_narration_pov()
 
         # Restore actor context from saved genders
         if self.handler.has_actors and self.project.actor_genders and self.project.project_path:
@@ -2635,6 +2654,9 @@ class MainWindow(QMainWindow):
             if name not in self.project.speaker_genders:
                 self.project.speaker_genders[name] = gender
         self.client.speaker_genders = self.project.speaker_genders
+        if not self.project.narrators and old_project.narrators:
+            self.project.narrators = list(old_project.narrators)
+        self._refresh_narration_pov()
 
         # Refresh UI
         self.trans_table.set_entries(self.project.entries)
@@ -3852,7 +3874,8 @@ class MainWindow(QMainWindow):
             self.project.entries, existing=self.project.speaker_genders,
             actor_names=self.client.actor_names,
             actor_genders=self.client.actor_genders,
-            glossary=self.client.glossary, parent=self)
+            glossary=self.client.glossary,
+            narrators=self._current_narrator_names(), parent=self)
         if not dlg.exec():
             return
         # Keep choices for speakers not in the list (renamed contexts etc.);
@@ -3862,9 +3885,36 @@ class MainWindow(QMainWindow):
         merged = {k: v for k, v in merged.items() if v in ("female", "male")}
         self.project.speaker_genders = merged
         self.client.speaker_genders = merged
+        self.project.narrators = dlg.get_narrators()
+        self._refresh_narration_pov()
         self._autosave()
+        narr = (f"; narrator: {', '.join(self.project.narrators)}"
+                if self.project.narrators else "")
         self.statusbar.showMessage(
-            f"Speaker genders saved ({len(merged)} set)", 4000)
+            f"Speaker genders saved ({len(merged)} set){narr}", 4000)
+
+    def _current_narrator_names(self) -> list[str]:
+        """Saved narrators as they are spelled in the [Speaker: X] tags now.
+
+        Speaker tags are renamed to English once names are translated, so a
+        narrator saved as 幸来 may now appear as Yukiko (via the glossary).
+        """
+        present = set(collect_speakers(self.project.entries))
+        glossary = self.client.glossary
+        out = []
+        for name in self.project.narrators:
+            if name not in present:
+                en = glossary.get(name)
+                jp = next((k for k, v in glossary.items() if v == name), None)
+                name = en if en in present else jp if jp in present else name
+            out.append(name)
+        return out
+
+    def _refresh_narration_pov(self):
+        """Recompute which narrator each narration line belongs to."""
+        names = self._current_narrator_names() if self.project else []
+        self.client.narration_pov = (
+            narration_pov(self.project.entries, names) if names else {})
 
     def _open_glossary(self):
         """Open the standalone glossary editor."""
@@ -4795,7 +4845,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self, "No Gender Data",
                 "No actor or speaker gender data available.\n\n"
-                "Set genders in Glossary > Speaker Genders (or open a game\n"
+                "Set genders in Glossary > Speakers and Narrator (or open a game\n"
                 "with actors) so the translator knows who is male/female."
             )
             return

@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from datetime import date
 from typing import Optional
+from .narration import clean_narrators
 from .speakers import clean_speaker_genders
 
 # Version of the entry-ID numbering written into saved states / patches.
@@ -92,6 +93,9 @@ class TranslationProject:
     # [Speaker: X] name -> "male"/"female"/"unknown", for speakers that
     # aren't actors (see speakers.py). Older saves load with {}.
     speaker_genders: dict = field(default_factory=dict)
+    # Whose first-person view narration is in: [main, optional second]
+    # (see narration.py). Older saves load with [].
+    narrators: list = field(default_factory=list)
     # Entry-ID scheme of ``entries`` (see ID_SCHEME).  Fresh parses are
     # current; load_state() reports what the file was written with.
     id_scheme: int = ID_SCHEME
@@ -170,6 +174,8 @@ class TranslationProject:
         }
         if self.speaker_genders:
             data["speaker_genders"] = self.speaker_genders
+        if self.narrators:
+            data["narrators"] = self.narrators
         if self.migration_orphans:
             data["migration_orphans"] = self.migration_orphans
         if self.yep_wrap_space:
@@ -212,6 +218,7 @@ class TranslationProject:
         project.actor_genders = actor_genders
         project.speaker_genders = clean_speaker_genders(
             data.get("speaker_genders", {}))
+        project.narrators = clean_narrators(data.get("narrators", []))
         # Missing key = written before ID schemes existed (legacy scheme 1)
         project.id_scheme = _read_id_scheme(data)
         orphans = data.get("migration_orphans", [])
@@ -422,6 +429,8 @@ class TranslationProject:
         }
         if self.speaker_genders:
             patch_data["speaker_genders"] = self.speaker_genders
+        if self.narrators:
+            patch_data["narrators"] = self.narrators
 
         # metadata.json — human-readable info
         metadata = {
@@ -499,6 +508,7 @@ class TranslationProject:
         project.actor_genders = actor_genders
         project.speaker_genders = clean_speaker_genders(
             data.get("speaker_genders", {}))
+        project.narrators = clean_narrators(data.get("narrators", []))
         # Patches made before ID schemes existed carry legacy IDs —
         # import_translations() remaps them onto the current scheme.
         project.id_scheme = _read_id_scheme(data)

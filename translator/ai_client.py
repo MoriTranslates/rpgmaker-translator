@@ -847,6 +847,9 @@ class AIClient:
         # {speaker name: "male"/"female"/"unknown"} for [Speaker: X] that
         # aren't actors (project setting, see translator/speakers.py)
         self.speaker_genders = {}
+        # {(original, context): narrator} for narration lines (narration.py);
+        # replaced as a whole by the GUI, read with .get by workers.
+        self.narration_pov = {}
         self.glossary = {}       # JP term -> EN translation forced mappings
         self.dazed_mode = False  # DazedMTL mode toggle (batch 30, DazedMTL prompt)
         self.project_type = "rpgmaker_mv"  # "rpgmaker_mv" | "rpgmaker_mz" | "tyranoscript" | "srpgstudio"
@@ -1945,11 +1948,20 @@ class AIClient:
         speaker = speakers.speaker_of(context)
         if not speaker:
             return ""
-        # Speaker names in context may already be translated to English
-        # (_update_speaker_names), so match against both JP and EN names.
+        name, gender = self._person_gender(speaker)
+        return self._speaker_hint_text(name, gender) if gender else ""
+
+    def _person_gender(self, person: str) -> tuple[str, str]:
+        """(display name, "female"/"male"/"") for a speaker or narrator name.
+
+        Actors first (JP or EN name, or the base name of ``守人 私服``), then
+        the project's speaker_genders map (through the glossary).
+        """
+        # Names may already be translated to English (_update_speaker_names),
+        # so match against both JP and EN names.
         # Snapshot the dicts — the GUI thread may mutate them mid-batch.
-        candidates = [speaker.lower()]
-        base = speakers.base_name(speaker)
+        candidates = [person.lower()]
+        base = speakers.base_name(person)
         if base:
             candidates.append(base.lower())
         genders = self.actor_genders.copy()
@@ -1961,14 +1973,35 @@ class AIClient:
                     continue
                 gender = genders.get(actor_id, "")
                 if gender in ("female", "male"):
-                    return self._speaker_hint_text(
-                        self._actor_display_name(actor_id), gender)
+                    return self._actor_display_name(actor_id), gender
+        glossary = self.glossary.copy()
         gender = speakers.lookup_speaker_gender(
-            speaker, self.speaker_genders.copy(), self.glossary.copy())
-        if gender:
-            name = self.glossary.get(speaker) or speaker
-            return self._speaker_hint_text(name, gender)
-        return ""
+            person, self.speaker_genders.copy(), glossary)
+        return (glossary.get(person) or person), gender
+
+    def _build_narrator_hint(self, original: str, context: str) -> str:
+        """Hint for a narration line whose narrator the project knows.
+
+        ``narration_pov`` maps (original, context) of narration lines to the
+        narrator whose first-person view they are in (see narration.py).
+        """
+        pov = self.narration_pov
+        narrator = pov.get((original, context or "")) if pov else None
+        if not narrator:
+            return ""
+        name, gender = self._person_gender(narrator)
+        who = {"female": f" ({name} is FEMALE)",
+               "male": f" ({name} is MALE)"}.get(gender, "")
+        return (
+            f"Narration: this line is {name}'s own first-person narration{who}. "
+            f"Refer to {name} as I/me/my here, never as he/she or by name. "
+            "Other characters stay in the third person.\n"
+        )
+
+    def _voice_hint(self, original: str, context: str) -> str:
+        """Speaker hint for speech, narrator hint for narration."""
+        return (self._build_speaker_hint(context or "")
+                or self._build_narrator_hint(original, context or ""))
 
     @staticmethod
     def _speaker_hint_text(name: str, gender: str) -> str:
@@ -1992,8 +2025,8 @@ class AIClient:
         Lines without a known speaker get no hint.
         """
         by_hint: dict[str, list[str]] = {}
-        for key, _orig, ctx, _field in entries:
-            hint = self._build_speaker_hint(ctx or "").strip()
+        for key, orig, ctx, _field in entries:
+            hint = self._voice_hint(orig, ctx).strip()
             if hint:
                 by_hint.setdefault(hint, []).append(key)
         if not by_hint:
@@ -2061,6 +2094,7 @@ class AIClient:
         parts: list[str] = []
         if self.actor_context:
             parts.append(self.actor_context)
+        narrator_hint = self._build_narrator_hint(raw_text, context)
         context = ruby_to_base(context)
         if context:
             # If history pairs are being sent separately, the bulky surrounding-
@@ -2073,6 +2107,9 @@ class AIClient:
             speaker_hint = self._build_speaker_hint(context)
             if speaker_hint:
                 parts.append(speaker_hint)
+                narrator_hint = ""
+        if narrator_hint:
+            parts.append(narrator_hint)
         if correction and old_translation:
             parts.append(
                 f"PREVIOUS TRANSLATION (WRONG — do NOT reuse):\n{old_translation}\n\n"

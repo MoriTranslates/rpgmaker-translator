@@ -10,13 +10,15 @@ import html
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel,
-    QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser,
-    QVBoxLayout,
+    QAbstractItemView, QComboBox, QDialog, QFormLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QLabel, QPushButton, QSplitter, QTableWidget,
+    QTableWidgetItem, QTextBrowser, QVBoxLayout,
 )
 
-from .. import speakers
+from .. import narration, speakers
 from . import theme
+
+NO_NARRATOR = "(none)"
 
 GENDER_OPTIONS = ["unknown", "female", "male"]
 
@@ -27,9 +29,13 @@ class SpeakerGenderDialog(QDialog):
     def __init__(self, entries, existing: dict | None = None,
                  actor_names: dict | None = None,
                  actor_genders: dict | None = None,
-                 glossary: dict | None = None, parent=None):
+                 glossary: dict | None = None,
+                 narrators: list | None = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Speaker Genders")
+        self.setWindowTitle("Speakers and Narrator")
+        self._narrators = list(narrators or [])
+        self._narrator_suggestion = narration.suggest_narrators(
+            entries, set(speakers.collect_speakers(entries)))
         self.setMinimumSize(820, 560)
         self._glossary = glossary or {}
         self._by_speaker = speakers.lines_by_speaker(entries)
@@ -98,6 +104,7 @@ class SpeakerGenderDialog(QDialog):
         splitter.addWidget(self.samples)
         splitter.setSizes([320, 220])
         layout.addWidget(splitter)
+        layout.addWidget(self._build_narrator_box())
 
         btn_row = QHBoxLayout()
         self.use_suggestions_btn = QPushButton("Use Suggestions for Unknown")
@@ -124,6 +131,54 @@ class SpeakerGenderDialog(QDialog):
             self.samples.setPlainText(
                 "No speakers found. Speaker names come from message headers "
                 "(name boxes); this game may not use them.")
+
+    def _build_narrator_box(self) -> QGroupBox:
+        box = QGroupBox("Narrator (whose \"I\" the narration is)")
+        form = QFormLayout(box)
+        explain = QLabel(
+            "Narration lines (no speaker) are told by this character as "
+            "\"I\". Set a second narrator if some scenes are told by someone "
+            "else; each scene is matched by how the narrator says \"I\" "
+            "(僕, 私...). Leave it on (none) for games with no first-person "
+            "narration.")
+        explain.setWordWrap(True)
+        form.addRow(explain)
+        names = [NO_NARRATOR] + self._speakers
+        self.narrator_combos = []
+        for label, idx in (("Main narrator:", 0), ("Second narrator:", 1)):
+            combo = QComboBox()
+            combo.addItems(names)
+            if idx < len(self._narrators) and self._narrators[idx] in names:
+                combo.setCurrentText(self._narrators[idx])
+            form.addRow(label, combo)
+            self.narrator_combos.append(combo)
+        picks, why = self._narrator_suggestion
+        row = QHBoxLayout()
+        self.narrator_hint_label = QLabel(
+            ("Suggested: " + ", then ".join(picks) + f" ({why})")
+            if picks else why)
+        self.narrator_hint_label.setWordWrap(True)
+        row.addWidget(self.narrator_hint_label, 1)
+        self.use_narrators_btn = QPushButton("Use Suggested Narrators")
+        self.use_narrators_btn.setEnabled(bool(picks))
+        self.use_narrators_btn.clicked.connect(self.use_suggested_narrators)
+        row.addWidget(self.use_narrators_btn)
+        form.addRow(row)
+        return box
+
+    def use_suggested_narrators(self):
+        picks, _ = self._narrator_suggestion
+        for i, combo in enumerate(self.narrator_combos):
+            combo.setCurrentText(picks[i] if i < len(picks) else NO_NARRATOR)
+
+    def get_narrators(self) -> list[str]:
+        """[main, second] narrators chosen (none left out, no duplicates)."""
+        out: list[str] = []
+        for combo in self.narrator_combos:
+            name = combo.currentText()
+            if name != NO_NARRATOR and name not in out:
+                out.append(name)
+        return out
 
     def _set_item(self, row, col, text, tooltip=""):
         item = QTableWidgetItem(text)
