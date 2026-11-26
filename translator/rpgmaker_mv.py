@@ -283,6 +283,52 @@ _IMAGE_NAME_NOTE = ("Image file name used by a plugin: kept in Japanese so the "
                     "picture still loads. Set to Reviewed to translate it anyway.")
 
 
+_GAMEFONT_FACE_RE = re.compile(
+    r"@font-face\s*\{[^{}]*font-family\s*:\s*[\"']?GameFont[\"']?[^{}]*\}\s*",
+    re.IGNORECASE)
+_FONT_FILE_EXTS = (".ttf", ".otf", ".woff", ".woff2")
+
+
+def _font_key(name: str) -> str:
+    """Comparable form of a font name: 'M+ 1m' and 'mplus-1m-regular' -> 'mplus1m…'."""
+    return re.sub(r"[^a-z0-9]", "", name.lower().replace("+", "plus"))
+
+
+def _bundled_font_file(font_name: str, font_files) -> Optional[str]:
+    """A font file shipped with the game that is *font_name* (e.g. the
+    game's own mplus-1m-regular.ttf for "M+ 1m"), or None."""
+    key = _font_key(font_name)
+    if not key:
+        return None
+    for fn in sorted(font_files):
+        stem, ext = os.path.splitext(fn)
+        if ext.lower() in _FONT_FILE_EXTS and _font_key(stem).startswith(key):
+            return fn
+    return None
+
+
+def build_gamefont_css(original_css: str, font_name: str, font_files=()) -> str:
+    """gamefont.css with the game font switched to *font_name*.
+
+    Only the ``@font-face`` block that defines GameFont is replaced; every
+    other rule the game keeps in this file survives (some games hide video
+    play buttons here, for example).  ``local()`` only finds fonts installed
+    in Windows, so if the game ships the chosen font as a file in its fonts
+    folder, that file is used first.
+    """
+    fallback = "Courier New" if font_name != "Courier New" else "Consolas"
+    sources = [f'local("{font_name}")', f'local("{fallback}")']
+    bundled = _bundled_font_file(font_name, font_files)
+    if bundled:
+        sources.insert(0, f'url("{bundled}")')
+    face = ('@font-face {\n'
+            '    font-family: GameFont;\n'
+            f'    src: {", ".join(sources)};\n'
+            '}\n')
+    rest = _GAMEFONT_FACE_RE.sub("", original_css or "", count=0).strip()
+    return face + ("\n" + rest + "\n" if rest else "")
+
+
 _PICTURE_CHOICE_NOTE = ("Picture choice: this text is the file name of a button "
                         "image (picture-choice plugin), so it stays as is or the "
                         "game cannot load the button. Translate the image "
@@ -1102,13 +1148,21 @@ class RPGMakerMVParser:
                 # Sibling of js/: "www/js" -> "www/fonts", "js" -> "fonts"
                 fonts_rel = posixpath.join(
                     posixpath.dirname(js_rel), "fonts").lstrip("/")
-                fallback = "Courier New" if self.game_font != "Courier New" else "Consolas"
+                # Keep the game's other CSS rules and use its bundled font
+                # file when it ships the chosen one (see build_gamefont_css)
+                orig_css, font_files = "", []
+                game_fonts = os.path.join(project_dir, *fonts_rel.split("/"))
+                for name in ("gamefont_original.css", "gamefont.css"):
+                    p = os.path.join(game_fonts, name)
+                    if os.path.isfile(p):
+                        with open(p, encoding="utf-8-sig", errors="replace") as f:
+                            orig_css = f.read()
+                        break
+                if os.path.isdir(game_fonts):
+                    font_files = os.listdir(game_fonts)
                 zf.writestr(f"{fonts_rel}/gamefont.css",
-                    '@font-face {\n'
-                    '    font-family: GameFont;\n'
-                    f'    src: local("{self.game_font}"), local("{fallback}");\n'
-                    '}\n'
-                )
+                            build_gamefont_css(orig_css, self.game_font,
+                                               font_files))
 
             total_entries = sum(len(v) for v in by_file.values())
 
@@ -1770,14 +1824,11 @@ class RPGMakerMVParser:
         # Back up original
         if not os.path.isfile(backup):
             shutil.copy2(target, backup)
-        # Write font CSS
-        fallback = "Courier New" if font_name != "Courier New" else "Consolas"
-        css = (
-            '@font-face {\n'
-            '    font-family: GameFont;\n'
-            f'    src: local("{font_name}"), local("{fallback}");\n'
-            '}\n'
-        )
+        # Build from the original (the backup), keeping its other rules
+        with open(backup, encoding="utf-8-sig", errors="replace") as f:
+            original_css = f.read()
+        css = build_gamefont_css(original_css, font_name,
+                                 os.listdir(fonts_dir))
         RPGMakerMVParser._atomic_write_text(target, css)
         log.info("Swapped gamefont.css to %s", font_name)
 
