@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import wordninja
 
 from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
+from .output_checks import VN_ENGINES, restore_speech_quotes
 
 # wordninja's frequency model: cost = log((rank + 1) * log(N)), so a word's
 # dictionary rank can be recovered from its cost.
@@ -49,6 +50,7 @@ class PostProcessResult:
     quote_mismatches: int = 0
     emb_spacing: int = 0
     dialogue_quotes: int = 0
+    speech_quotes: int = 0
     missing_spaces: int = 0
     restored_line_breaks: int = 0
     split_words: int = 0
@@ -107,6 +109,8 @@ class PostProcessResult:
             parts.append(f"{self.emb_spacing} [emb] spacing fixes")
         if self.dialogue_quotes:
             parts.append(f"{self.dialogue_quotes} dialogue quotes stripped")
+        if self.speech_quotes:
+            parts.append(f"{self.speech_quotes} dialogue quotes restored")
         if self.missing_spaces:
             parts.append(f"{self.missing_spaces} missing spaces fixed")
         if self.split_words:
@@ -433,6 +437,15 @@ def _fix_llm_refusal(entry, retranslate_ids: list) -> bool:
 
 # Characters that mark an original line as quoted speech / thought
 _DIALOGUE_OPENERS = ('「', '『', '"', '\u201c', '\u301d', '（', '(')
+
+
+def _fix_missing_speech_quotes(entry) -> bool:
+    """Put back "..." on a 「...」 line whose translation lost its quotes."""
+    fixed = restore_speech_quotes(entry.original or "", entry.translation)
+    if fixed == entry.translation:
+        return False
+    entry.translation = fixed
+    return True
 
 
 def _fix_quote_mismatch(entry, retranslate_ids: list) -> bool:
@@ -1178,6 +1191,12 @@ def run_post_processing(entries: list, verbose: bool = False,
 
         if _fix_wordwrap_tags(entry):
             result.wordwrap_tags += 1
+            entry_fixed = True
+
+        # After the <WordWrap> strip, so the quote lands on the text itself.
+        if (project_type not in VN_ENGINES
+                and _fix_missing_speech_quotes(entry)):
+            result.speech_quotes += 1
             entry_fixed = True
 
         if _fix_hallucinated_br(entry):

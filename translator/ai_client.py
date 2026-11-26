@@ -42,6 +42,9 @@ _JP_BRACKETS = {
 }
 
 
+_VN_ENGINES = output_checks.VN_ENGINES
+
+
 class ServerUnreachable(ConnectionError):
     """The LLM server could not be reached (connection refused/reset, timeout).
 
@@ -1861,8 +1864,6 @@ class AIClient:
         instead of converted to "", since dialogue is already in speech
         boxes and quotes are visual noise.
         """
-        # VN engines display dialogue in speech boxes — quotes are redundant
-        _VN_ENGINES = {"tyranoscript", "kirikiri", "crowd", "renpy"}
         strip_quotes = self.project_type in _VN_ENGINES
         for jp, en in _JP_BRACKETS.items():
             if strip_quotes and en == '"':
@@ -2096,12 +2097,15 @@ class AIClient:
         r"\b(\w+)\s*(['\u2019])\s*(ve|re|ll|t|s|d|m)\b", re.IGNORECASE)
 
     def _postprocess_result(self, result: str, code_map: dict,
-                            source: str = "", field: str = "") -> str:
+                            source: str = "", field: str = "",
+                            original: str = "") -> str:
         """Strip thinking/notes, apply Pig Latin, restore control codes.
 
         ``source`` is the cleaned source text the LLM saw (placeholders +
         converted brackets); used to avoid stripping content that mirrors it.
         ``field`` is the entry's field type (speaker_name labels are fixed).
+        ``original`` is the raw Japanese; a 「...」 line whose reply lost its
+        quotes gets them back (not for VN engines, which drop them).
         """
         result = self._strip_thinking(result)
         result = self._strip_notes(result, source)
@@ -2131,6 +2135,9 @@ class AIClient:
             parts = result.split('\n')
             result = parts[0] + '\n' + '\n'.join(
                 line.lstrip() for line in parts[1:])
+        if (original and self.target_language != "Pig Latin"
+                and self.project_type not in _VN_ENGINES):
+            result = output_checks.restore_speech_quotes(original, result)
         return result
 
     def _clean_output(self, source: str, output: str, field: str = "") -> str:
@@ -2231,7 +2238,8 @@ class AIClient:
 
             # Save raw result (with «CODEn» placeholders) before restoring codes
             raw_result = self._strip_thinking(result)
-            result = self._postprocess_result(result, code_map, clean_text, field)
+            result = self._postprocess_result(result, code_map, clean_text, field,
+                                              original=text)
 
             # Auto-retry if the translation still contains Japanese characters
             if self._contains_japanese(result) and not self.cancel_event.is_set():
@@ -2257,7 +2265,8 @@ class AIClient:
                     )
                     retry_result = data2.get("message", {}).get("content", "").strip()
                     if self._strip_thinking(retry_result):
-                        result = self._postprocess_result(retry_result, code_map, clean_text, field)
+                        result = self._postprocess_result(retry_result, code_map, clean_text, field,
+                                                          original=text)
                 except FatalProviderError:
                     raise  # bad key / no credit / paid swap: stop the run
                 except (requests.RequestException, ConnectionError, ValueError) as exc:
@@ -2297,7 +2306,8 @@ class AIClient:
                     )
                     fixed = data3.get("message", {}).get("content", "").strip()
                     if self._strip_thinking(fixed):
-                        result = self._postprocess_result(fixed, code_map, clean_text, field)
+                        result = self._postprocess_result(fixed, code_map, clean_text, field,
+                                                          original=text)
                 except FatalProviderError:
                     raise
                 except (requests.RequestException, ConnectionError, ValueError) as exc:
@@ -2633,7 +2643,8 @@ class AIClient:
             # contraction fix, outer-quote strip, continuation-line lstrip)
             translation = self._postprocess_result(
                 translation, code_maps.get(key, {}), source,
-                next((f for k, _o, _c, f in entries if k == key), ""))
+                next((f for k, _o, _c, f in entries if k == key), ""),
+                original=orig)
             # Placeholder the model invented or mangled beyond normalization —
             # would leak «CODEn» into the game; retry this line on its own.
             if _leaked_placeholder(translation, orig):
@@ -2815,7 +2826,7 @@ class AIClient:
                 )
                 result = self._postprocess_result(
                     data.get("message", {}).get("content", "").strip(), code_map,
-                    clean_text)
+                    clean_text, field, original=text)
                 if result and result not in variants:
                     variants.append(result)
                 elif result:
@@ -2827,7 +2838,7 @@ class AIClient:
                     )
                     result2 = self._postprocess_result(
                         data2.get("message", {}).get("content", "").strip(), code_map,
-                        clean_text)
+                        clean_text, field, original=text)
                     if result2 and result2 not in variants:
                         variants.append(result2)
             except FatalProviderError:

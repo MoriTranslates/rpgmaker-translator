@@ -13,6 +13,9 @@ Fixers (safe, deterministic repairs; ``clean_output`` runs them in order):
   spelling, else title case.
 - restore_leading_blank_line: a source that starts with blank line(s) keeps
   them, and the first real line starts with a capital.
+- restore_speech_quotes: a reply with no quotes to a line that is exactly one
+  「...」 gets wrapped in "..." (takes the RAW original, not the cleaned source;
+  not part of ``clean_output``).
 
 Checks (return a reason string or None; ``batch_problems`` runs them):
 - length_mismatch: a long, varied source (40+ content chars) answered in 1-2
@@ -182,6 +185,56 @@ def restore_leading_blank_line(output: str, source: str) -> str:
         return output
     return "\n" * lead + _LOWER_START_RE.sub(
         lambda m: m.group(1) + m.group(2).upper(), output, count=1)
+
+
+# VN engines display dialogue in speech boxes: their speech quotes are
+# dropped, not converted, and never restored.
+VN_ENGINES = frozenset({"tyranoscript", "kirikiri", "crowd", "renpy"})
+
+_JP_SPEECH_OPEN = chr(0x300C)    # 「
+_JP_SPEECH_CLOSE = chr(0x300D)   # 」
+_LEADING_TAGS_RE = re.compile(r"(?:<[A-Za-z/][^<>\n]*>\s*)+")
+# Any of these in the reply means the model kept (some) quoting: leave it.
+# Curly double quotes, JP brackets, guillemets (French etc.) and the German
+# low quote. Not U+2019: it is also the curly apostrophe in "don't".
+_REPLY_QUOTE_CHARS = ('"', chr(0x201C), chr(0x201D), chr(0x201E),
+                      chr(0xAB), chr(0xBB), _JP_SPEECH_OPEN,
+                      _JP_SPEECH_CLOSE, chr(0x300E), chr(0x300F))
+
+
+def restore_speech_quotes(original: str, output: str) -> str:
+    """Wrap the reply in "..." when the Japanese is one 「...」 around the line.
+
+    Models (Sugoi 14B in particular) often drop the quotes: in one game only
+    26 of 4,418 「」 lines kept them. ``original`` is the RAW Japanese (before
+    brackets are converted, so 「A」と「B」 and 「A『B』C」 can be told apart).
+
+    Fails closed: the original must start with 「 and end with 」 with no
+    other 「 or 」 (an inner 『』 is fine); anything before or after (a control
+    code, a name glued on) means no change. A reply that has any quote mark
+    of its own is left alone, and so is one wrapped in single quotes.
+    """
+    if not output or not original:
+        return output
+    src = original.strip()
+    if (len(src) < 2 or not src.startswith(_JP_SPEECH_OPEN)
+            or not src.endswith(_JP_SPEECH_CLOSE)
+            or src.count(_JP_SPEECH_OPEN) != 1
+            or src.count(_JP_SPEECH_CLOSE) != 1):
+        return output
+    if any(q in output for q in _REPLY_QUOTE_CHARS):
+        return output
+    stripped = output.strip()
+    start = output.index(stripped[0]) if stripped else 0
+    # Leading <Tag>s (<WordWrap>, <B>) stay outside the quotes.
+    tags = _LEADING_TAGS_RE.match(stripped)
+    if tags:
+        start += tags.end()
+    body = output[start:].rstrip()
+    if not body or (len(body) > 1 and body[0] == "'" and body[-1] == "'"):
+        return output
+    end = start + len(body)
+    return output[:start] + '"' + body + '"' + output[end:]
 
 
 def clean_output(source: str, output: str, *, glossary: dict | None = None,
