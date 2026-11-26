@@ -542,10 +542,9 @@ def build_blank(images: list[Image.Image]) -> Blank:
         masks = [ImageChops.lighter(_diff_mask(im, bg, _DIFF_TEXT // 2).filter(
             ImageFilter.MaxFilter(7)), s) for im, s in zip(images, seeds)]
         bg, holes = _masked_median(images, masks)
+        # Kept in Blank.holes only: the new button is drawn from smoothed
+        # colours, so these filled pixels never show and need no message.
         hole_count = _fill_holes(bg, holes)
-        if hole_count:
-            notes.append(f"{hole_count} pixels were under text on every button "
-                         "and were filled in from their neighbours")
     else:
         # Too few to compare: text = strong edges away from the outer frame
         mx, my = max(4, w // 25), max(4, h // 8)

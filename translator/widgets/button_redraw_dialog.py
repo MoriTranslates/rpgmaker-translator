@@ -26,7 +26,8 @@ from PyQt6.QtWidgets import (
 
 from .. import button_redraw as BR
 
-COL_TICK, COL_ORIG, COL_NEW, COL_FILE, COL_JP, COL_EN, COL_NOTE = range(7)
+# Left to right as the work goes: original -> Japanese -> English -> new button
+COL_TICK, COL_ORIG, COL_JP, COL_EN, COL_NEW, COL_FILE, COL_NOTE = range(7)
 THUMB_W = 200
 
 
@@ -88,10 +89,10 @@ class ButtonRedrawDialog(QDialog):
         intro = QLabel(
             "1. Read and translate: the image model reads each button "
             "(or takes the Japanese from its file name) and translates it "
-            "as a short label.  2. Check the table (Japanese left, English "
-            "right; edit anything) and the New column. Nothing is written "
-            "yet.  3. Continue: make buttons: one new button per style, in the same colours, with "
-            "the English on it. Originals are kept in img_original/.")
+            "as a short label.  2. Check each row: original button, Japanese, "
+            "English (edit anything), and the new button it makes. Nothing is "
+            "written yet.  3. Continue: make buttons writes the ticked ones "
+            "into the game; originals are kept in img_original/.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
 
@@ -123,7 +124,8 @@ class ButtonRedrawDialog(QDialog):
 
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["", "Original", "New", "File", "Japanese", "English", "Note"])
+            ["", "Original button", "Japanese (OCR)", "English",
+             "New button", "File", "Note"])
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(COL_TICK, QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(COL_ORIG, QHeaderView.ResizeMode.ResizeToContents)
