@@ -21,6 +21,11 @@ from qt_helpers import dispose  # noqa: E402
 from translator import ai_client  # noqa: E402
 from translator.ai_client import AIClient, PROVIDER_MODELS  # noqa: E402
 
+import httpx  # noqa: E402
+
+# openai builds its errors from a request; None broke with openai 3.60
+_FAKE_REQUEST = httpx.Request("POST", "https://api.invalid/v1/chat/completions")
+
 # Shut down, or shutting down soon, per each provider's deprecation page
 # (checked 2026-11-05). None of these may be offered as a suggestion.
 DEAD_OR_DYING = {
@@ -112,7 +117,7 @@ def test_fetch_uses_live_list_with_suggestions_first(fake_openai):
 
 
 def test_fetch_falls_back_when_list_call_raises(fake_openai):
-    fake_openai.result = openai.APIConnectionError(request=None)
+    fake_openai.result = openai.APIConnectionError(request=_FAKE_REQUEST)
     models, live = ai_client.fetch_cloud_models("OpenAI", "key")
     assert live is False
     assert models == PROVIDER_MODELS["OpenAI"]

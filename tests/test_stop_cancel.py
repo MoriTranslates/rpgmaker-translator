@@ -27,6 +27,11 @@ from translator import ai_client  # noqa: E402
 from translator.ai_client import AIClient  # noqa: E402
 from translator.project_model import TranslationEntry  # noqa: E402
 
+import httpx  # noqa: E402
+
+# openai builds its errors from a request; None broke with openai 3.60
+_FAKE_REQUEST = httpx.Request("POST", "https://api.invalid/v1/chat/completions")
+
 pytest.importorskip("PyQt6")
 
 
@@ -112,7 +117,7 @@ def test_cloud_request_wait_is_cancellable(monkeypatch):
         def __init__(self, **kw):
             def create(**p):
                 gate.wait(30)
-                raise openai.APIConnectionError(request=None)
+                raise openai.APIConnectionError(request=_FAKE_REQUEST)
             self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
 
         def with_options(self, **kw):
