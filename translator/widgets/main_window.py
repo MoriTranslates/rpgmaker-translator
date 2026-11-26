@@ -57,7 +57,9 @@ from .glossary_dialog import GlossaryDialog
 from .actor_gender_dialog import ActorGenderDialog
 from .speaker_gender_dialog import SpeakerGenderDialog
 from ..narration import narration_pov, suggest_narrators
+from .. import review as review_mod
 from ..suspects import find_suspects
+from .review_dialog import ReviewDialog
 from .suspect_dialog import SuspectDialog
 from ..speakers import collect_speakers, lookup_speaker_gender
 from .variant_dialog import VariantDialog
@@ -365,7 +367,7 @@ class MainWindow(QMainWindow):
         "batch_action": "layers", "batch_actor_action": "users",
         "strip_actor_codes_action": "eraser", "polish_action": "spell-check",
         "consistency_action": "list-checks", "reset_all_action": "rotate-ccw",
-        "suspects_action": "search",
+        "suspects_action": "search", "ai_review_action": "spell-check",
         "translate_images_action": "image",
         "edit_glossary_action": "book-open", "load_vocab_action": "file-down",
         "speaker_genders_action": "user-round",
@@ -565,6 +567,14 @@ class MainWindow(QMainWindow):
         self.suspects_action.triggered.connect(self._find_suspects)
         self.suspects_action.setEnabled(False)
         translate_menu.addAction(self.suspects_action)
+
+        self.ai_review_action = QAction("6. Review with AI…", self)
+        self.ai_review_action.setToolTip(
+            "A strong model reads each scene, Japanese and English side by "
+            "side, and proposes fixes; you pick which to apply")
+        self.ai_review_action.triggered.connect(self._ai_review)
+        self.ai_review_action.setEnabled(False)
+        translate_menu.addAction(self.ai_review_action)
 
         translate_menu.addSeparator()
 
@@ -1297,7 +1307,7 @@ class MainWindow(QMainWindow):
             self.find_replace_action, self.cleanup_action,
             self.strip_actor_codes_action, self.polish_action,
             self.consistency_action, self.reset_all_action,
-            self.suspects_action,
+            self.suspects_action, self.ai_review_action,
             self.translate_images_action,
             # Glossary
             self.load_vocab_action, self.export_vocab_action,
@@ -4339,6 +4349,47 @@ class MainWindow(QMainWindow):
         dlg = SuspectDialog(self.project.entries, run, parent=self)
         if dlg.exec():
             self._filter_table_to_ids(dlg.selected_ids(), "suspect lines")
+
+    def _ai_review(self):
+        """Translate > Review with AI: proposed fixes, applied only if ticked."""
+        if not self.project or not self.project.entries:
+            return
+        if not self._check_engine_idle() or not self._ensure_ollama_ready():
+            return
+        entries = self.project.entries
+        scopes = {
+            "All translated lines": None,
+            "Suspect lines only (Find Suspect Lines)": find_suspects(
+                entries, glossary=self.client.glossary,
+                speaker_genders=self.project.speaker_genders,
+                target_language=self.client.target_language).ids(),
+            "Lines shown in the table": {
+                e.id for e in self.trans_table._visible_entries},
+        }
+        sheet = review_mod.character_sheet(
+            self.project.speaker_genders, self.client.glossary,
+            self._current_narrator_names())
+        dlg = ReviewDialog(entries, self.client, sheet, scopes, parent=self)
+        self._busy = True
+        try:
+            accepted = dlg.exec()
+        finally:
+            self._busy = False
+        if not accepted:
+            return
+        ticked = dlg.ticked()
+        if not ticked:
+            return
+        before = self._snapshot_entries()
+        changed = review_mod.apply(ticked, entries)
+        self._record_undo("AI review fixes", before)
+        self.trans_table.refresh()
+        self.event_viewer.refresh_current_event()
+        self.file_tree.refresh_stats(self.project)
+        self._autosave()
+        self.statusbar.showMessage(
+            f"Applied {len(ticked)} AI review fixes ({len(changed)} lines with "
+            "copies). Export to Game to write them; Undo is available.", 10000)
 
     def _auto_fix_collisions(self, collisions: list):
         """Append disambiguators to colliding translations to make them unique.
