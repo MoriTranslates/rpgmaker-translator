@@ -39,10 +39,13 @@ Fixers that need the source expect the cleaned source the model saw
 the inside of a control code is never changed.
 """
 
+import logging
 import re
 import unicodedata
 
 from . import CONTROL_CODE_RE, JAPANESE_RE
+
+log = logging.getLogger(__name__)
 
 # ── Input ───────────────────────────────────────────────────────────
 
@@ -379,6 +382,78 @@ def clean_output(source: str, output: str, *, glossary: dict | None = None,
 
 
 # ── Checks ──────────────────────────────────────────────────────────
+
+# Romanised sound effects ("Zuppuh", "DOPPY", "Juph"): katakana SFX the
+# model spelled out in romaji instead of translating. A word counts when it
+# splits into romaji syllables (with SFX endings like -h, -pp, -ph), starts
+# with a hard SFX consonant, and isn't an English word or a common moan.
+_ROMAJI_SYLLABLE = (
+    r"(?:(?:kk|gg|ss|zz|tt|dd|pp|bb|tch|cch|chch)?"
+    r"(?:ky|gy|sh|ch|ts|ny|hy|my|ry|by|py|j|[kgsztdnhbpmyrwf])?[aiueo]+"
+    r"|n(?![aiueoy]))")
+_ROMAJI_SFX_RE = re.compile(
+    r"(?:" + _ROMAJI_SYLLABLE + r")+(?:h+|ppy|py|pp|ph+|p|tt|t|ts|zz|tsu)?",
+    re.IGNORECASE)
+_SFX_START_RE = re.compile(r"^(?:z|j|g|d|b|p|ts|ch|gy|by|py)", re.IGNORECASE)
+_WORD_TOKEN_RE = re.compile(r"[A-Za-z]+")
+# Romaji-shaped words that are fine in English game text.
+_SFX_OK = frozenset("""
+    pan pun pin pen pon bun bin ban ban bon den din dan don gun gin gone
+    dope dune june jun jin jane zen zone bone pine dine done gene tune
+    chin chop chap chip chun pa pi po pu be bi bo bu de di do du ga ge
+    go gu ja ji jo ju za ze zo zu chu chuu chuchu
+""".split())
+
+
+# Sounds that are normal in English game text: laughs (gahaha), grunts
+# (guh, puh), kisses (chu, chuu, chup).
+_SFX_OK_RE = re.compile(
+    r"^(?:g[aeiou](?:h[aeiou])+h*|[gp]u+h+|chu+p?|(?:chu)+)$")
+
+
+def romanised_sfx(text: str, glossary: dict | None = None) -> list[str]:
+    """Words in an English reply that look like romanised katakana SFX.
+
+    Flags, never fixes: the reviewer decides. English words (any word the
+    word-splitter knows), glossary English (names like Tsukimoto) and
+    common laughs/grunts/kisses are not flagged.
+    """
+    names = set()
+    for en in (glossary or {}).values():
+        if isinstance(en, str):
+            names.update(w.lower() for w in _WORD_TOKEN_RE.findall(en))
+    found = []
+    for tok in _WORD_TOKEN_RE.findall(text or ""):
+        low = tok.lower()
+        if (len(low) < 3 or low in _SFX_OK or low in names
+                or _SFX_OK_RE.match(low)
+                or not _SFX_START_RE.match(low)
+                or not _ROMAJI_SFX_RE.fullmatch(low)):
+            continue
+        if _is_english_word(low):
+            continue
+        found.append(tok)
+    return found
+
+
+_ENGLISH_WORDS: frozenset | None = None
+
+
+def _is_english_word(word: str) -> bool:
+    """True if ``word`` is in wordninja's English word list."""
+    global _ENGLISH_WORDS
+    if _ENGLISH_WORDS is None:
+        try:
+            import wordninja
+            # ~126k words; garbled SFX ("zupp", "juph", "doppy") aren't in it.
+            _ENGLISH_WORDS = frozenset(wordninja.DEFAULT_LANGUAGE_MODEL._wordcost)
+        except Exception:
+            # Without the list "but", "been" and "damage" look like romaji:
+            # flagging them would bury real problems, so flag nothing.
+            log.warning("English word list unavailable; SFX check disabled",
+                        exc_info=True)
+            _ENGLISH_WORDS = frozenset()
+    return not _ENGLISH_WORDS or word in _ENGLISH_WORDS
 
 _SHIFT_MIN_DUP_WORDS = 3       # identical answers shorter than this are fine ("Yeah.")
 _SHIFT_LONG_SRC = 40           # a source this long (content chars)...

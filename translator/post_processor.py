@@ -12,7 +12,8 @@ import wordninja
 
 from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
 from .output_checks import (VN_ENGINES, normalise_fullwidth,
-                            restore_speech_quotes, strip_prompt_leaks)
+                            restore_speech_quotes, romanised_sfx,
+                            strip_prompt_leaks)
 
 # wordninja's frequency model: cost = log((rank + 1) * log(N)), so a word's
 # dictionary rank can be recovered from its cost.
@@ -61,10 +62,14 @@ class PostProcessResult:
     mid_sentence_caps: int = 0
     total_entries_fixed: int = 0
     retranslate_ids: list = None  # Entry IDs that need LLM retranslation
+    # Lines that look like romanised SFX ("Zuppuh"): flagged, not changed
+    romanised_sfx_ids: list = None
 
     def __post_init__(self):
         if self.retranslate_ids is None:
             self.retranslate_ids = []
+        if self.romanised_sfx_ids is None:
+            self.romanised_sfx_ids = []
 
     def __str__(self) -> str:
         parts = []
@@ -118,6 +123,9 @@ class PostProcessResult:
             parts.append(f"{self.fullwidth_punct} full-width punctuation fixed")
         if self.prompt_leaks:
             parts.append(f"{self.prompt_leaks} leaked prompt lines removed")
+        if self.romanised_sfx_ids:
+            parts.append(f"{len(self.romanised_sfx_ids)} lines may have "
+                         "romanised sound effects (not changed)")
         if self.missing_spaces:
             parts.append(f"{self.missing_spaces} missing spaces fixed")
         if self.split_words:
@@ -1238,6 +1246,11 @@ def run_post_processing(entries: list, verbose: bool = False,
         if _fix_fullwidth(entry, target_language):
             result.fullwidth_punct += 1
             entry_fixed = True
+
+        # Flag only: romanised katakana SFX ("Zuppuh") need a human
+        if (target_language == "English"
+                and romanised_sfx(entry.translation, glossary)):
+            result.romanised_sfx_ids.append(entry.id)
 
         # After the <WordWrap> strip, so the quote lands on the text itself.
         if (project_type not in VN_ENGINES

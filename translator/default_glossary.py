@@ -735,6 +735,39 @@ ONOMATOPOEIA = {
     "ピクピク": "Twitching",
     "ズブズブ": "Plunging",
     "ジュボジュボ": "Slurping",
+    # Single-hit SFX that models romanised in "My Happiness 2" ("Pan!",
+    # "DOPPY", "Zuppuh"). Each keeps its small ッ so it can't match inside
+    # an ordinary word (パンッ is not パンツ "panties"); too-short ones like
+    # ズッ / グッ / キュッ are left out on purpose (ずっと, グッと).
+    "パンッ": "Slap",
+    "ズチュッ": "Squelch",
+    "ズッチュッ": "Squelch",
+    "グチュッ": "Squelch",
+    "グッチュッ": "Squelch",
+    "クチュッ": "Squish",
+    "ズプッ": "Squish",
+    "ズププッ": "Squish",
+    "ズブッ": "Plunge",
+    "ヌプッ": "Squish",
+    "ツプッ": "Slip",
+    "チュプッ": "Slurp",
+    "ジュプッ": "Slurp",
+    "ジュップッ": "Slurp",
+    "ジュポッ": "Slurp",
+    "ジュルッ": "Slurp",
+    "ジュルル": "Slurp",
+    "レロッ": "Lick",
+    "レロレロ": "Licking",
+    "チュッ": "Smooch",
+    # Not ビュッ alone: it is inside ビュッフェ (buffet).
+    "ビュルッ": "Splurt",
+    "ビュルルッ": "Splurt",
+    "ビュプッ": "Spurt",
+    "ドピュッ": "Spurt",
+    "ドプッ": "Gush",
+    "ピュッ": "Squirt",
+    "ピュルッ": "Squirt",
+    "ギシギシ": "Creak",
 }
 
 # ── All categories with labels ──────────────────────────────────
