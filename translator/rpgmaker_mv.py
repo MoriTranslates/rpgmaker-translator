@@ -128,6 +128,16 @@ _BAT_ADDED_LIST = "rmt_added_files.txt"
 _BAT_PATH_OK_RE = re.compile(r"^[A-Za-z0-9._ -]+(/[A-Za-z0-9._ -]+)*$")
 
 
+def _images_left_out_note(paths: list[str]) -> str:
+    """README line for translated images an install package couldn't carry."""
+    if not paths:
+        return ""
+    return (f"Not included: {len(paths)} translated image(s) whose names the "
+            "installer can't handle (" + ", ".join(paths[:5])
+            + (", ..." if len(paths) > 5 else "")
+            + "). The Drop-in Patch includes them.\n")
+
+
 def _bat_package_path(rel: str) -> str:
     """A package file's game-relative path as a backslash path for the .bat
     scripts.  Only plain names are allowed (the package's own files are
@@ -1164,16 +1174,22 @@ class RPGMakerMVParser:
                             build_gamefont_css(orig_css, self.game_font,
                                                font_files))
 
+            images_left_out = self._put_translated_images(
+                zf, project_dir, data_rel)
             total_entries = sum(len(v) for v in by_file.values())
 
             self._write_package_scripts(
                 zf, project_dir, data_rel, js_rel, data_file_count,
                 has_plugins, game_title, inject_wordwrap=inject_wordwrap,
                 font_name=self.game_font, shipped=shipped,
-                extra_line=f"Entries: {total_entries} translated\n")
+                extra_line=f"Entries: {total_entries} translated\n"
+                + _images_left_out_note(images_left_out))
         self.last_patch_skipped = skipped_lines
-        game_io.raise_export_problems([], skipped_lines, outside=outside,
-                                      manifest=manifest)
+        game_io.raise_export_problems(
+            [], skipped_lines, outside=outside, manifest=manifest,
+            unsupported=[f"{a}: translated image not in this install package "
+                         "(its name can't go in install.bat); use Create "
+                         "Drop-in Patch to ship it" for a in images_left_out])
 
     def export_game_folder_as_patch(self, game_path: str, zip_path: str,
                                     game_title: str = "",
@@ -1240,15 +1256,19 @@ class RPGMakerMVParser:
                 zf.writestr(f"{js_rel}/plugins.js", plugins_content)
                 has_plugins = True
 
+            images_left_out = self._put_translated_images(
+                zf, game_path, data_rel)
             self._write_package_scripts(
                 zf, game_path, data_rel, js_rel, data_file_count,
                 has_plugins, game_title, inject_wordwrap=False,
-                font_name=None, shipped=shipped)
+                font_name=None, shipped=shipped,
+                extra_line=_images_left_out_note(images_left_out))
 
         return {
             "data_files": data_file_count,
             "has_plugins": has_plugins,
             "data_original_exists": data_original_exists,
+            "images_left_out": images_left_out,
         }
 
     @staticmethod
@@ -1290,6 +1310,54 @@ class RPGMakerMVParser:
             from .text_processor import WORDWRAP_PLUGIN_JS
             zf.writestr(f"{js_rel}/plugins/TranslatorWordWrap.js",
                         WORDWRAP_PLUGIN_JS.strip() + "\n")
+
+    @staticmethod
+    def _put_translated_images(zf, game_dir: str, data_rel: str) -> list[str]:
+        """Ship the game images this app replaced (Translate Images export).
+
+        Image export keeps each original under img_original/ (same subpath)
+        and writes the translated image into img/ (re-encrypted for
+        encrypted games). Only files with such a backup that now differ from
+        it are shipped, at their real img/ path, so a patch carries e.g.
+        redrawn picture-choice buttons and never the game's other art.
+
+        install.bat only takes plain ASCII paths (no shell escaping), so in
+        the install layout an image with another name (C_はい.rpgmvp) is left
+        out. Returns the game-relative paths left out that way.
+        """
+        base_rel = posixpath.dirname(data_rel)            # "www" or ""
+        img_rel = posixpath.join(base_rel, "img") if base_rel else "img"
+        base_dir = os.path.join(game_dir, *base_rel.split("/")) if base_rel \
+            else game_dir
+        img_dir = os.path.join(base_dir, "img")
+        backup_dir = os.path.join(base_dir, "img_original")
+        if not os.path.isdir(backup_dir) or not os.path.isdir(img_dir):
+            return []
+        left_out = []
+        for root, dirs, files in os.walk(backup_dir):
+            dirs.sort()
+            for name in sorted(files):
+                bak = os.path.join(root, name)
+                rel = os.path.relpath(bak, backup_dir)
+                live = os.path.join(img_dir, rel)
+                if not os.path.isfile(live):
+                    continue
+                with open(live, "rb") as f:
+                    data = f.read()
+                with open(bak, "rb") as f:
+                    if f.read() == data:
+                        continue        # not translated (or put back)
+                arc = f"{img_rel}/{rel.replace(os.sep, '/')}"
+                if zf.layout == "install" and (
+                        not _BAT_PATH_OK_RE.match(arc)
+                        or ".." in arc.split("/")):
+                    left_out.append(arc)
+                    continue
+                zf.writestr(arc, data)
+        if left_out:
+            log.warning("Translated images left out of the install package "
+                        "(names install.bat can't use): %s", left_out)
+        return left_out
 
     @classmethod
     def _load_plugins_js_strict(cls, path: str) -> list:

@@ -6455,6 +6455,11 @@ class MainWindow(QMainWindow):
                     "\ndata_original/ detected \u2014 data/ contains "
                     "translated files (as expected)."
                 )
+            left_out = stats.get("images_left_out") or []
+            if left_out:
+                msg += (f"\n\n{len(left_out)} translated image(s) have names "
+                        "install.bat can't handle and are NOT in this package "
+                        "(use the Drop-in version to ship them).")
             if layout == "dropin":
                 msg += ("\n\nEnd users: back up the files README.txt lists, "
                         "then extract into the game folder.")
