@@ -57,6 +57,8 @@ from .glossary_dialog import GlossaryDialog
 from .actor_gender_dialog import ActorGenderDialog
 from .speaker_gender_dialog import SpeakerGenderDialog
 from ..narration import narration_pov, suggest_narrators
+from ..suspects import find_suspects
+from .suspect_dialog import SuspectDialog
 from ..speakers import collect_speakers, lookup_speaker_gender
 from .variant_dialog import VariantDialog
 from .image_panel import ImagePanel
@@ -363,6 +365,7 @@ class MainWindow(QMainWindow):
         "batch_action": "layers", "batch_actor_action": "users",
         "strip_actor_codes_action": "eraser", "polish_action": "spell-check",
         "consistency_action": "list-checks", "reset_all_action": "rotate-ccw",
+        "suspects_action": "search",
         "translate_images_action": "image",
         "edit_glossary_action": "book-open", "load_vocab_action": "file-down",
         "speaker_genders_action": "user-round",
@@ -553,6 +556,15 @@ class MainWindow(QMainWindow):
         self.wordwrap_action.triggered.connect(self._apply_wordwrap)
         self.wordwrap_action.setEnabled(False)
         translate_menu.addAction(self.wordwrap_action)
+
+        self.suspects_action = QAction("5. Find Suspect Lines…", self)
+        self.suspects_action.setToolTip(
+            "Point at lines that are probably wrong although they pass every "
+            "check: lost \"I\" in narration, dropped negations, \"he\" with no "
+            "man in the Japanese, romanised sound effects...")
+        self.suspects_action.triggered.connect(self._find_suspects)
+        self.suspects_action.setEnabled(False)
+        translate_menu.addAction(self.suspects_action)
 
         translate_menu.addSeparator()
 
@@ -1285,6 +1297,7 @@ class MainWindow(QMainWindow):
             self.find_replace_action, self.cleanup_action,
             self.strip_actor_codes_action, self.polish_action,
             self.consistency_action, self.reset_all_action,
+            self.suspects_action,
             self.translate_images_action,
             # Glossary
             self.load_vocab_action, self.export_vocab_action,
@@ -4298,7 +4311,7 @@ class MainWindow(QMainWindow):
         elif action == "retry":
             self._retranslate_collisions(colliding_ids)
 
-    def _filter_table_to_ids(self, entry_ids: list[str]):
+    def _filter_table_to_ids(self, entry_ids, what: str = "colliding entries"):
         """Filter the translation table to show only the given entry IDs."""
         if not entry_ids:
             return
@@ -4308,8 +4321,24 @@ class MainWindow(QMainWindow):
         if hasattr(self.file_tree, "tree"):
             self.file_tree.tree.clearSelection()
         self.statusBar().showMessage(
-            f"Showing {len(id_set)} colliding entries", 8000
+            f"Showing {len(id_set)} {what}", 8000
         )
+
+    def _find_suspects(self):
+        """Translate > Find Suspect Lines: point at likely-wrong lines."""
+        if not self.project or not self.project.entries:
+            return
+
+        def run(include_reviewed: bool):
+            return find_suspects(
+                self.project.entries, glossary=self.client.glossary,
+                speaker_genders=self.project.speaker_genders,
+                include_reviewed=include_reviewed,
+                target_language=self.client.target_language)
+
+        dlg = SuspectDialog(self.project.entries, run, parent=self)
+        if dlg.exec():
+            self._filter_table_to_ids(dlg.selected_ids(), "suspect lines")
 
     def _auto_fix_collisions(self, collisions: list):
         """Append disambiguators to colliding translations to make them unique.
