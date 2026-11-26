@@ -24,10 +24,8 @@ from translator.ai_client import (  # noqa: E402
     CLOUD_DEFAULT_WORKERS, PROVIDER_MODELS, PROVIDER_URLS, PROVIDERS,
     AIClient, engine_batch_workers)
 
-import httpx  # noqa: E402
-
-# openai builds its errors from a request; None broke with openai 3.60
-_FAKE_REQUEST = httpx.Request("POST", "https://api.invalid/v1/chat/completions")
+from openai_fakes import FAKE_REQUEST as _FAKE_REQUEST  # noqa: E402
+from openai_fakes import fake_response  # noqa: E402,F401
 
 OR = "OpenRouter"
 OR_URL = "https://openrouter.ai/api/v1"

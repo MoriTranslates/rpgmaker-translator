@@ -21,10 +21,8 @@ from qt_helpers import dispose  # noqa: E402
 from translator import ai_client  # noqa: E402
 from translator.ai_client import AIClient, PROVIDER_MODELS  # noqa: E402
 
-import httpx  # noqa: E402
-
-# openai builds its errors from a request; None broke with openai 3.60
-_FAKE_REQUEST = httpx.Request("POST", "https://api.invalid/v1/chat/completions")
+from openai_fakes import FAKE_REQUEST as _FAKE_REQUEST  # noqa: E402
+from openai_fakes import fake_response  # noqa: E402,F401
 
 # Shut down, or shutting down soon, per each provider's deprecation page
 # (checked 2026-11-05). None of these may be offered as a suggestion.

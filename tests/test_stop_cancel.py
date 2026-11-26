@@ -27,10 +27,8 @@ from translator import ai_client  # noqa: E402
 from translator.ai_client import AIClient  # noqa: E402
 from translator.project_model import TranslationEntry  # noqa: E402
 
-import httpx  # noqa: E402
-
-# openai builds its errors from a request; None broke with openai 3.60
-_FAKE_REQUEST = httpx.Request("POST", "https://api.invalid/v1/chat/completions")
+from openai_fakes import FAKE_REQUEST as _FAKE_REQUEST  # noqa: E402
+from openai_fakes import fake_response  # noqa: E402,F401
 
 pytest.importorskip("PyQt6")
 

@@ -21,10 +21,8 @@ from translator import ai_client  # noqa: E402
 from translator.ai_client import AIClient  # noqa: E402
 from translator.project_model import TranslationEntry  # noqa: E402
 
-import httpx  # noqa: E402
-
-# openai builds its errors from a request; None broke with openai 3.60
-_FAKE_REQUEST = httpx.Request("POST", "https://api.invalid/v1/chat/completions")
+from openai_fakes import FAKE_REQUEST as _FAKE_REQUEST  # noqa: E402
+from openai_fakes import fake_response  # noqa: E402,F401
 
 pytest.importorskip("PyQt6")
 
@@ -143,7 +141,7 @@ def test_translate_batch_on_blocked_reply_raises_value_error(monkeypatch):
 def test_invalid_key_raises_fatal_invalid_api_key(monkeypatch):
     def boom(**p):
         raise openai.AuthenticationError(
-            "bad key", response=httpx.Response(401, request=_FAKE_REQUEST),
+            "bad key", response=fake_response(401),
             body=None)
     sdk = SimpleNamespace(with_options=lambda **kw: SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=boom))))
