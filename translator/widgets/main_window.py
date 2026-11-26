@@ -11,6 +11,9 @@ from collections import Counter
 
 log = logging.getLogger(__name__)
 
+# "[name]: " at the start of a context line: who said that earlier line.
+_PREV_SPEAKER_LABEL_RE = re.compile(r"(?m)^\[([^\[\]\n]+)\]: ")
+
 from PyQt6.QtWidgets import (
     QMainWindow, QSplitter, QStatusBar, QProgressBar,
     QFileDialog, QMessageBox, QLabel, QWidget, QVBoxLayout, QHBoxLayout,
@@ -1848,7 +1851,7 @@ class MainWindow(QMainWindow):
         if not jp_to_en:
             return
         for entry in self.project.entries:
-            if not entry.context or "[Speaker:" not in entry.context:
+            if not entry.context:
                 continue
             m = re.search(r'\[Speaker:\s*(.+?)\]', entry.context)
             if m and m.group(1).strip() in jp_to_en:
@@ -1857,6 +1860,13 @@ class MainWindow(QMainWindow):
                     f"[Speaker: {old_name}]",
                     f"[Speaker: {jp_to_en[old_name]}]",
                 )
+            # Earlier lines are labelled "[name]: text" (parsers add who said
+            # each one); rename those labels too.
+            if "]: " in entry.context:
+                entry.context = _PREV_SPEAKER_LABEL_RE.sub(
+                    lambda lm: (f"[{jp_to_en[lm.group(1)]}]: "
+                                if lm.group(1) in jp_to_en else lm.group(0)),
+                    entry.context)
 
     def _backfill_db_glossary(self) -> int:
         """Add DB name glossary entries from already-translated entries.

@@ -2368,7 +2368,10 @@ class RPGMakerMVParser:
                     has_face=current_has_face,
                 ))
                 if extractable:
-                    recent_ctx.append(full_text)
+                    # Who said each earlier line ("[幸来]: ..."), as the VX
+                    # Ace parser does: "you" vs "he" depends on it.
+                    label = f"[{current_speaker}]: " if current_speaker else ""
+                    recent_ctx.append(f"{label}{full_text}")
                 continue
 
             # Show Choices

@@ -2029,11 +2029,34 @@ class AIClient:
             hint = self._voice_hint(orig, ctx).strip()
             if hint:
                 by_hint.setdefault(hint, []).append(key)
+        who = self._batch_who_says(entries)
         if not by_hint:
-            return ""
+            return who
         if len(by_hint) == 1 and len(next(iter(by_hint.values()))) == len(entries):
-            return next(iter(by_hint)) + "\n"
-        return "".join(f"{', '.join(keys)}: {hint}\n" for hint, keys in by_hint.items())
+            return who + next(iter(by_hint)) + "\n"
+        return who + "".join(f"{', '.join(keys)}: {hint}\n"
+                             for hint, keys in by_hint.items())
+
+    def _batch_who_says(self, entries) -> str:
+        """"Who says each line: Line1 = Yukiko; Line2 = narration; ..."
+
+        Lines in a batch are consecutive, so knowing each line's speaker
+        tells the model who "you" is in the next one. Only sent when the
+        batch has more than one speaker (or speech and narration mixed).
+        """
+        labels = []
+        for key, orig, ctx, field in entries:
+            sp = speakers.speaker_of(ctx or "")
+            if sp:
+                labels.append((key, self.glossary.get(sp) or sp))
+            elif field in ("dialog", "dialogue", "scroll_text"):
+                quoted = (orig or "").strip().startswith(
+                    (chr(0x300C), chr(0x300E), chr(0xFF08), "(", '"'))
+                labels.append((key, "unnamed speaker" if quoted else "narration"))
+        if len({who for _, who in labels}) < 2:
+            return ""
+        return ("Who says each line: "
+                + "; ".join(f"{k} = {w}" for k, w in labels) + "\n")
 
     def _filter_glossary(self, text: str, context: str = "") -> dict[str, str]:
         """Return only glossary entries whose JP term appears in text or context.
