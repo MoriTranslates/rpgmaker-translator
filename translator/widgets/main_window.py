@@ -3398,6 +3398,21 @@ class MainWindow(QMainWindow):
                 notes += self.handler.parser.note_own_files(
                     self.project.project_path)
 
+                # Does every picture / sound the game names still exist?
+                # A translated file name stops the game with "Failed to load".
+                try:
+                    from ..asset_check import export_note
+                    root = self.parser.find_content_root(
+                        self.project.project_path)
+                    asset_note = export_note(root) if root else ""
+                    if asset_note:
+                        notes.append(asset_note)
+                except Exception as exc:  # noqa: BLE001
+                    # A read-only warning aid: the export itself is already
+                    # written and verified, so a failed check only means no
+                    # extra warning. Logged so it isn't silent.
+                    log.warning("Asset check after export failed: %s", exc)
+
             # RM2K/2K3: auto-copy EasyRPG Player for locale-independent play
             if self.handler.key == "rpgmaker_2k":
                 easyrpg_msg = self._ensure_easyrpg_player(
