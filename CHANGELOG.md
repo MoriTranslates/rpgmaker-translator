@@ -9,6 +9,9 @@ The release workflow publishes the section whose heading matches the pushed tag
 
 ## [Unreleased]
 
+### Changed
+- Default prompt v3, from the mistakes found in a full review of one game, where about 1 line in 5 was wrong even though every automatic check passed. New rules: keep every negation (ない, ではない, わけじゃない...), which models dropped at the end of long sentences and so reversed the meaning; keep comparisons ("bigger than mine"); させる (make or let) and られる (passive) keep who does what; in dialogue the listener is "you", never "he" or "she"; and a speaker's body is their own. Two batch examples now show a kept negation and a kept comparison. If you never edited your prompt, it updates to v3 automatically (for every language and engine); edited prompts are left alone.
+
 ### Added
 - Sound effects: the built-in "Onomatopoeia / SFX" glossary has 28 more entries for common adult-scene sound effects (パンッ → Slap, ズチュッ → Squelch, ドピュッ → Spurt, ジュポッ → Slurp...). Models used to spell these out in romaji ("Pan!", "DOPPY", "Zuppuh"). Short ones that appear inside ordinary words (ズッ in ずっと, ビュッ in ビュッフェ) are left out. Post-processing also counts English lines that still look like romanised sound effects; they are listed for review and never changed automatically.
 - The model now sees who said the earlier lines. RPG Maker MV/MZ context labels each previous line with its speaker ("[Yukiko]: ..."), as VX Ace already did, and a batch with several speakers lists who says each line ("Line1 = Yukiko; Line2 = narration; ..."). Whether a line means "you" or "he" usually depends on who spoke before. The labels follow speaker names when they are translated. Projects opened before this update keep their stored context until the game is opened as a new project.

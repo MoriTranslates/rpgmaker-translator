@@ -1,4 +1,9 @@
-"""Translation system prompts (prompt v2).
+"""Translation system prompts (prompt v3).
+
+v3 (lessons from "My Happiness 2", where ~1 line in 5 was wrong): keep
+negations and comparisons, させる/られる direction, the listener is "you",
+a speaker's body is their own; two batch examples from real errors. The v2
+texts' hashes are in prompt_legacy.py so saved v2 defaults migrate.
 
 Every default prompt is built from one shared core (CORE_RULES) plus a short
 engine add-on, so local and cloud models, single and batch requests, and every
@@ -59,7 +64,10 @@ Capitals:
 Perspective (check every line):
 - First decide if the Japanese line is 1st, 2nd or 3rd person and who does what to whom. Keep that person and direction; never swap subject and object.
 - A line without a speaker label is narration. Narration with 僕, 俺, 私, あたし or no subject is first person: the narrator stays "I/me/my" for the whole scene, never "he" or "she". This rule is only about the narrator's own pronoun; every other character's gender comes from the character info or the text.
-- Japanese omits possessives: infer each body part's owner from the scene. The one doing the action and the one it is done to keep their roles. てくれる/させてくれる = someone does it for me or lets me (吸わせてくれる = "lets me suck"); てあげる = I do it for someone.
+- Japanese omits possessives: infer each body part's owner from the scene. The one doing the action and the one it is done to keep their roles. てくれる/させてくれる = someone does it for me or lets me (吸わせてくれる = "lets me suck"); てあげる = I do it for someone; させる = makes or lets someone do it; られる = it is done to the subject (passive).
+- A speaker's body is their own: a man never says "my pussy" about himself; his penis is "my cock".
+- In dialogue the listener is "you", never "he"/"she" (to his wife: 家にいないの？ = "Aren't you home?").
+- Keep every negation (ない, ではない, わけじゃない, ません, ず), often at the end of long sentences; dropping one reverses the line. Keep comparisons (僕より大きい = "bigger than mine").
 - たら/ば ... 気がした/思った is a thought or hypothetical, not an event ("I felt that if I licked it...").
 - 彼 = he, 彼女 = she, あなた/お前/君 = you. Keep pronouns consistent with the previous lines and the character info.
 - Characters who call themselves by name keep doing so ("Mina doesn't know").
@@ -203,13 +211,16 @@ _BATCH_RULES = (
 # Few short lines in the exact form translate_batch sends (「」 already
 # converted to quotes, codes already «CODE» markers). Shows a speaker label,
 # a marker, first-person narration with body-part ownership, an explicit
-# line with a laugh and tilde, and a choice.
+# line with a laugh and tilde, a choice, a kept negation and a kept
+# comparison (both reversed by models in "My Happiness 2").
 _EXAMPLE_IN = {
     "Line1": "ミナ\n\"«CODE1»、おはよう！\"",
     "Line2": "僕は彼女の胸に顔をうずめた。",
     "Line3": "ふふっ、もっとイかせてあげる～♡",
     "Line4": "俺は彼女にチンポをしゃぶらせた。",
     "Line5": "宿屋に泊まる",
+    "Line6": "これは寝取らせではない。ただの浮気だ。",
+    "Line7": "\"健太さんのより、ずっと大きい…♡\"",
 }
 _EXAMPLE_OUT = {
     "Line1": "Mina\n\"«CODE1», good morning!\"",
@@ -217,6 +228,8 @@ _EXAMPLE_OUT = {
     "Line3": "Fufu, I'll make you cum even more～♡",
     "Line4": "I made her suck my cock.",
     "Line5": "Stay at the inn",
+    "Line6": "This isn't cuckolding. It's just cheating.",
+    "Line7": "\"It's so much bigger than Kenta-san's...♡\"",
 }
 
 
