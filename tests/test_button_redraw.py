@@ -528,3 +528,57 @@ def test_wizard_without_buttons_says_nothing(qapp, monkeypatch, tmp_path,
         dispose(wiz)
         from qt_helpers import dispose_main_window
         dispose_main_window(win)
+
+
+# ── Choice context from the script ───────────────────────────────
+
+def _te(eid, field, original, context=""):
+    from translator.project_model import TranslationEntry
+    return TranslationEntry(eid, "CommonEvents.json", field, original, "", "skipped", context)
+
+
+def test_choice_scenes_give_lines_before_and_all_options():
+    es = [_te("CE/1/dialog_1", "dialog", "送ろうか？"),
+          _te("CE/1/choice_1_0", "choice", "C_送っておく|350|200", "忘れない間に送ろうか？"),
+          _te("CE/1/choice_1_1", "choice", "C_後でいいだろう|350|300", "忘れない間に送ろうか？"),
+          _te("CE/2/choice_1_0", "choice", "C_送っておく|350|200", ""),   # later use, no context
+          _te("CE/3/choice_1_0", "choice", "普通の選択肢"),                 # ordinary text choice
+          _te("CE/4/choice_1_0", "choice", "img/x|1|2")]                   # path: ignored
+    sc = BR.choice_scenes(es)
+    assert sc["C_送っておく"].before == "忘れない間に送ろうか？"
+    assert sc["C_送っておく"].options == ["送っておく", "後でいいだろう"]
+    assert "img/x" not in sc
+    assert BR.choice_scenes([]) == {}
+
+
+def test_choice_scene_context_is_capped():
+    es = [_te("CE/1/choice_1_0", "choice", "C_a|1|1", "長" * 5000)]
+    assert len(BR.choice_scenes(es)["C_a"].before) == BR._SCENE_MAX
+
+
+def test_translate_label_sends_scene_and_player():
+    c = _Client()
+    scene = BR.ChoiceScene("忘れない間に送ろうか？", ["送っておく", "後でいいだろう"])
+    BR.translate_label(c, "送っておく", scene, "Mamoru")
+    ctx = c.contexts[-1]
+    assert "short button label" in ctx and "Mamoru" in ctx
+    assert "送っておく / 後でいいだろう" in ctx and "忘れない間に送ろうか？" in ctx
+    BR.translate_label(c, "はい")                      # no scene: hint only
+    assert "lines just before" not in c.contexts[-1]
+
+
+def test_dialog_sends_the_scene_for_each_button(qapp, tmp_path):
+    from translator.widgets.button_redraw_dialog import COL_EN, ButtonRedrawDialog
+    img_dir, names = _game(tmp_path)
+    stem = os.path.splitext(names[0])[0]
+    c = _Client()
+    dlg = ButtonRedrawDialog(img_dir, KEY, c, player="Mamoru",
+                             scenes={stem: BR.ChoiceScene("前の台詞", ["ボタン0", "ボタン1"])})
+    try:
+        dlg._run_translate()
+        dlg._worker.wait(5000)
+        qapp.processEvents()
+        assert any("前の台詞" in x and "Mamoru" in x for x in c.contexts)
+        assert all(dlg.table.item(r, COL_EN).text() for r in range(4))
+    finally:
+        dispose(dlg)

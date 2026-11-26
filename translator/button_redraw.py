@@ -203,9 +203,64 @@ BUTTON_HINT = (
     "二人 means 'you two'.")
 
 
-def translate_label(client, japanese: str) -> str:
-    """English for one button label, asked for as a short label."""
-    return client.translate(japanese, context=BUTTON_HINT, field="choice").strip()
+@dataclass
+class ChoiceScene:
+    """Where a picture-choice button is used in the game's script."""
+    before: str = ""                                  # lines just before it
+    options: list[str] = field(default_factory=list)  # every option, in order
+
+
+_SCENE_MAX = 600      # characters of earlier lines sent with a label
+
+
+def choice_scenes(entries) -> dict[str, ChoiceScene]:
+    """{button file stem: scene} from the project's picture-choice entries.
+
+    kz_PictureChoices-style choices are script entries whose text is the
+    image name (``C_送っておく|350|200``). Their stored context holds the
+    lines before the choice, and the other options of the same choice sit
+    next to them (``.../choice_1_0``, ``.../choice_1_1``). A label alone
+    doesn't say who is choosing or about what; this does. The first use of
+    a button with any context wins.
+    """
+    groups: dict[str, list[str]] = {}
+    firsts: dict[str, tuple[str, str]] = {}           # stem -> (group, context)
+    for e in entries:
+        if getattr(e, "field", "") != "choice":
+            continue
+        original = getattr(e, "original", "") or ""
+        stem = original.split("|", 1)[0].strip()
+        if not stem or "/" in stem or "\\" in stem:
+            continue
+        group = (getattr(e, "id", "") or "").rsplit("_", 1)[0]
+        groups.setdefault(group, []).append(stem)
+        ctx = (getattr(e, "context", "") or "").strip()
+        if stem not in firsts or (ctx and not firsts[stem][1]):
+            firsts[stem] = (group, ctx)
+    out = {}
+    for stem, (group, ctx) in firsts.items():
+        before = ctx[-_SCENE_MAX:]
+        opts = [label_from_filename(s) or s for s in groups.get(group, [])]
+        out[stem] = ChoiceScene(before, opts)
+    return out
+
+
+def translate_label(client, japanese: str, scene: ChoiceScene | None = None,
+                    player: str = "") -> str:
+    """English for one button label, asked for as a short label.
+
+    ``scene`` (from choice_scenes) and ``player`` (the protagonist's name)
+    tell the model who is choosing and what about: alone, 送っておく came
+    back as "Leave them alone" and その提案はのめない as "I can't refuse".
+    """
+    hint = BUTTON_HINT
+    if player:
+        hint += f" The player character is {player}."
+    if scene and len(scene.options) > 1:
+        hint += " The options in this choice are: " + " / ".join(scene.options) + "."
+    if scene and scene.before:
+        hint += "\nThe lines just before this choice:\n" + scene.before
+    return client.translate(japanese, context=hint, field="choice").strip()
 
 
 IMAGE_MODEL = "qwen3.5:9b"     # recommended: reads stylised game text well

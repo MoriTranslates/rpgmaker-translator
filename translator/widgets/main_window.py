@@ -6743,8 +6743,14 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Redraw Buttons",
                                     "This game has no img/ folder.")
             return
+        from ..button_redraw import choice_scenes
+        # The main narrator is the player character (Speakers and Narrator)
+        narr = self.project.narrators[0] if self.project.narrators else ""
+        player = self.client.glossary.get(narr, narr) if narr else ""
         dlg = ButtonRedrawDialog(img_dir, read_encryption_key(path), self.client,
-                                 saved=self.project.button_labels, parent=self)
+                                 saved=self.project.button_labels, parent=self,
+                                 scenes=choice_scenes(self.project.entries),
+                                 player=player if isinstance(player, str) else "")
         self._busy = True
         try:
             dlg.exec()

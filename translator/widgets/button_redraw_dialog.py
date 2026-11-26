@@ -60,9 +60,16 @@ class LabelWorker(QThread):
 
 class ButtonRedrawDialog(QDialog):
     def __init__(self, img_dir: str, key: str, client, saved: dict | None = None,
-                 parent=None):
-        """``saved``: {rel: [japanese, english]} from the project."""
+                 parent=None, scenes: dict | None = None, player: str = ""):
+        """``saved``: {rel: [japanese, english]} from the project.
+
+        ``scenes`` ({file stem: ChoiceScene}, see BR.choice_scenes) and
+        ``player`` give the translation the lines before each choice and
+        who is choosing.
+        """
         super().__init__(parent)
+        self._scenes = scenes or {}
+        self._player = player
         self.setWindowTitle("Redraw Buttons")
         self.setMinimumSize(1000, 640)
         self._img_dir = img_dir
@@ -456,13 +463,16 @@ class ButtonRedrawDialog(QDialog):
                 "already English: left alone" if en else "no text found")
 
     def _run_translate(self):
-        jobs = [(r, self.table.item(r, COL_JP).text().strip())
+        jobs = [(r, (self.table.item(r, COL_JP).text().strip(),
+                     os.path.splitext(os.path.basename(self._rel(r)))[0]))
                 for r in range(self.table.rowCount())
                 if self.table.item(r, COL_JP).text().strip()
                 and not self.table.item(r, COL_EN).text().strip()]
 
-        def tr(jp):
-            return BR.translate_label(self._ai, jp)
+        def tr(job):
+            jp, stem = job
+            return BR.translate_label(self._ai, jp, self._scenes.get(stem),
+                                      self._player)
         self._start(tr, jobs, COL_EN)
 
     # ── CSV ─────────────────────────────────────────────────────────
