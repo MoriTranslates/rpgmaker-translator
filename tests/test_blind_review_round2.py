@@ -75,6 +75,7 @@ def _node_value(js_line):
     "Don't",
 ])
 @pytest.mark.parametrize("quote", ["'", '"'])
+@pytest.mark.timeout(60)  # Node's first start on a fresh CI runner took >10 s
 def test_js_escape_always_parses(translation, quote):
     line = f"$gameMessage.add({quote}勇者{quote})"
     at = line.index("勇者")
@@ -82,6 +83,7 @@ def test_js_escape_always_parses(translation, quote):
     _node_value(js)
 
 
+@pytest.mark.timeout(60)  # starts Node, see above
 def test_js_escape_keeps_codes_in_js_form():
     line = "$gameMessage.add('勇者')"
     at = line.index("勇者")
