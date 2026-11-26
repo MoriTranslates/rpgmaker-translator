@@ -11,7 +11,8 @@ from dataclasses import dataclass
 import wordninja
 
 from . import CONTROL_CODE_RE, TYRANO_CODE_RE, JAPANESE_RE
-from .output_checks import VN_ENGINES, restore_speech_quotes
+from .output_checks import (VN_ENGINES, normalise_fullwidth,
+                            restore_speech_quotes, strip_prompt_leaks)
 
 # wordninja's frequency model: cost = log((rank + 1) * log(N)), so a word's
 # dictionary rank can be recovered from its cost.
@@ -51,6 +52,8 @@ class PostProcessResult:
     emb_spacing: int = 0
     dialogue_quotes: int = 0
     speech_quotes: int = 0
+    fullwidth_punct: int = 0
+    prompt_leaks: int = 0
     missing_spaces: int = 0
     restored_line_breaks: int = 0
     split_words: int = 0
@@ -111,6 +114,10 @@ class PostProcessResult:
             parts.append(f"{self.dialogue_quotes} dialogue quotes stripped")
         if self.speech_quotes:
             parts.append(f"{self.speech_quotes} dialogue quotes restored")
+        if self.fullwidth_punct:
+            parts.append(f"{self.fullwidth_punct} full-width punctuation fixed")
+        if self.prompt_leaks:
+            parts.append(f"{self.prompt_leaks} leaked prompt lines removed")
         if self.missing_spaces:
             parts.append(f"{self.missing_spaces} missing spaces fixed")
         if self.split_words:
@@ -437,6 +444,32 @@ def _fix_llm_refusal(entry, retranslate_ids: list) -> bool:
 
 # Characters that mark an original line as quoted speech / thought
 _DIALOGUE_OPENERS = ('「', '『', '"', '\u201c', '\u301d', '（', '(')
+
+
+def _fix_fullwidth(entry, target_language: str) -> bool:
+    """Full-width ！？。、「」 and spaces left in a Latin-script translation."""
+    fixed = normalise_fullwidth(entry.translation, target_language)
+    if fixed == entry.translation:
+        return False
+    entry.translation = fixed
+    return True
+
+
+def _fix_prompt_leak(entry, retranslate_ids: list) -> bool:
+    """Remove prompt lines the model copied ("Content type: dialogue line").
+
+    If nothing is left, the entry is cleared and queued for retranslation.
+    """
+    fixed = strip_prompt_leaks(entry.translation, entry.original or "")
+    if fixed == entry.translation:
+        return False
+    if fixed.strip():
+        entry.translation = fixed
+    else:
+        entry.translation = ""
+        entry.status = "untranslated"
+        retranslate_ids.append(entry.id)
+    return True
 
 
 def _fix_missing_speech_quotes(entry) -> bool:
@@ -1094,7 +1127,8 @@ def _fix_mid_sentence_caps(entry, known_names: set | None = None) -> bool:
 def run_post_processing(entries: list, verbose: bool = False,
                         glossary: dict | None = None,
                         project_type: str = "rpgmaker",
-                        fix_capitals: bool = False) -> PostProcessResult:
+                        fix_capitals: bool = False,
+                        target_language: str = "English") -> PostProcessResult:
     """Run all post-processing fixes on a list of TranslationEntry objects.
 
     Modifies entries in-place. Returns a summary of fixes applied.
@@ -1140,6 +1174,14 @@ def run_post_processing(entries: list, verbose: bool = False,
             entry_fixed = True
             fixed_ids.add(entry.id)
             continue  # Translation cleared, skip remaining fixes
+
+        # Tier 0: prompt text copied into the reply
+        if _fix_prompt_leak(entry, result.retranslate_ids):
+            result.prompt_leaks += 1
+            entry_fixed = True
+            fixed_ids.add(entry.id)
+            if not entry.translation:
+                continue  # cleared and queued for retranslation
 
         # Tier 0: Corrupt speaker names (must run first — poisons context)
         if _fix_corrupt_speaker(entry, result.retranslate_ids):
@@ -1191,6 +1233,10 @@ def run_post_processing(entries: list, verbose: bool = False,
 
         if _fix_wordwrap_tags(entry):
             result.wordwrap_tags += 1
+            entry_fixed = True
+
+        if _fix_fullwidth(entry, target_language):
+            result.fullwidth_punct += 1
             entry_fixed = True
 
         # After the <WordWrap> strip, so the quote lands on the text itself.

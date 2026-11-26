@@ -694,7 +694,8 @@ class TranslationWizard(QDialog):
             from ..post_processor import run_post_processing
             result = run_post_processing(self.mw.project.entries,
                                         glossary=self.mw.project.glossary,
-                                        project_type=self.mw._project_type)
+                                        project_type=self.mw._project_type,
+                                        target_language=self.mw.client.target_language)
             self.mw._autosave()
             parts = ["Retranslation complete"]
             if result.total_entries_fixed:
@@ -716,6 +717,7 @@ class TranslationWizard(QDialog):
         result = run_post_processing(self.mw.project.entries,
                                      glossary=self.mw.project.glossary,
                                      project_type=self.mw._project_type,
+                                     target_language=self.mw.client.target_language,
                                      fix_capitals=self.cb_fix_caps.isChecked())
 
         # Quote/contraction cleanup

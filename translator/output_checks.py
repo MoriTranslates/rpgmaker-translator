@@ -4,7 +4,11 @@ Small pure functions, no client state. Two kinds:
 
 Fixers (safe, deterministic repairs; ``clean_output`` runs them in order):
 - normalise_line_breaks: a bare carriage return (CR or CR LF) becomes "\\n".
+- strip_prompt_leaks: whole lines copied from our prompt ("Content type:
+  dialogue line", "Speaker: X is FEMALE...") are removed.
 - replace_jp_ellipsis: "……" (two or more U+2026) in an English reply becomes "...".
+- normalise_fullwidth: full-width punctuation/spaces (！？。、「」) in a
+  Latin-script reply become ASCII; ～ and ♡ stay; codes are never touched.
 - restore_name_case: glossary names (EN starts with a capital, JP is in the
   source, not a built-in default-glossary word) are written with the
   glossary's capitals; all-caps (shouting) is left alone.
@@ -38,7 +42,7 @@ the inside of a control code is never changed.
 import re
 import unicodedata
 
-from . import JAPANESE_RE
+from . import CONTROL_CODE_RE, JAPANESE_RE
 
 # ── Input ───────────────────────────────────────────────────────────
 
@@ -83,6 +87,126 @@ def replace_jp_ellipsis(output: str, target_language: str = "English") -> str:
     if target_language not in ("English", "Pig Latin"):
         return output
     return _JP_ELLIPSIS_RE.sub("...", output)
+
+
+# Full-width punctuation left in a Latin-script reply. ～ (wave dash) and ♡
+# are kept on purpose: English game text uses them too.
+_FULLWIDTH_MAP = {
+    0x3000: " ",            # ideographic space
+    0x3002: ".",            # 。
+    0x3001: ",",            # 、
+    0xFF61: ".",            # ｡ (half-width katakana full stop)
+    0xFF64: ",",            # ､
+    0x300C: '"', 0x300D: '"', 0x300E: '"', 0x300F: '"',   # 「」『』
+    0x3010: "[", 0x3011: "]",                             # 【】
+}
+# Full-width ASCII forms ！..｝ map to ASCII; ～ (U+FF5E) is not included.
+for _cp in range(0xFF01, 0xFF5E):
+    _FULLWIDTH_MAP[_cp] = chr(_cp - 0xFEE0)
+_FULLWIDTH_RE = re.compile("[" + "".join(re.escape(chr(c)) for c in _FULLWIDTH_MAP) + "]")
+_CJK_TARGETS = ("Chinese", "Japanese", "Korean")
+_NO_BRACKETS = str.maketrans({c: None for c in (0x300C, 0x300D, 0x300E, 0x300F)})
+
+
+def normalise_fullwidth(output: str, target_language: str = "English") -> str:
+    """Full-width punctuation and spaces in a Latin-script reply -> ASCII.
+
+    Game 2 had about 265 English lines with leftover ！？。、 or full-width
+    spaces. CJK target languages are left alone.
+    """
+    if not output or any(t in target_language for t in _CJK_TARGETS):
+        return output
+    if not _FULLWIDTH_RE.search(output):
+        return output
+    # Japanese left in the text means it isn't a Latin-script reply: a
+    # picture-choice file name (C_はい。|350|200) or an untranslated line.
+    # Changing it could break a file reference, so leave it whole.
+    # (JAPANESE_RE also counts 「」『』, which are exactly what we convert.)
+    if JAPANESE_RE.search(_PROTECTED_RE.sub("", output).translate(_NO_BRACKETS)):
+        return output
+    out = []
+    for piece, is_code in _split_codes(output):
+        out.append(piece if is_code else _convert_fullwidth(piece))
+    return "".join(out)
+
+
+def _convert_fullwidth(text: str) -> str:
+    """Convert one code-free piece; a space is added only after a converted
+    mark glued to a letter ("Yes、that" -> "Yes, that"), never elsewhere."""
+    out = []
+    n = len(text)
+    for i, ch in enumerate(text):
+        rep = _FULLWIDTH_MAP.get(ord(ch))
+        if rep is None:
+            out.append(ch)
+            continue
+        if rep == " " and out and out[-1] == " ":
+            continue          # "Yes!　" next to a real space: one space only
+        out.append(rep)
+        nxt = text[i + 1] if i + 1 < n else ""
+        if rep in ",.!?;:" and nxt.isascii() and nxt.isalpha():
+            out.append(" ")
+    return "".join(out)
+
+
+_PROTECTED_RE = re.compile(
+    r"«CODE\d+»|(?:" + CONTROL_CODE_RE.pattern + ")")
+
+
+def _split_codes(text: str) -> list[tuple[str, bool]]:
+    """[(piece, is_code)]: «CODEn» placeholders and real control codes are
+    kept whole so nothing inside a code is ever changed."""
+    parts, pos = [], 0
+    for m in _PROTECTED_RE.finditer(text):
+        if m.start() > pos:
+            parts.append((text[pos:m.start()], False))
+        if m.end() > m.start():
+            parts.append((m.group(0), True))
+        pos = m.end()
+    if pos < len(text):
+        parts.append((text[pos:], False))
+    return parts
+
+
+# Lines of our own prompt that a model sometimes copies into its reply
+# ("Content type: dialogue line" leaked into game 2). Whole lines only.
+_PROMPT_LEAK_LINE_RE = re.compile(
+    r"^[ \t]*(?:"
+    r"Content type:.*"
+    r"|Context \(surrounding dialogue.*"
+    r"|Speaker: .{1,60} is (?:FEMALE|MALE)\..*"
+    r"|Narration: this line is .*"
+    r"|Translation History.*"
+    r"|Translate this:\s*"
+    r"|(?:JP|EN):\s*$"
+    r")[ \t]*$",
+    re.MULTILINE)
+
+
+def strip_prompt_leaks(output: str, source: str = "") -> str:
+    """Remove whole lines copied from our prompt scaffolding.
+
+    A line is only removed when the source doesn't contain the same text, so
+    a game that really says "Content type:" keeps it. Blank lines left behind
+    at the start or end are trimmed; inner line structure is kept.
+    """
+    if not output or not _PROMPT_LEAK_LINE_RE.search(output):
+        return output
+    kept = []
+    for line in output.split("\n"):
+        if (_PROMPT_LEAK_LINE_RE.fullmatch(line)
+                and line.strip() not in (source or "")):
+            continue
+        kept.append(line)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    lead = 0
+    while lead < len(kept) and not kept[lead].strip():
+        lead += 1
+    # Keep blank lines the reply started with only if the source did too
+    if lead and not (source or "").startswith("\n"):
+        kept = kept[lead:]
+    return "\n".join(kept)
 
 
 def restore_name_case(output: str, source: str, glossary: dict | None) -> str:
@@ -245,7 +369,9 @@ def clean_output(source: str, output: str, *, glossary: dict | None = None,
     if not output:
         return output
     output = normalise_line_breaks(output)
+    output = strip_prompt_leaks(output, source)
     output = replace_jp_ellipsis(output, target_language)
+    output = normalise_fullwidth(output, target_language)
     output = restore_name_case(output, source, glossary)
     output = restore_speaker_label_case(output, source, field, glossary,
                                         actor_names, actor_names_en)

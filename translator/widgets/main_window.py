@@ -4052,7 +4052,8 @@ class MainWindow(QMainWindow):
         from ..post_processor import run_post_processing
         pp_result = run_post_processing(self.project.entries,
                                         glossary=self.project.glossary,
-                                        project_type=self._project_type)
+                                        project_type=self._project_type,
+                                        target_language=self.client.target_language)
 
         # Only a completed (not stopped) full batch — or the cleanup
         # retranslation it spawned — continues the pipeline.
@@ -5421,7 +5422,8 @@ class MainWindow(QMainWindow):
         # Run post-processor (word-per-line, placeholder leaks, spacing, etc.)
         result = run_post_processing(self.project.entries,
                                      glossary=self.project.glossary,
-                                     project_type=self._project_type)
+                                     project_type=self._project_type,
+                                     target_language=self.client.target_language)
 
         # Also run quote/contraction fixes
         quotes_fixed = 0
