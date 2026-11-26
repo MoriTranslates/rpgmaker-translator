@@ -282,6 +282,26 @@ def test_encrypted_round_trip_is_a_real_png(tmp_path):
 
 # ── Dialog ───────────────────────────────────────────────────────
 
+def run_to_end(qapp, dlg):
+    """Let every phase of a run finish and deliver its queued results.
+
+    A fast last worker can finish before the test looks, with its results
+    still queued: "no phases left, nothing running" isn't the end until
+    the events are processed once more (CI on Linux hit exactly that).
+    """
+    for _ in range(200):
+        if dlg._worker:
+            dlg._worker.wait(5000)
+        qapp.processEvents()
+        if not dlg._phases and not (dlg._worker and dlg._worker.isRunning()):
+            if dlg._worker:
+                dlg._worker.wait(5000)
+            qapp.processEvents()             # results the last worker queued
+            if not dlg._phases and not (dlg._worker and dlg._worker.isRunning()):
+                return
+    raise AssertionError("the run didn't finish")
+
+
 class _Client:
     def __init__(self):
         self.contexts = []
@@ -430,12 +450,7 @@ def test_dialog_read_and_translate_runs_ocr_then_translation(qapp, tmp_path,
     dlg = ButtonRedrawDialog(img_dir, KEY, _Client())
     try:
         dlg._run_all()
-        for _ in range(100):                 # until every phase has finished
-            if dlg._worker:
-                dlg._worker.wait(5000)
-            qapp.processEvents()
-            if not dlg._phases and not (dlg._worker and dlg._worker.isRunning()):
-                break
+        run_to_end(qapp, dlg)
         assert len(seen) == 4
         rows = {dlg.table.item(r, COL_FILE).text(): r for r in range(4)}
         assert dlg.table.item(rows[names[0]], COL_EN).text() == "Button zero"
@@ -645,12 +660,7 @@ def test_read_and_translate_runs_phases_and_shortens_only_long(qapp, tmp_path,
     dlg = ButtonRedrawDialog(img_dir, KEY, main)
     try:
         dlg._run_all()
-        for _ in range(100):
-            if dlg._worker:
-                dlg._worker.wait(5000)
-            qapp.processEvents()
-            if not dlg._phases and not dlg._worker.isRunning():
-                break
+        run_to_end(qapp, dlg)
         rows = {dlg.table.item(r, COL_FILE).text(): r for r in range(4)}
         assert dlg.table.item(rows[names[0]], COL_EN).text() == "Yes"     # fits: kept
         assert dlg.table.item(rows[names[1]], COL_EN).text() == "Keep helping me"
